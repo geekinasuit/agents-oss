@@ -9,8 +9,6 @@ more generally useful.
 
 - `agency/` — the agency framework (this repository's Bazel module is named `agency`).
 - `commons/` — shared ingredient libraries, usable independently of the framework.
-- `foo/` — a temporary probe package validating the module skeleton; removed when the
-  first real package lands.
 
 Status: early; APIs are unstable.
 
