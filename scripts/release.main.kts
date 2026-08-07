@@ -63,8 +63,19 @@ class Release : CliktCommand(name = "release") {
 
         // ---- repository facts (git clone or jj workspace) ----
         if (!File("MODULE.bazel").isFile) fail("run from the repository root (MODULE.bazel not found)")
-        val moduleName = Regex("""name\s*=\s*"([^"]+)"""").find(File("MODULE.bazel").readText())
+        // First name/version matches belong to the module() call, which precedes every
+        // bazel_dep in this file.
+        val moduleText = File("MODULE.bazel").readText()
+        val moduleName = Regex("""name\s*=\s*"([^"]+)"""").find(moduleText)
             ?.groupValues?.get(1) ?: fail("could not read module name from MODULE.bazel")
+        val moduleVersion = Regex("""version\s*=\s*"([^"]+)"""").find(moduleText)
+            ?.groupValues?.get(1) ?: fail("could not read module version from MODULE.bazel")
+        if (moduleVersion != version) {
+            fail(
+                "MODULE.bazel declares version $moduleVersion but this release is $tag" +
+                    " — reconcile before tagging (MODULE.bazel pre-declares the next release's version)"
+            )
+        }
 
         val isGit = File(".git").exists()
         val isJj = File(".jj").exists()
