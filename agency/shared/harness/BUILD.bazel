@@ -1,0 +1,65 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+# The agent-harness runtime.
+#
+# Factoring:
+#   HarnessStrategy.kt — neutral seam (interface + RunResult).
+#   Subprocess.kt      — hardened process runtime (tree-kill, daemon readers, timeout,
+#                        constructed env allowlist).
+#   ClaudeHarness.kt   — claude adapter: neutral execute() + the rich turn()/TurnResult
+#                        session mechanics.
+#   OpenAiCompatHarness.kt — one strategy over the OpenAI-compatible
+#                        /v1/chat/completions wire, provider selected by profile value
+#                        object. JDK HTTP client only — no extra Maven dependency.
+
+kt_jvm_library(
+    name = "harness",
+    srcs = [
+        "ClaudeHarness.kt",
+        "HarnessStrategy.kt",
+        "OpenAiCompatHarness.kt",
+        "Subprocess.kt",
+    ],
+    visibility = ["//visibility:public"],
+    deps = ["@maven//:org_json_json"],
+)
+
+kt_jvm_test(
+    name = "harness_test",
+    size = "small",
+    srcs = ["HarnessTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.harness.HarnessTest",
+    deps = [
+        ":harness",
+        "@maven//:junit_junit",
+        "@maven//:org_json_json",
+    ],
+)
+
+# A stand-in chat-completions endpoint (JDK com.sun.net.httpserver, ephemeral loopback
+# port). Shared with the lead's cognition tests so both layers exercise ONE model of
+# what an endpoint does, rather than two that can drift apart.
+kt_jvm_library(
+    name = "fake_openai_endpoint",
+    testonly = True,
+    srcs = ["FakeOpenAiEndpoint.kt"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":harness",
+        "@maven//:org_json_json",
+    ],
+)
+
+# Hermetic: profile validation plus the whole request/response path. No Ollama, no network.
+kt_jvm_test(
+    name = "openai_compat_harness_test",
+    size = "small",
+    srcs = ["OpenAiCompatHarnessTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.harness.OpenAiCompatHarnessTest",
+    deps = [
+        ":fake_openai_endpoint",
+        ":harness",
+        "@maven//:junit_junit",
+        "@maven//:org_json_json",
+    ],
+)

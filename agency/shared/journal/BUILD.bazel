@@ -1,0 +1,122 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+# The journal foundation.
+#
+# v3 envelope: salted payload-commitment from entry 1; chain-context anti-splice binding;
+# key-epoch-aware verification (epoch 0 = unsigned era; EntrySigner seam);
+# origin/provenance stamp (gate-release is a provenance check, not a kind check);
+# per-version hash preimages — the chain binds STORED forms, and stored forms are
+# versioned, so legacy (v1/v2) fixtures verify under the preimage they were written
+# with and upcast on read.
+#
+# Consumption contract (KDoc in Journal.kt/Fold.kt): single writer per component store;
+# an entry kind that carries state requires a schemaVersion bump (unknown kinds fold as
+# no-ops); truncation detection is the retained chain head's job (AGENCY-007 anchoring
+# hook), not standalone verification's.
+
+kt_jvm_library(
+    name = "journal",
+    srcs = [
+        "EffectReceiver.kt",
+        "Envelope.kt",
+        "Fold.kt",
+        "Journal.kt",
+        "SqliteStore.kt",
+        "Upcast.kt",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_library(
+    name = "fixture_lib",
+    srcs = ["Fixture.kt"],
+    # Public: the lead's fixture consumes this across the module boundary until the lead
+    # itself lives here (re-tighten to package visibility then). It reuses ArgMap rather
+    # than duplicating it.
+    visibility = ["//visibility:public"],
+    deps = [
+        ":journal",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+java_binary(
+    name = "journal_fixture",
+    main_class = "com.geekinasuit.agency.shared.journal.Fixture",
+    runtime_deps = [
+        ":fixture_lib",
+        # JDBC driver loads reflectively via DriverManager — runtime-only dep.
+        "@maven//:org_xerial_sqlite_jdbc",
+    ],
+)
+
+kt_jvm_test(
+    name = "envelope_test",
+    size = "small",
+    srcs = ["EnvelopeTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.journal.EnvelopeTest",
+    deps = [
+        ":journal",
+        "@maven//:junit_junit",
+    ],
+)
+
+kt_jvm_test(
+    name = "sqlite_store_test",
+    size = "small",
+    srcs = ["SqliteStoreTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.journal.SqliteStoreTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "verify_upcast_test",
+    size = "small",
+    srcs = ["VerifyUpcastTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.journal.VerifyUpcastTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "fold_test",
+    size = "small",
+    srcs = ["FoldTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.journal.FoldTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "scenario_test",
+    size = "small",
+    srcs = ["ScenarioTest.kt"],
+    data = [":journal_fixture"],
+    test_class = "com.geekinasuit.agency.shared.journal.ScenarioTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":journal",
+        "@maven//:junit_junit",
+    ],
+)
