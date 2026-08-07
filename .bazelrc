@@ -1,0 +1,10 @@
+# Pin the JVM to 21. The rules_kotlin/rules_java test launcher passes
+# -Djava.security.manager=allow, which JDK 24+ rejects at VM init (Security Manager
+# removed). JDK 21 still accepts it, and the pin keeps builds hermetic across hosts.
+common --java_runtime_version=21
+common --tool_java_runtime_version=21
+
+test --test_output=errors
+
+# Local, untracked developer configuration (e.g. module overrides). CI never has one.
+try-import %workspace%/user.bazelrc

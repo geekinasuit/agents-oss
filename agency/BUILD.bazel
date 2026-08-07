@@ -1,0 +1,2 @@
+# Root package of the agency framework. Framework packages are added beneath this
+# directory; this file pins //agency so wildcard queries resolve.

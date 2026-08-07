@@ -1,0 +1,3 @@
+# Shared ingredient libraries: general-purpose code usable independently of the agency
+# framework. Subpackages are added as libraries land; this file pins //commons so
+# wildcard queries resolve.
