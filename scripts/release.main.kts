@@ -44,7 +44,7 @@ fun exec(vararg cmd: String): String {
 
 data class RepoFacts(val dirty: Boolean, val head: String, val files: String, val remote: String)
 
-class Release : CliktCommand(name = "release.main.kts") {
+class Release : CliktCommand(name = "release") {
     override fun help(context: Context) =
         "Package the tracked fileset at HEAD as a source tarball and publish it as a GitHub release."
 
