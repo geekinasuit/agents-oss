@@ -1,0 +1,2 @@
+@@rules_jvm_external++maven+maven//:org_jetbrains_kotlinx_kotlinx_coroutines_core_jvm
+@@rules_jvm_external++maven+maven//:v1/https/repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-core-jvm/1.9.0/kotlinx-coroutines-core-jvm-1.9.0.jar

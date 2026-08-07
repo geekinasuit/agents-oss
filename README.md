@@ -21,6 +21,18 @@ recommended):
 bazel test //...
 ```
 
+The ACP pod adapter (`agency/pod/adapter`) pins an npm package by lockfile. Bootstrap it
+after cloning with:
+
+```
+npm --prefix agency/pod/adapter ci --ignore-scripts
+```
+
+`npm ci` only — never plain `npm install`, which may rewrite the lock. The lockfile IS
+the pin; upgrading it is a deliberate, reviewed act. `bazel test //...` does not need
+the install (the batteries drive a wire-faithful fake agent); it is required to run the
+real-adapter pod canary.
+
 Consume from another Bazel module with `bazel_dep(name = "agency", ...)` plus an
 `archive_override` on a release archive until the module is in a registry.
 

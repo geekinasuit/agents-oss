@@ -1,2 +1,7 @@
 bazel-*
 user.bazelrc
+
+# Node — the pinned pod adapter's install tree (agency/pod/adapter). Only package.json +
+# package-lock.json are tracked (the pin); the installed tree is materialized per-host via
+# `npm ci --ignore-scripts` and must never enter the repo.
+node_modules/
