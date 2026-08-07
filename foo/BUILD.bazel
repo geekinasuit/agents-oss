@@ -1,0 +1,21 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+# Probe package validating the module skeleton (toolchain, Maven deps, cross-module
+# consumption). Removed when the first real package lands.
+kt_jvm_library(
+    name = "foo",
+    srcs = ["Foo.kt"],
+    visibility = ["//visibility:public"],
+    deps = ["@maven//:org_json_json"],
+)
+
+kt_jvm_test(
+    name = "foo_test",
+    srcs = ["FooTest.kt"],
+    test_class = "com.geekinasuit.agency.foo.FooTest",
+    deps = [
+        ":foo",
+        "@maven//:junit_junit",
+        "@maven//:org_json_json",
+    ],
+)

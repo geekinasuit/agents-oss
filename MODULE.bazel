@@ -1,0 +1,24 @@
+module(
+    name = "agency",
+    version = "0.0.1",
+)
+
+bazel_dep(name = "rules_kotlin", version = "2.1.9")
+bazel_dep(name = "rules_jvm_external", version = "6.8")
+
+# JVM-17 Kotlin toolchain (rules_kotlin's default targets 1.8).
+register_toolchains("//bazel/kotlin:kotlin_toolchain")
+
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+maven.install(
+    name = "maven",
+    artifacts = [
+        "junit:junit:4.13.2",
+        "org.json:json:20240303",
+    ],
+    version_conflict_policy = "pinned",
+    repositories = [
+        "https://repo1.maven.org/maven2",
+    ],
+)
+use_repo(maven, "maven")

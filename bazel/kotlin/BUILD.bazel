@@ -1,0 +1,10 @@
+load("@rules_kotlin//kotlin:core.bzl", "define_kt_toolchain")
+
+# JVM-17 toolchain: rules_kotlin's default targets 1.8. api/language track the kotlinc
+# bundled by rules_kotlin 2.1.9 (2.1.21).
+define_kt_toolchain(
+    name = "kotlin_toolchain",
+    api_version = "2.1",
+    jvm_target = "17",
+    language_version = "2.1",
+)
