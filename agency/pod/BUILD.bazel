@@ -1,0 +1,251 @@
+load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+# The pod layer: pod descriptor + engine seam.
+#
+# This package sits BELOW the lead (the lead depends on it, never the reverse): the
+# descriptor is lead-owned DATA (substrate-constructed: cognition proposes a task,
+# never a descriptor), and the engine seam is where per-transport launchers land
+# (AcpPodEngine). The fail-closed fence lives here: an ACP profile with a
+# non-Claude provider throws at spawn, unconditionally (EgressEnforcement is
+# deliberately unconstructible until a real enforcement mechanism exists).
+
+kt_jvm_library(
+    name = "pod",
+    srcs = [
+        "ClaudeAdapterPin.kt",
+        "Digests.kt",
+        "PodEngine.kt",
+        "PodEvents.kt",
+        "PodSpec.kt",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+kt_jvm_test(
+    name = "pod_spec_test",
+    size = "small",
+    srcs = ["PodSpecTest.kt"],
+    test_class = "com.geekinasuit.agency.pod.PodSpecTest",
+    deps = [
+        ":pod",
+        "@maven//:junit_junit",
+    ],
+)
+
+# ---- ACP transport --------------------------------------------------------------------
+#
+# The client speaks the pinned acp-jvm SDK over an agent process's stdio and is the seam
+# where wire model types end and lead-owned types begin (PermissionAsk/TurnResult). The
+# SDK shares the module's single @maven universe, whose coroutines family is DELIBERATELY
+# pinned to the SDK's requirement (1.9.0) — AGENCY-027: a separate per-SDK maven install
+# would hold versions apart while duplicating the same classes under two label sets,
+# which co-link (duplicate classpath entries, split-brain statics) on the first target
+# that needs both acp and substrate deps — the pod engine does. One universe → one
+# resolution → exactly one coroutines family on any JVM-side classpath (the guard below
+# enforces it, standing — not a one-shot query).
+#
+# Scope honesty: a consumer that links this universe's classes alongside a second maven
+# universe of its own (e.g. a mobile app needing artifact variants this universe
+# excludes or lacks) re-creates the co-linking hazard — the same classes under two label
+# sets, where archive dedup order decides which bytes win. The discipline for that case
+# is same-version alignment of every shared family across the universes, which makes
+# the merge harmless by construction rather than pretending the split away.
+
+kt_jvm_library(
+    name = "acp_client",
+    srcs = ["AcpClient.kt"],
+    visibility = ["//visibility:public"],
+    # slf4j-api: runtime need of the SDK's kotlin-logging (not surfaced by its POM); no
+    # provider bound → SLF4J no-ops, SDK trace logging stays out of substrate output.
+    runtime_deps = ["@maven//:org_slf4j_slf4j_api"],
+    deps = [
+        "@maven//:com_agentclientprotocol_acp_jvm",
+        "@maven//:com_agentclientprotocol_acp_model_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_coroutines_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# The engine: process lifecycle + supervision above the client. This is a co-linking
+# target in AGENCY-027's sense — acp deps AND ordinary substrate libs
+# (//agency/shared/harness) on one classpath — which is why this package's deps
+# live in the single @maven universe rather than a per-SDK install.
+kt_jvm_library(
+    name = "acp_pod_engine",
+    srcs = [
+        "AcpPodEngine.kt",
+        "EngineProfile.kt",
+        "PermissionBridge.kt",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":acp_client",
+        ":pod",
+        "//agency/shared/harness",
+        "@maven//:com_agentclientprotocol_acp_model_jvm",
+    ],
+)
+
+# Wire-faithful fake agent: the SDK's own agent half driven by deterministic turn scripts
+# (honest + adversarial bypass/stall/crash/deep-tree profiles). testonly — it exists for
+# client/engine batteries and the engine's subprocess fixture, never for production wiring.
+#
+# FakeAcpAgentMain rides in the SAME library rather than a separate binary target: the
+# engine battery launches the agent as `java -cp <this test's own classpath>
+# FakeAcpAgentMain`, which needs the class on the test's runtime classpath and needs NO
+# launcher script (a pod runs with the workspace as cwd under a constructed env — the
+# bazel launcher script cannot locate its embedded JDK under those conditions).
+kt_jvm_library(
+    name = "fake_acp_agent",
+    testonly = True,
+    srcs = [
+        "FakeAcpAgent.kt",
+        "FakeAcpAgentMain.kt",
+    ],
+    visibility = ["//visibility:public"],
+    runtime_deps = ["@maven//:org_slf4j_slf4j_api"],
+    deps = [
+        "@maven//:com_agentclientprotocol_acp_jvm",
+        "@maven//:com_agentclientprotocol_acp_model_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_coroutines_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "acp_client_test",
+    size = "small",
+    srcs = ["AcpClientTest.kt"],
+    test_class = "com.geekinasuit.agency.pod.AcpClientTest",
+    deps = [
+        ":acp_client",
+        ":fake_acp_agent",
+        "@maven//:com_agentclientprotocol_acp_model_jvm",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "claude_adapter_profile_test",
+    size = "small",
+    srcs = ["ClaudeAdapterProfileTest.kt"],
+    test_class = "com.geekinasuit.agency.pod.ClaudeAdapterProfileTest",
+    deps = [
+        ":acp_pod_engine",
+        ":pod",
+        "@maven//:com_agentclientprotocol_acp_model_jvm",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# The bridge's fail-closed ask path (AGENCY-028): plain-class cells, no agent process —
+# the one layer where "which answer crossed the wire" and "was the decider consulted" are
+# directly observable (the engine battery's fixture completes its turns either way).
+kt_jvm_test(
+    name = "permission_bridge_test",
+    size = "small",
+    srcs = ["PermissionBridgeTest.kt"],
+    test_class = "com.geekinasuit.agency.pod.PermissionBridgeTest",
+    deps = [
+        ":acp_client",
+        ":acp_pod_engine",
+        ":pod",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The engine battery drives a REAL fake-agent process (data dep below): process-group kill,
+# crash/restart with backoff, the pod wall clock, and the artifact refusals all need a
+# killable OS child. medium size — the deadline/backoff cells wait on real clocks.
+kt_jvm_test(
+    name = "acp_pod_engine_test",
+    size = "medium",
+    srcs = ["AcpPodEngineTest.kt"],
+    test_class = "com.geekinasuit.agency.pod.AcpPodEngineTest",
+    deps = [
+        ":acp_client",
+        ":acp_pod_engine",
+        ":fake_acp_agent",
+        ":pod",
+        "@maven//:junit_junit",
+    ],
+)
+
+# ---- Scheduled real-adapter canary ---------------------------------------------------
+#
+# Validates the WIRE the deterministic battery cannot (testing honesty): pin coherence
+# (code const == package.json == lockfile == installed tree) plus the real adapter's
+# initialize handshake through the production ClaudeAdapterProfile. Runs post-merge on a
+# schedule — non-gating by placement, telemetry only.
+kt_jvm_library(
+    name = "pod_canary_lib",
+    srcs = ["PodCanary.kt"],
+    deps = [
+        ":acp_client",
+        ":acp_pod_engine",
+        ":pod",
+        "//agency/shared/harness",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+java_binary(
+    name = "pod_canary",
+    main_class = "com.geekinasuit.agency.pod.PodCanary",
+    runtime_deps = [":pod_canary_lib"],
+)
+
+# The canary's gate logic against the wire-faithful fake: the PASS path pins that the
+# pinned SDK negotiates the protocol version the code const claims, and the FAIL paths
+# prove version/protocol skew actually trips the gate (a canary that cannot fail is
+# telemetry-shaped noise). medium size — the live-lifecycle cell forks a real fake-agent
+# subprocess via FakeAgentLauncher and drives a real handshake, same as
+# acp_pod_engine_test.
+kt_jvm_test(
+    name = "pod_canary_core_test",
+    size = "medium",
+    srcs = ["PodCanaryCoreTest.kt"],
+    test_class = "com.geekinasuit.agency.pod.PodCanaryCoreTest",
+    deps = [
+        ":acp_client",
+        ":fake_acp_agent",
+        ":pod",
+        ":pod_canary_lib",
+        "@maven//:junit_junit",
+    ],
+)
+
+# AGENCY-027 standing guard: the single-family invariant, enforced rather than narrated
+# (the ticket's original defect was a rule that lived only in a comment). The genquery
+# pins the exact coroutines label set reachable from the CO-LINKING target — tool/implicit
+# edges excluded, since kotlinc's own bundled coroutines rides a toolchain edge and is not
+# target classpath material — and the diff_test fails CI the moment a second family appears
+# (a reintroduced second maven install, a new coroutines dep, or a version move: the
+# resolved jar's file label carries the version). Updating the .expected file is then a
+# REVIEWED act, exactly like the MODULE.bazel pin it mirrors. genquery emits CANONICAL
+# labels (@@rules_jvm_external++maven+maven//...), so the .expected also shifts on a
+# rules_jvm_external major move — likewise a reviewed act.
+#
+# Scoped to acp_pod_engine_test, NOT acp_client_test: the client test
+# reaches acp deps alone, while the ENGINE is the target that puts acp deps and ordinary
+# substrate libs (//agency/shared/harness) on one classpath — the exact co-linking case
+# AGENCY-027 exists for. Pointed at the client test, a second family arriving through the
+# harness would not move the query result and CI would stay green.
+genquery(
+    name = "acp_coroutines_deps",
+    expression = "filter(coroutines, deps(//agency/pod:acp_pod_engine_test))",
+    opts = [
+        "--notool_deps",
+        "--noimplicit_deps",
+    ],
+    scope = [":acp_pod_engine_test"],
+)
+
+diff_test(
+    name = "acp_single_coroutines_family_test",
+    file1 = ":acp_coroutines_deps",
+    file2 = "acp_coroutines_deps.expected",
+)

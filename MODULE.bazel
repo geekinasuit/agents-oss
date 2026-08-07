@@ -5,6 +5,7 @@ module(
     version = "0.0.3",
 )
 
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "rules_kotlin", version = "2.1.9")
 bazel_dep(name = "rules_jvm_external", version = "6.8")
 
@@ -22,6 +23,31 @@ maven.install(
         "org.jetbrains.kotlinx:kotlinx-serialization-core-jvm:1.8.1",
         "org.jetbrains.kotlinx:kotlinx-serialization-json-jvm:1.8.1",
         "org.xerial:sqlite-jdbc:3.46.1.3",
+        # ACP Kotlin SDK (the pod layer's transport, agency/pod). KMP publication note:
+        # the bare `acp` coordinate is a metadata stub (.knm, no classes); the -jvm
+        # artifact carries the real JVM jar and a clean all-jvm POM chain. Pre-1.0: pin
+        # exact, bump deliberately. acp-model-jvm rides in transitively at the same
+        # version (BUILD files reference its generated label directly).
+        # BUMP CONSTRAINTS: (a) acp-jvm is built with Kotlin 2.2, so this universe's
+        # kotlin-stdlib resolves 2.2.20 while the rules_kotlin toolchain compiles at
+        # 2.1.21 — the outer edge of kotlinc's read-one-minor-ahead metadata window; an
+        # acp release built with Kotlin 2.3 breaks every consumer until the toolchain
+        # moves. (b) acp's transitives (kotlin-logging, kotlinx-io, atomicfu, stdlib)
+        # are NOT pinned and float universe-wide — every acp bump therefore owes a
+        # resolved-coordinates diff (bazel query @maven//:all --output=build,
+        # coordinates extracted, before vs after), not just green tests.
+        "com.agentclientprotocol:acp-jvm:0.26.0",
+        # Coroutines: acp-jvm requires the 1.9.x family, and one universe must resolve
+        # exactly one family — the standing guard in agency/pod
+        # (acp_single_coroutines_family_test) pins the exact reachable label set
+        # (AGENCY-027 discipline).
+        "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0",
+        # slf4j-api: RUNTIME need of acp-jvm's kotlin-logging-jvm 7.x, whose POM does
+        # not surface it — without it StdioTransport's <clinit> dies
+        # (NoClassDefFoundError: org/slf4j/LoggerFactory). API-only on purpose: no
+        # provider bound, so SLF4J no-ops and SDK trace logging stays out of pod
+        # substrate output.
+        "org.slf4j:slf4j-api:2.0.16",
     ],
     version_conflict_policy = "pinned",
     repositories = [
