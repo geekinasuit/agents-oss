@@ -1,0 +1,251 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+# The lead daemon — a model-free durable substrate hosting an event-driven,
+# model-bearing cognition loop.
+#
+# Shape: state = leadFold(journal), never stored — two folds over one entry list
+# beside the shared JournalState. Cognition is a strategy the substrate consults
+# once per wake and journals with origin=cognition; the substrate is the sole writer and
+# sole actor, and nothing cognition outputs can release a gate — releases are honored by
+# provenance (auth layer) + digest binding in the folds. Between wakes the loop
+# blocks: idle is structural, zero model spend.
+#
+# Deliberate stubs, each replaced by later work: the AuthStub ceremony (a real
+# authorization surface), FakePodRunner (real launcher + resume re-attach), and the
+# mailbox surface.
+#
+# The pod descriptor + engine seam live in //agency/pod (the lead depends on it,
+# never the reverse); the daemon holds a required lead-owned PodSpec and
+# fence-checks it at the spawn site.
+#
+# The prompt/render/parse contract is CognitionProtocol.kt, shared by every
+# model-backed strategy so provider choice cannot change what counts as a decision.
+# CognitionSelection.kt is where a lead picks one, pairing each strategy with the
+# per-wake attempt cap that strategy is safe to run under.
+
+kt_jvm_library(
+    name = "lead",
+    srcs = [
+        "AuthStub.kt",
+        "ClaudeCognition.kt",
+        "Cognition.kt",
+        "CognitionProtocol.kt",
+        "CognitionSelection.kt",
+        "EnginePodRunner.kt",
+        "LeadDaemon.kt",
+        "LeadState.kt",
+        "OpenAiCompatCognition.kt",
+        "PodSeam.kt",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agency/pod",
+        "//agency/pod:acp_client",
+        "//agency/pod:acp_pod_engine",
+        "//agency/shared/harness",
+        "//agency/shared/journal",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+        "@maven//:org_json_json",
+    ],
+)
+
+kt_jvm_library(
+    name = "lead_fixture_lib",
+    srcs = ["LeadFixture.kt"],
+    deps = [
+        ":lead",
+        "//agency/pod",
+        "//agency/shared/journal",
+        "//agency/shared/journal:fixture_lib",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+java_binary(
+    name = "lead_fixture",
+    main_class = "com.geekinasuit.agency.lead.LeadFixture",
+    runtime_deps = [
+        ":lead_fixture_lib",
+        # JDBC driver loads reflectively via DriverManager — runtime-only dep.
+        "@maven//:org_xerial_sqlite_jdbc",
+    ],
+)
+
+kt_jvm_test(
+    name = "lead_fold_test",
+    size = "small",
+    srcs = ["LeadFoldTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.LeadFoldTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":lead",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "wake_loop_test",
+    size = "small",
+    srcs = ["WakeLoopTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.WakeLoopTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":lead",
+        "//agency/pod",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "guards_test",
+    size = "small",
+    srcs = ["GuardsTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.GuardsTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":lead",
+        "//agency/pod",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Runner-seam cells: transport dispatch + refusals, bind-once sink, AGENCY-028 health
+# drain (both counters). The exhaustion cell drives a real (garbage) subprocess through
+# the restart ladder and the bridge-drain cell a real fake-agent subprocess, so medium
+# like the engine battery.
+kt_jvm_test(
+    name = "engine_pod_runner_test",
+    size = "medium",
+    srcs = ["EnginePodRunnerTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.EnginePodRunnerTest",
+    deps = [
+        ":lead",
+        "//agency/pod",
+        "//agency/pod:acp_client",
+        "//agency/pod:acp_pod_engine",
+        "//agency/pod:fake_acp_agent",
+        "@maven//:junit_junit",
+    ],
+)
+
+kt_jvm_test(
+    name = "cognition_parsing_test",
+    size = "small",
+    srcs = ["CognitionParsingTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.CognitionParsingTest",
+    deps = [
+        ":lead",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Hermetic: the Ollama cognition strategy end to end against a loopback stand-in
+# endpoint — typed proposals out of a captured real reply, malformed classification, and
+# the transport-failure path. No Ollama required.
+kt_jvm_test(
+    name = "openai_compat_cognition_test",
+    size = "small",
+    srcs = ["OpenAiCompatCognitionTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.OpenAiCompatCognitionTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":lead",
+        "//agency/pod",
+        "//agency/shared/harness",
+        "//agency/shared/harness:fake_openai_endpoint",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_json_json",
+    ],
+)
+
+kt_jvm_test(
+    name = "lead_scenario_test",
+    size = "medium",
+    srcs = ["LeadScenarioTest.kt"],
+    data = [":lead_fixture"],
+    test_class = "com.geekinasuit.agency.lead.LeadScenarioTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":lead",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Env-gated STRUCTURAL smoke against the real pinned adapter: reject-all
+# decider, structure asserted (session, ≥1 routed ask, clean terminal), outcome recorded
+# to undeclared outputs. A HUMAN-answered full-task demo is a separate exit criterion,
+# deliberately not this cell. Gating env vars + invocation: see the test's KDoc.
+kt_jvm_test(
+    name = "real_adapter_smoke_test",
+    size = "large",
+    srcs = ["RealAdapterSmokeTest.kt"],
+    tags = [
+        "external",
+        "manual",
+    ],
+    test_class = "com.geekinasuit.agency.lead.RealAdapterSmokeTest",
+    deps = [
+        ":lead",
+        "//agency/pod",
+        "//agency/pod:acp_client",
+        "//agency/pod:acp_pod_engine",
+        "@maven//:junit_junit",
+    ],
+)
+
+kt_jvm_test(
+    name = "claude_cognition_smoke_test",
+    size = "medium",
+    srcs = ["ClaudeCognitionSmokeTest.kt"],
+    # Env-gated manual smoke (AGENCY_MODEL_TESTS=1 + claude on PATH): out of CI and out
+    # of wildcard builds; run explicitly when validating the model-backed path.
+    tags = [
+        "external",
+        "manual",
+    ],
+    test_class = "com.geekinasuit.agency.lead.ClaudeCognitionSmokeTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":lead",
+        "//agency/pod",
+        "//agency/shared/harness",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The model-backed cognition gate (WAKE + IDLE), run against a real local model.
+# LOCAL/MANUAL, not a CI gate: the CI runner's Ollama availability is not assumed, so
+# this is tagged out of CI and out of wildcard builds, and the CI floor for this path
+# stays the deterministic openai_compat_cognition_test. Gating env vars + invocation:
+# see the test's KDoc.
+kt_jvm_test(
+    name = "ollama_cognition_smoke_test",
+    size = "large",
+    srcs = ["OllamaCognitionSmokeTest.kt"],
+    tags = [
+        "external",
+        "manual",
+    ],
+    test_class = "com.geekinasuit.agency.lead.OllamaCognitionSmokeTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":lead",
+        "//agency/pod",
+        "//agency/shared/harness",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+    ],
+)
