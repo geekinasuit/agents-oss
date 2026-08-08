@@ -107,7 +107,7 @@ object PodCanary {
     val installed = jsonField(installedPkgJson) { it.jsonObject["version"]?.jsonPrimitive?.content }
     if (installed == null) {
       failures +=
-        "adapter not installed at $installedPkgJson — run `npm --prefix ${adapterDir.path} ci --ignore-scripts`"
+        "adapter not installed at $installedPkgJson — run `npm ci --ignore-scripts` in ${adapterDir.path}"
     } else if (installed != expectedVersion) {
       failures += "installed adapter is $pkg@$installed, code pins $expectedVersion"
     } else {

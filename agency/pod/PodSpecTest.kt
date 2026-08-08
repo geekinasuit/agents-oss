@@ -44,7 +44,8 @@ class PodSpecTest {
   @Test
   fun httpTransportIsNotFencedForAnyProvider() {
     // HTTP carries prompts to an endpoint the lead chose — not a tool-wielding agent
-    // process — so the ACP fence does not apply (the och/grok COGNITION channel).
+    // process — so the ACP fence does not apply (the OpenAiCompatHarness/grok
+    // COGNITION channel).
     spec(PodProvider.GROK, PodTransport.HTTP).requireSpawnable()
     spec(PodProvider.LOCAL, PodTransport.HTTP).requireSpawnable()
     spec(PodProvider.CLAUDE, PodTransport.HTTP).requireSpawnable()
