@@ -1,7 +1,7 @@
 {
   "name": "agency-pod-adapter",
   "private": true,
-  "description": "Pinned ACP adapter for the Claude pod: the EXACT adapter package version the lead launches, locked by package-lock.json. Install with `npm ci --ignore-scripts` (never plain `npm install`, which may rewrite the lock) — the lockfile IS the pin; upgrading it is a deliberate, reviewed act validated by the scheduled PodCanary.",
+  "description": "Pinned ACP adapter for the Claude pod: the EXACT adapter package version the lead launches, locked by package-lock.json. Install with `npm ci --ignore-scripts` (never plain `npm install`, which may rewrite the lock) — the lockfile IS the pin; upgrading it is a deliberate, reviewed act validated by the PodCanary.",
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.63.0"
   }

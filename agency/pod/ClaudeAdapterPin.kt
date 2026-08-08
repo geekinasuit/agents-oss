@@ -3,8 +3,9 @@ package com.geekinasuit.agency.pod
 /**
  * The pinned Claude ACP adapter package: the ONE place the code states
  * which adapter build the live Claude pod launches. Must match agency/pod/adapter's
- * package.json AND its lockfile — PodCanary cross-checks all three, so a drifted install
- * or a half-updated pin fails loudly instead of running skewed. Lives in the spec layer
+ * package.json AND its lockfile — PodCanary cross-checks those plus the installed
+ * package's own version, so a drifted install or a half-updated pin fails loudly
+ * instead of running skewed. Lives in the spec layer
  * (below the engine profiles) because the descriptor's pinnedVersion field carries it:
  * [PodSpec.claudeAdapter] stamps specs with it, [ClaudeAdapterProfile] launches by it.
  */
