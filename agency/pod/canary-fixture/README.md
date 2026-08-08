@@ -1,6 +1,6 @@
 # PodCanary cold-start seed
 
-The checked-in seed for the scheduled real-adapter canary's `CLAUDE_CONFIG_DIR`
+The checked-in seed for the real-adapter canary's `CLAUDE_CONFIG_DIR`
 (`agency/pod/PodCanary.kt`). Every canary run creates a FRESH temp config directory and
 copies this directory's files into it (this README excluded — it is the fixture's
 documentation, not seed data), then discards it with the run.

@@ -24,7 +24,7 @@ import org.junit.Test
  * Deterministic battery for [AcpClient] against [FakeAcpAgent]: both ends of
  * an in-process pipe run the pinned SDK's protocol machinery, so these cells exercise real
  * NDJSON wire framing — while honestly covering OUR HANDLING OF OUR MODEL of acp
- * (the wire itself is the scheduled canary's job).
+ * (the wire itself is the canary's job).
  *
  * The red paths pinned here are the protocol-level half of the client contract: rp →
  * approve/deny, the ask DEADLINE failing closed, a decider crash failing closed, an

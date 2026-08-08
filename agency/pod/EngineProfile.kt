@@ -73,7 +73,7 @@ interface EngineProfile {
  *    lockfile is the pin, upgrades are reviewed acts). The INNER Claude Code binary
  *    defaults to the SDK-bundled build; [claudeExecutable] pins it by path via
  *    CLAUDE_CODE_EXECUTABLE when the lead wants a specific one. The negotiated protocol
- *    version is pinned via [expectedProtocolVersion]; the scheduled PodCanary validates
+ *    version is pinned via [expectedProtocolVersion]; the PodCanary validates
  *    the whole pinned handshake post-merge.
  *  - LEAD-OWNED WORKSPACE-INDEPENDENT CONFIG:
  *    session/new `_meta.claudeCode.options` sets `settingSources: []` — NO user/project/

@@ -10,11 +10,12 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
- * The scheduled real-adapter canary (testing honesty): the
+ * The real-adapter canary (testing honesty): the
  * deterministic battery covers OUR MODEL of acp (FakeAcpAgent shares the SDK with the
  * client), so the WIRE itself — the pinned `@agentclientprotocol/claude-agent-acp` build
  * that production pods launch — is validated here, post-merge and NON-GATING, on a
- * schedule. What it validates:
+ * schedule owned by consuming-repository CI (this module's own CI schedules nothing).
+ * What it validates:
  *
  *  1. PIN COHERENCE: [ClaudeAdapterPin.VERSION] (the code const) == package.json ==
  *     package-lock.json == the INSTALLED package's own version — a drifted install or a

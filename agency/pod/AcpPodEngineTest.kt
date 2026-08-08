@@ -53,7 +53,7 @@ import org.junit.rules.Timeout
  *  - engine close reaps its executors (explicit shutdown).
  *
  * Testing honesty, restated: the fake is OURS, so these cells cover our engine's handling
- * of our model of an agent's behavior. The real adapter's wire is the scheduled canary's job.
+ * of our model of an agent's behavior. The real adapter's wire is the canary's job.
  */
 class AcpPodEngineTest {
 

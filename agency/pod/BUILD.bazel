@@ -174,12 +174,13 @@ kt_jvm_test(
     ],
 )
 
-# ---- Scheduled real-adapter canary ---------------------------------------------------
+# ---- Real-adapter canary (scheduled by consuming CI) ---------------------------------
 #
 # Validates the WIRE the deterministic battery cannot (testing honesty): pin coherence
 # (code const == package.json == lockfile == installed tree) plus the real adapter's
 # initialize handshake through the production ClaudeAdapterProfile. Runs post-merge on a
-# schedule — non-gating by placement, telemetry only.
+# schedule owned by consuming-repository CI (this module's own CI schedules nothing) —
+# non-gating by placement, telemetry only.
 kt_jvm_library(
     name = "pod_canary_lib",
     srcs = ["PodCanary.kt"],
