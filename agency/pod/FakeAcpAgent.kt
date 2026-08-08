@@ -137,8 +137,9 @@ enum class FakeArtifactAction {
    * PreToolUse hook) into the workspace, plus ordinary artifact bytes. The
    * property under test is that a RE-SPAWNED session is unaffected by them — the pod
    * cannot widen its own permissions through the configuration channel. Written with
-   * NEUTRAL names: the harness protects the real ones, and what matters is that the
-   * lead-owned config path is independent of anything IN the workspace. */
+   * NEUTRAL names — the fixture deliberately avoids real settings-shaped filenames —
+   * because what matters is that the lead-owned config path is independent of anything
+   * IN the workspace, not which filename the look-alike carries. */
   WRITE_CONFIG_LOOKALIKE,
 }
 

@@ -16,8 +16,8 @@ import org.junit.Test
  * against the adapter's seams — argv/env shape, the `_meta` options object
  * (settingSources: [] + workspace-independent config dir), the turn/spend bounds, the
  * phone-home denial riding BOTH channels, the protocol pin, and the cost extractor's
- * null-not-zero rules. These pin the CONSTRUCTION; the wire behavior is the
- * canary's and the env-gated smoke's job.
+ * null-not-zero rules. These pin the CONSTRUCTION; the wire behavior is the job
+ * of the canary and of agency/lead's env-gated RealAdapterSmokeTest.
  */
 class ClaudeAdapterProfileTest {
 

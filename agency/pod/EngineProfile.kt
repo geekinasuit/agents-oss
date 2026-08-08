@@ -93,7 +93,7 @@ interface EngineProfile {
  *
  * Auth is the MACHINE CREDENTIAL (the host's Claude login — macOS keychain), never an API
  * key in any env. Whether machine-credential auth composes with the relocated config dir
- * is answered by the env-gated smoke on a real host.
+ * is answered by the env-gated smoke (agency/lead's RealAdapterSmokeTest) on a real host.
  */
 class ClaudeAdapterProfile(
   /** The node runtime, ABSOLUTE (same rationale as [FixtureAgentProfile.command]: a pod's

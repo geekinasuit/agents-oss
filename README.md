@@ -22,11 +22,14 @@ bazel test //...
 ```
 
 The ACP pod adapter (`agency/pod/adapter`) pins an npm package by lockfile. Bootstrap it
-after cloning with:
+after cloning by running, in `agency/pod/adapter`:
 
 ```
-npm --prefix agency/pod/adapter ci --ignore-scripts
+npm ci --ignore-scripts
 ```
+
+(The in-directory form matches the canary's own remediation message and avoids npm's
+out-of-tree `--prefix` handling, which has proven environment-sensitive.)
 
 `npm ci` only — never plain `npm install`, which may rewrite the lock. The lockfile IS
 the pin; upgrading it is a deliberate, reviewed act. `bazel test //...` does not need
