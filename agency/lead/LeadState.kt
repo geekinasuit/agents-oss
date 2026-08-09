@@ -200,7 +200,11 @@ private const val ANOMALY_TAIL = 100
 /** The lead kinds only the substrate ever authors. Any of these
  * arriving with a non-substrate origin is never honored — see the foldOne provenance gate.
  * COGNITION_PROPOSED is excluded (legitimately cognition-origin); GATE_RELEASED is not a
- * lead kind — its auth-origin check lives in foldRelease. */
+ * lead kind — its auth-origin check lives in foldRelease. State-inert kinds
+ * (POD_EVENT — no fold arm consumes them) are still listed: "never honored" is vacuous
+ * for them, but a forged row must land in [LeadState.misOriginedEntries] rather than
+ * fold invisibly — the audit half of the origin gate applies to every substrate-only kind,
+ * not just the state-carrying ones. */
 private val SUBSTRATE_AUTHORED_KINDS =
   setOf(
     LeadKinds.RUN_STARTED,
@@ -217,6 +221,7 @@ private val SUBSTRATE_AUTHORED_KINDS =
     LeadKinds.POD_ABANDONED,
     LeadKinds.POD_SPAWN_INTENDED,
     LeadKinds.POD_SPAWN_ABANDONED,
+    LeadKinds.POD_EVENT,
     LeadKinds.COGNITION_MALFORMED,
   )
 
@@ -413,7 +418,10 @@ private fun foldOne(s0: LeadState, e: JournalEntry): LeadState {
           malformedCognition =
             (s.malformedCognition + (e.seq to p.str("reason"))).takeLast(ANOMALY_TAIL),
         )
-      else -> s // shared + unknown kinds: not this state machine's business (schema-version KDoc above)
+      // Shared + unknown kinds: not this state machine's business (schema-version KDoc
+      // above). Also the state-inert lead kinds (POD_EVENT): journaled audit rows the fold
+      // deliberately never consumes — their origin was already policed by the gate above.
+      else -> s
   }
 }
 

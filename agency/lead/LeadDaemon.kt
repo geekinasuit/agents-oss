@@ -670,9 +670,11 @@ class LeadDaemon(
     val lead = folded.lead
     val shared = folded.shared
 
-    // Claim an offered ticket when idle.
+    // Claim an offered ticket when idle. The done-filter repeats here even though the
+    // source receives the same set: the source is a seam an adopter implements, and a
+    // completed ticket must stay completed regardless of what any implementation re-offers.
     if (lead.currentTicket == null) {
-      val offered = ticketSource.next()
+      val offered = ticketSource.next(lead.doneTickets.toSet())
       if (offered != null && offered !in lead.doneTickets) {
         // The ticket ref is UNTRUSTED input: a fixture
         // line today, a real ticket-index row later. It flows into this ticket's plan:/execute:
@@ -1264,14 +1266,24 @@ class LeadDaemon(
 
 /** Ticket offer seam: a fixture file today; real ticket-index ops come later. */
 fun interface TicketSource {
-  /** The next ticket ref on offer, or null. Offering is idempotent — the daemon filters
-   * already-done refs and claims at most one at a time. */
-  fun next(): String?
+  /** The next ticket ref on offer that is not in [done], or null when the source is
+   * exhausted. [done] is the fold's completed-ticket set — passing it in keeps the source
+   * stateless and the offer replay-deterministic (same journal, same offer), and is what
+   * lets a multi-ticket source progress: without it, a source has no way to stop
+   * re-offering a completed ref. Progression covers refs that complete, deliberately: a
+   * ref the claim boundary rejects is escalated and never claimed, so it never enters
+   * [done] and stays the head offer — a malformed line parks the source visibly (one
+   * escalation per idle wake) until the operator fixes it, rather than being silently
+   * skipped. Offering is idempotent, and the source stays untrusted:
+   * the daemon still filters done refs and claims at most one at a time. */
+  fun next(done: Set<String>): String?
 }
 
 class FileTicketSource(private val file: File) : TicketSource {
-  override fun next(): String? =
-    if (file.exists()) file.readLines().firstOrNull { it.isNotBlank() }?.trim() else null
+  override fun next(done: Set<String>): String? =
+    if (file.exists()) {
+      file.readLines().map { it.trim() }.firstOrNull { it.isNotEmpty() && it !in done }
+    } else null
 }
 
 /** Timer seam: adopt re-arms pending timers through this; firing enqueues a wake. */
