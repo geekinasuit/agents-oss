@@ -425,6 +425,32 @@ class LeadFoldTest {
   }
 
   @Test
+  fun podEventForgedWithNonSubstrateOriginLandsInOriginAudit() {
+    val s = newStore()
+    // Positive control: the engine's own observation folds through audit-clean. Pod events
+    // are state-inert (no fold arm consumes them), so the origin gate's teeth here are
+    // purely the audit half.
+    s.append(
+      LeadKinds.POD_EVENT,
+      buildJsonObject { put("event", "permission-ask") },
+      ORIGIN_SUBSTRATE,
+    )
+    assertTrue(s.lead().misOriginedEntries.isEmpty())
+    // A pod event is OUR observation of an untrusted process — a cognition-origin one is a
+    // strategy narrating supervision it never performed. The row is inert in both cases;
+    // what the gate changes is visibility: the forgery lands in the audit rather than
+    // folding through as if the launcher had authored it.
+    s.append(
+      LeadKinds.POD_EVENT,
+      buildJsonObject { put("event", "restart-exhausted") },
+      ORIGIN_COGNITION,
+    )
+    val lead = s.lead()
+    assertEquals(LeadKinds.POD_EVENT, lead.misOriginedEntries.single().second)
+    s.close()
+  }
+
+  @Test
   fun ticketDoneClearsGateAndPodStateToPreventCrossTicketResidue() {
     val s = newStore()
     s.claim("t1")

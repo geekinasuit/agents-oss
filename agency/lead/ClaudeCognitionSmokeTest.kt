@@ -13,8 +13,25 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
 /**
- * Model-backed smoke — env-gated OUT of CI and
- * bazel-tagged manual: run with AGENCY_MODEL_TESTS=1 and a claude binary on PATH.
+ * Model-backed smoke — env-gated OUT of CI and bazel-tagged manual. Run it by hand on a
+ * host with a logged-in claude binary — session credential state under `$HOME`, because
+ * the constructed subprocess env never carries `ANTHROPIC_*`, so an exported API key
+ * cannot authenticate it (see `Subprocess.POD_ENV_ALLOWLIST`):
+ *
+ * ```
+ * bazel test //agency/lead:claude_cognition_smoke_test \
+ *   --test_env=AGENCY_MODEL_TESTS=1 \
+ *   --test_env=PATH \
+ *   --test_output=all --nocache_test_results
+ * ```
+ *
+ * Both `--test_env` forms are required, not decoration: bazel does not forward the client
+ * environment into the test JVM, so an exported AGENCY_MODEL_TESTS alone leaves the gate
+ * skipping while reporting PASSED — and the harness builds the claude subprocess's
+ * environment from the test JVM's own PATH (the cleanEnv allowlist), so without
+ * `--test_env=PATH` the run fails red on binary lookup under bazel's stripped action PATH
+ * instead of running.
+ *
  * Budget-capped, and the assertions are STRUCTURAL only — a wake consulted the
  * model, the decision was journaled with cognition provenance (sessionId + cost
  * attached), and nothing the model produced released a gate. Never prose.

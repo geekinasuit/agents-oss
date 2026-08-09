@@ -53,7 +53,12 @@ class WakeLoopTest {
     }
   }
 
-  private class Rig(dir: File, hold: Boolean = false, ticket: String? = "t1") {
+  private class Rig(
+    dir: File,
+    hold: Boolean = false,
+    ticket: String? = "t1",
+    source: TicketSource? = null,
+  ) {
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val effects = EffectReceiver(dir.absolutePath)
     val runner = FakePodRunner(holdCompletions = hold)
@@ -66,7 +71,7 @@ class WakeLoopTest {
         cognition = counting,
         podRunner = runner,
         podSpec = PodSpec.fixture(),
-        ticketSource = FileTicketSource(ticketFile),
+        ticketSource = source ?: FileTicketSource(ticketFile),
         workdir = dir,
         effects = effects,
         timers = { t, _ -> armed += t.id },
@@ -127,6 +132,73 @@ class WakeLoopTest {
     val f4 = rig.daemon.driveUntilQuiescent()
     assertEquals(TicketPhase.IDLE, f4.lead.phase)
     assertEquals(listOf("t1"), f4.lead.doneTickets)
+    rig.store.close()
+  }
+
+  @Test
+  fun multiTicketFileProgressesToNextTicketAfterDoneAndParksWhenExhausted() {
+    val dir = tmp.newFolder()
+    val rig = Rig(dir, ticket = "t1\nt2")
+
+    // Walk t1 through the full pipeline, checkpoint-style.
+    val f1 = rig.daemon.driveUntilQuiescent()
+    assertEquals("t1", f1.lead.currentTicket)
+    rig.daemon.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
+    val f2 = rig.daemon.driveUntilQuiescent()
+    AuthStub.appendRelease(rig.store, gateIdFor(GateKinds.COMMIT_APPROVAL, "t1"), f2.lead.commitManifestDigest!!)
+    val f3 = rig.daemon.driveUntilQuiescent()
+
+    // Positive control: t1 actually completed…
+    assertTrue(f3.lead.doneTickets.contains("t1"))
+    // …and the progression a first-line-forever source cannot make: with t1 done, the same
+    // file offers t2, and the drive that folded TICKET_DONE claims it in the same
+    // mechanical fixpoint and carries it to its plan gate.
+    assertEquals("t2", f3.lead.currentTicket)
+    assertEquals(TicketPhase.PLAN_GATED, f3.lead.phase)
+
+    // t2 walks to done through the same pipeline; the file is then exhausted, and the lead
+    // parks idle instead of re-claiming either completed ref.
+    rig.daemon.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t2"), f3.lead.planArtifactSha!!)
+    val f4 = rig.daemon.driveUntilQuiescent()
+    AuthStub.appendRelease(rig.store, gateIdFor(GateKinds.COMMIT_APPROVAL, "t2"), f4.lead.commitManifestDigest!!)
+    val f5 = rig.daemon.driveUntilQuiescent()
+    assertEquals(listOf("t1", "t2"), f5.lead.doneTickets)
+    assertEquals(TicketPhase.IDLE, f5.lead.phase)
+    assertEquals(1, rig.effects.lineCountFor("apply-commit:t1"))
+    assertEquals(1, rig.effects.lineCountFor("apply-commit:t2"))
+    rig.store.close()
+  }
+
+  @Test
+  fun sourceReOfferingADoneRefForeverNeverDrivesAReClaim() {
+    val dir = tmp.newFolder()
+    // The source is a seam an adopter implements, so the daemon's own done-filter — not
+    // the source's cooperation — is what keeps a completed ticket completed. This stub
+    // ignores its done argument and re-offers the same ref forever; FileTicketSource
+    // skips done refs itself, so only a source like this can observe the daemon-side
+    // filter.
+    val rig = Rig(dir, ticket = null, source = TicketSource { "t1" })
+
+    // Walk t1 through the full pipeline, checkpoint-style.
+    val f1 = rig.daemon.driveUntilQuiescent()
+    assertEquals("t1", f1.lead.currentTicket)
+    rig.daemon.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
+    val f2 = rig.daemon.driveUntilQuiescent()
+    AuthStub.appendRelease(rig.store, gateIdFor(GateKinds.COMMIT_APPROVAL, "t1"), f2.lead.commitManifestDigest!!)
+    val f3 = rig.daemon.driveUntilQuiescent()
+
+    // Positive control: t1 actually completed — and the drive that folded TICKET_DONE
+    // already faced the re-offer in its own fixpoint and refused it.
+    assertEquals(listOf("t1"), f3.lead.doneTickets)
+    assertEquals(TicketPhase.IDLE, f3.lead.phase)
+
+    // A further drive meets the same forever-offer: no re-claim — the done set is
+    // unchanged, no ticket is current, and the commit effect never fires a second time.
+    val f4 = rig.daemon.driveUntilQuiescent()
+    assertEquals(listOf("t1"), f4.lead.doneTickets)
+    assertEquals(TicketPhase.IDLE, f4.lead.phase)
+    assertEquals(null, f4.lead.currentTicket)
+    assertEquals(1, rig.effects.lineCountFor("apply-commit:t1"))
     rig.store.close()
   }
 
