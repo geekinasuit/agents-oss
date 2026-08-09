@@ -148,6 +148,13 @@ class LeadDaemon(
    * without adding information. */
   private val capRefusalsEscalated = mutableSetOf<String>()
 
+  /** taskRefs whose redundant-respawn refusal has already been escalated — the
+   * success-side sibling of [capRefusalsEscalated], same scope and same reasoning: the
+   * refusal itself replays on every proposing wake, deterministically from folded
+   * evidence alone; the row announcing that the strategy keeps re-proposing completed
+   * work is appended once per taskRef. Loop-thread only. */
+  private val redundantSpawnEscalated = mutableSetOf<String>()
+
   // ---- external input surface (safe from any thread) ----
 
   /**
@@ -933,6 +940,9 @@ class LeadDaemon(
    *    escalated visibly, never opened);
    *  - a task ref must be well-formed and its artifact path must resolve inside the
    *    lead's artifacts directory (no traversal via model-controlled names);
+   *  - a task whose evidence is already recorded is refused a fresh pod (re-proposing
+   *    completed work would otherwise buy one real pod per wake through the
+   *    wait-on-human gate phases);
    *  - duplicates WITHIN one output batch execute once (the snapshot guards alone cannot
    *    see intra-batch repeats).
    */
@@ -1011,6 +1021,38 @@ class LeadDaemon(
           }
           if (leadAtDecision.activePods.any { it.taskRef == p.taskRef }) continue
           if (!seenTaskRefs.add(p.taskRef)) continue
+          // Success-side twin of the failure cap below: a task whose EVIDENCE is already
+          // recorded gets no fresh pod. Successful completions never touch
+          // [failureAbandons] and clear the active-pod guard, and a completion is itself
+          // the next wake — so without this check a strategy re-proposing the same legal
+          // ref would buy one real pod (and its real model spend) per wake,
+          // self-sustaining through the wait-on-human gate phases, with nothing
+          // escalated. Refused on every wake, escalated once per taskRef per process
+          // (see [redundantSpawnEscalated]). No legitimate replan is refused here: no
+          // fold transition clears plan/manifest evidence within a ticket cycle
+          // (TICKET_DONE resets the whole cycle), so a replan mechanism, if one ever
+          // exists, must introduce a cleared-evidence transition — which re-legalizes
+          // the spawn here by itself.
+          // The namespace guard above admits exactly plan:/execute:, so the else branch
+          // IS execute:. Deliberately not an exhaustive `when` with `else -> null`: if
+          // the legal namespace is ever widened without this selector keeping pace, a
+          // new kind inherits the manifest-evidence refusal (escalated, visible) rather
+          // than skipping a spend guard silently — over-refusal is the recoverable
+          // failure direction here.
+          val recorded =
+            if (p.taskRef == "plan:$ticket") leadAtDecision.planArtifactSha
+            else leadAtDecision.commitManifestDigest
+          if (recorded != null) {
+            if (redundantSpawnEscalated.add(p.taskRef)) {
+              escalate(
+                "pod-spawn refused for taskRef '${p.taskRef.take(80)}': the evidence it " +
+                  "exists to produce is already recorded (${recorded.take(16)}) — completed " +
+                  "work is not re-run, and further redundant proposals are refused without " +
+                  "a repeat escalation"
+              )
+            }
+            continue
+          }
           // Lead-tier attempt cap (see [failureAbandons]): a taskRef that keeps producing
           // failure-abandons stops getting fresh pods — refused on every wake, escalated
           // once per taskRef (see [capRefusalsEscalated]) — so the pipeline wedges VISIBLY

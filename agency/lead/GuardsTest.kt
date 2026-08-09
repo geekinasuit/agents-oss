@@ -157,6 +157,90 @@ class GuardsTest {
   }
 
   @Test
+  fun redundantLegalRespawnAfterEvidenceIsRecordedIsRefusedAndEscalatedOnce() {
+    val dir = tmp.newFolder()
+    // The success-side livelock shape, which the intra-batch cell above cannot observe:
+    // wake 1 spawns a real (non-held) planner, and its completion IS wake 2 — where the
+    // plan sha is recorded and the active-pod guard has cleared. A strategy re-proposing
+    // the same legal ref there would buy one real pod per wake, self-sustaining through
+    // the wait-on-human gate phases; the evidence guard must refuse it, visibly.
+    val script =
+      mutableListOf(
+        CognitionOutput(listOf(Proposal.ProposePodSpawn("plan:t1")), "spawn the planner"),
+        CognitionOutput(
+          listOf(Proposal.ProposePodSpawn("plan:t1")),
+          "buggy/hostile: re-run the planner whose plan is already recorded",
+        ),
+      )
+    val rig = Rig(dir, script, hold = false)
+    val folded = rig.daemon.driveUntilQuiescent()
+    assertTrue(
+      "positive control: the first spawn was legal and its evidence was recorded",
+      folded.lead.planArtifactSha != null,
+    )
+    assertEquals(1, rig.runner.spawnedTaskRefs.count { it == "plan:t1" })
+    assertTrue(folded.lead.escalations.any { it.contains("already recorded") })
+
+    // A later wake re-proposing AGAIN is still refused, but the escalation is not
+    // repeated: the refusal replays deterministically from folded evidence, and the row
+    // announcing the misbehaving strategy is appended once per taskRef per process.
+    script +=
+      CognitionOutput(
+        listOf(Proposal.ProposePodSpawn("plan:t1")),
+        "buggy/hostile: still re-proposing the completed planner",
+      )
+    val again = rig.daemon.driveUntilQuiescent()
+    assertTrue("the further re-proposal was actually consumed", script.isEmpty())
+    assertEquals(1, rig.runner.spawnedTaskRefs.count { it == "plan:t1" })
+    assertEquals(1, again.lead.escalations.count { it.contains("already recorded") })
+    rig.store.close()
+  }
+
+  @Test
+  fun redundantExecuteRespawnAfterManifestIsRecordedIsRefused() {
+    val dir = tmp.newFolder()
+    // Walk the honest pipeline to a recorded commit manifest — the phase where the plan
+    // gate is RELEASED, so the execute-ordering guard alone no longer blocks an execute
+    // spawn — then hand the same journal to a daemon whose cognition re-proposes the
+    // executor. The manifest evidence must refuse it: no pod, escalated.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    fun daemon(cognition: CognitionStrategy, runner: PodRunner) =
+      LeadDaemon(
+        store = store,
+        cognition = cognition,
+        podRunner = runner,
+        podSpec = PodSpec.fixture(),
+        ticketSource = FileTicketSource(File(dir, "ticket.txt")),
+        workdir = dir,
+        effects = EffectReceiver(dir.absolutePath),
+      )
+    val honest = daemon(ScriptedCognition(), FakePodRunner())
+    val f1 = honest.driveUntilQuiescent() // planner ran, plan gate open
+    honest.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
+    val f2 = honest.driveUntilQuiescent() // executor ran, manifest recorded, commit gate open
+    assertTrue("positive control: the manifest is recorded", f2.lead.commitManifestDigest != null)
+
+    val hostileRunner = FakePodRunner()
+    val hostile =
+      daemon(
+        ProgrammedCognition(
+          mutableListOf(
+            CognitionOutput(
+              listOf(Proposal.ProposePodSpawn("execute:t1")),
+              "buggy/hostile: re-run the executor whose manifest is already recorded",
+            )
+          )
+        ),
+        hostileRunner,
+      )
+    val f3 = hostile.driveUntilQuiescent()
+    assertTrue("nothing launched", hostileRunner.spawnedTaskRefs.isEmpty())
+    assertTrue(f3.lead.escalations.any { it.contains("already recorded") })
+    store.close()
+  }
+
+  @Test
   fun podSelfReportingAWrongDigestIsCrossCheckedAndTheRecomputedDigestBinds() {
     val dir = tmp.newFolder()
     // A lying pod: real snapshot bytes, but a self-reported digest that doesn't match
