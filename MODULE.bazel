@@ -48,6 +48,37 @@ maven.install(
         # provider bound, so SLF4J no-ops and SDK trace logging stays out of pod
         # substrate output.
         "org.slf4j:slf4j-api:2.0.16",
+        # libsecp256k1 bindings: BIP-340 schnorr sign/verify and ECDH, the primitives the
+        # authorization layer's signed-event surface is built from. Apache-2.0.
+        #
+        # WHY THIS AND NOT A NOSTR LIBRARY: the one mature Kotlin nostr library on Maven
+        # (com.vitorpamplona.quartz:quartz-jvm) declares kotlin-stdlib 2.4.10 — two minors
+        # past even the outer edge of the read-one-minor-ahead window described above — and
+        # pulls androidx, a Compose runtime artifact, a second JSON stack, and coroutines
+        # and serialization versions that collide with the pins above. So the event codec
+        # is ours and thin, over these primitives. Re-evaluate quartz only if the toolchain
+        # moves far enough to read its metadata.
+        #
+        # BUMP CONSTRAINT: 0.19.0 declares kotlin-stdlib 2.1.21, an exact match to the
+        # toolchain, so its metadata needs no forward-read at all. 0.20.0 through 0.22.0
+        # declare 2.2.x and would sit at the same outer edge acp-jvm already occupies;
+        # 0.23.0 declares 2.3.10 and is outside the window. Nothing we need arrived after
+        # 0.19.0, so the exact-match release is the pin rather than the newest readable one.
+        "fr.acinq.secp256k1:secp256k1-kmp-jvm:0.19.0",
+        # The natives. -jni-jvm is an aggregate whose POM pulls all three platform jars
+        # (darwin, linux, mingw ~ 6.2 MB total), and the loader picks the matching library
+        # off the classpath at runtime — so ONE coordinate covers every platform and no
+        # per-platform select() is needed.
+        #
+        # NOT -jni-jvm-extract, which is the loader ONLY and ships no libraries: pinning it
+        # alone resolves and compiles cleanly and then fails at first use with "No native
+        # library found: /fr/acinq/secp256k1/jni/native/darwin/libsecp256k1-jni.dylib". That
+        # failure mode — green resolution, green compile, dead at runtime — is why the probe
+        # in agency/crypto runs the primitives rather than only building against them.
+        #
+        # This is the module's only JNI dependency; see agency/crypto/BUILD.bazel for what it
+        # costs an adopter and what the pure-JVM exit would be.
+        "fr.acinq.secp256k1:secp256k1-kmp-jni-jvm:0.19.0",
     ],
     version_conflict_policy = "pinned",
     repositories = [

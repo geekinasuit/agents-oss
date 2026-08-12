@@ -1,0 +1,76 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+# Step-0 crypto probe for the authorization layer: does this platform, this toolchain, and
+# this dependency actually produce the bytes BIP-340 and NIP-44 define?
+#
+# TEST TARGETS ONLY, ON PURPOSE. There is no library here to depend on, because the point of
+# a probe is to answer a question before anything is built on the answer. What the
+# authorization layer eventually ships — event codec, signer seam, evidence records — is a
+# separate deliverable that will live beside this and can delete it.
+#
+# THIS DIRECTORY IS WHERE THE MODULE'S ONLY JNI DEPENDENCY IS EXERCISED, and that is worth
+# saying plainly in a public module. libsecp256k1 is a C library; the aggregate `-jni-jvm`
+# coordinate pulls three platform jars (darwin, linux, mingw) plus the `-jni-jvm-extract`
+# loader, which picks the matching library off the classpath at runtime — one COORDINATE
+# instead of a per-platform select(), though an adopter on a platform none of those cover
+# gets a runtime load failure rather than a resolution error. If that ever bites, the exit is
+# a pure-JVM BIP-340 implementation (Bouncy Castle has one) behind the same seam — which
+# stays cheap precisely because the borrowed surface is small: one point multiplication, per
+# Nip44Reference.
+#
+# WHY NOT A KOTLIN NOSTR LIBRARY: see the MODULE.bazel comment on the secp256k1 pin. The short
+# version is a metadata-window collision this toolchain cannot read past.
+
+kt_jvm_library(
+    name = "probe_support",
+    testonly = True,
+    srcs = [
+        "Nip44Reference.kt",
+        "ProbeVectors.kt",
+    ],
+    # The natives ride the consuming test targets as runtime_deps, not this library: a target
+    # that uses :probe_support must carry @maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm
+    # itself, or it will compile green and die at first use — the failure shape described on
+    # the MODULE.bazel pin. Per-consumer placement is what lets a consumer choose its binding
+    # (e.g. a pure-JVM one) without dragging the JNI jars along.
+    deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jvm"],
+)
+
+# Hermetic: published vectors from testdata/, no network, no relay, no keys of ours.
+#
+# associates= rather than deps= on :probe_support — the support code is `internal`, and
+# Kotlin scopes `internal` to a compilation module, which in Bazel is one target. associates
+# compiles the test as a friend of that module so `internal` resolves, and it carries the
+# dependency too, so :probe_support does not also belong in deps. The alternative would be to
+# widen the support API to public, which would advertise a test-scope reference
+# implementation as if it were something to build on.
+kt_jvm_test(
+    name = "bip340_vector_test",
+    size = "small",
+    srcs = ["Bip340VectorTest.kt"],
+    associates = [":probe_support"],
+    data = ["testdata/bip340-test-vectors.csv"],
+    test_class = "com.geekinasuit.agency.crypto.Bip340VectorTest",
+    # The natives load reflectively from the classpath — runtime-only, like the sqlite JDBC
+    # driver in agency/shared/journal.
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jvm",
+        "@maven//:junit_junit",
+    ],
+)
+
+kt_jvm_test(
+    name = "nip44_vector_test",
+    size = "small",
+    srcs = ["Nip44VectorTest.kt"],
+    associates = [":probe_support"],
+    data = ["testdata/nip44.vectors.json"],
+    test_class = "com.geekinasuit.agency.crypto.Nip44VectorTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jvm",
+        "@maven//:junit_junit",
+        "@maven//:org_json_json",
+    ],
+)
