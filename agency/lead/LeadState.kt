@@ -24,12 +24,26 @@ import kotlinx.serialization.json.jsonPrimitive
  * reader. A first cross-component reader would trigger its own contract review.
  *
  * GATE RELEASES are not a lead kind: the lead REUSES the shared [KIND_GATE_RELEASED] and
- * honors a release only when BOTH provenance and binding hold — origin must be the
- * authorization layer (the shared fold's rule, re-asserted here) AND the release's digest
- * must match the opened gate's payload digest. An authorization-origin release whose
- * digest does not match the gate as opened is retained VISIBLY in
- * [LeadState.staleReleases] and the gate stays pending — never silently dropped, never
- * honored (a release binds to the exact artifact the approver saw).
+ * honors a release only when provenance, binding, AND nonce discipline all hold — origin
+ * must be the authorization layer (the shared fold's rule, re-asserted here), the
+ * release's digest must match the opened gate's payload digest, and the single-use nonce
+ * rules in [foldRelease] must pass. An authorization-origin release that fails binding or
+ * nonce discipline is retained VISIBLY in [LeadState.staleReleases] and the gate stays
+ * pending — never silently dropped, never honored (a release binds to the exact artifact
+ * the approver saw, once).
+ *
+ * The nonce/approval kinds ([LeadKinds.NONCE_ISSUED], [LeadKinds.NONCE_CONSUMED],
+ * [LeadKinds.APPROVAL_RECORDED]) extend this chain's vocabulary under the same
+ * schema-version reasoning as the original kinds: the lead chain's one reader is the lead
+ * fold, which consumes them; the shared fold remains a different state machine that
+ * deliberately does not. A lead binary predating these kinds folds them away and derives
+ * a state without nonce views — and that binary UNDER-ENFORCES: fold a journal in which a
+ * nonce was minted, consumed by a release, and the release replayed, and the old binary
+ * honors the replay this fold refuses (gate and digest still match; nothing else is
+ * checked). Its own semantics are unchanged, but it reaches a different verdict on the
+ * same journal, so a rollback across this commit reopens the replay window once nonces
+ * are being minted (step 2+) — it does not merely lose a view. The tightened release rule
+ * exists only in binaries that also know the kinds.
  */
 object LeadKinds {
   const val RUN_STARTED = "run-started"
@@ -90,6 +104,41 @@ object LeadKinds {
    * legitimately asks for. The turn still COST money, so the fold accrues its spend.
    */
   const val COGNITION_MALFORMED = "cognition-malformed"
+
+  /**
+   * A gate-scoped, single-use nonce the substrate minted and journaled (payload: nonce,
+   * gateId, payloadDigest). SUBSTRATE-issued is load-bearing: if the approval surface
+   * minted nonces it would be the sole source of both the pending-gate list AND the nonce
+   * authorizing against it, and mechanical re-verification would degrade to checking one
+   * client's two assertions against each other. The nonce is what makes an approval mean
+   * "once, now, for this gate" — a signature alone proves only "this key said this", and
+   * an approval, once carried outside, can be replayed indefinitely.
+   */
+  const val NONCE_ISSUED = "nonce-issued"
+
+  /**
+   * A nonce explicitly retired (payload: nonce, reason) without — or in addition to — a
+   * release consuming it: voided when its gate re-opens on a new digest, expired, or
+   * recorded as bookkeeping after a release (the fold already derives that consumption, so
+   * the bookkeeping form folds as a no-op). Journal-derived spent-ness is the point:
+   * rejecting a replay after a restart falls out of re-folding, not out of any in-memory
+   * table.
+   */
+  const val NONCE_CONSUMED = "nonce-consumed"
+
+  /**
+   * A signature-verified approval the authorization layer accepted and journaled (payload:
+   * gateId, principalId, nonce, payloadDigest, evidence{schemeId, publicKey, signature,
+   * carrierArtifactId}). AUTH-LAYER-authored — the one lead kind besides the release itself that is:
+   * approvals accumulate toward a quorum, so an approval-shaped entry from cognition or a
+   * pod stuffing the count is the same threat as a forged release, and gets the same
+   * treatment (never honored, retained visibly in [LeadState.misOriginedEntries]).
+   * Accumulation is durable so a k-of-n quorum can fill across restarts; the fold retains
+   * each approval's binding (nonce + digest) so an approval bound to a superseded digest
+   * can never satisfy the re-opened gate. The evidence sub-object is journal-resident
+   * audit — the fold does not consume it.
+   */
+  const val APPROVAL_RECORDED = "approval-recorded"
 }
 
 /** Gate kinds the ticket pipeline opens. */
@@ -119,6 +168,27 @@ data class OpenGate(
   val gateKind: String,
   val payloadDigest: String,
   val openedSeq: Long,
+)
+
+/** A substrate-issued nonce as journaled: bound at issue time to one gate AND the digest
+ * that gate was open on. The digest binding is what voids an authorization on payload
+ * change — a gate re-opened on a new digest leaves old nonces pointing at a digest the
+ * gate no longer has. */
+data class IssuedNonce(
+  val nonce: String,
+  val gateId: String,
+  val payloadDigest: String,
+  val issuedSeq: Long,
+)
+
+/** One accepted approval as journaled, with the binding it committed to retained —
+ * consumers filter on (nonce, payloadDigest) against the gate's CURRENT state, so a
+ * stale-bound approval is inert rather than silently counted. */
+data class RecordedApproval(
+  val principalId: String,
+  val nonce: String,
+  val payloadDigest: String,
+  val seq: Long,
 )
 
 data class PodRecord(
@@ -152,7 +222,19 @@ data class LeadState(
   val commitManifestDigest: String? = null,
   val openGates: Map<String, OpenGate> = emptyMap(),
   val releasedGates: Set<String> = emptySet(),
-  val staleReleases: List<Pair<Long, String>> = emptyList(), // (seq, gateId) — auth origin, digest mismatch or unknown gate
+  /** Gates released by the nonce-less pre-ceremony path — the disposition marker that
+   * keeps "was this release under the ceremony?" answerable from derived state, matching
+   * how every other classification this fold makes stays legible after the fact. */
+  val nonceLessReleases: Set<String> = emptySet(),
+  val staleReleases: List<Pair<Long, String>> = emptyList(), // (seq, gateId) — auth origin, but digest mismatch, unknown gate, or nonce indiscipline (consumed/unknown/misbound/absent-where-required)
+  /** Every nonce issued this ticket, by value — consumed ones stay listed ([consumedNonces]
+   * marks them) so a re-issue of a spent value is detectable as the anomaly it is. */
+  val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
+  val consumedNonces: Set<String> = emptySet(),
+  /** gateId → accepted approvals with their bindings. Auth-layer-authored entries only;
+   * dedup at fold is by (principal, nonce, digest), so re-delivery of the same approval is
+   * idempotent while a re-approval under a fresh nonce accumulates. */
+  val approvals: Map<String, List<RecordedApproval>> = emptyMap(),
   val pods: Map<String, PodRecord> = emptyMap(),
   val pendingSpawnIntents: Map<String, Long> = emptyMap(), // taskRef → intent seq: spawn journaled, POD_SPAWNED not yet
   val misOriginedEntries: List<Pair<Long, String>> = emptyList(), // (seq, kind): substrate-authored kind with a non-substrate origin — never honored
@@ -174,6 +256,33 @@ data class LeadState(
 
   fun gate(gateKind: String): OpenGate? = openGates.values.firstOrNull { it.gateKind == gateKind }
 
+  /** The gate's currently-usable nonce: issued for THIS gate, bound to the digest the
+   * gate is CURRENTLY open on, and not consumed — the same clauses [foldRelease] honors,
+   * so a nonce returned here is releasable as it stands (the digest filter matches
+   * [boundApprovers]', for the same reason: a nonce bound to a superseded digest can only
+   * fold stale, and handing it to a notifier would be a silent liveness failure). Latest
+   * by issue order if several are open (the release names its nonce explicitly, so
+   * "latest" is a convenience for issuers, not an ambiguity at verification). */
+  fun openNonceFor(gate: OpenGate): IssuedNonce? =
+    issuedNonces.values
+      .filter {
+        it.gateId == gate.gateId &&
+          it.payloadDigest == gate.payloadDigest &&
+          it.nonce !in consumedNonces
+      }
+      .maxByOrNull { it.issuedSeq }
+
+  /** Principals whose recorded approval binds the gate AS IT STANDS — same digest the gate
+   * is open on, same [nonce] — the set a quorum predicate is evaluated over. Approvals
+   * bound to a superseded digest or a different nonce are present in [approvals] but
+   * excluded here. */
+  fun boundApprovers(gate: OpenGate, nonce: String): Set<String> =
+    approvals[gate.gateId]
+      .orEmpty()
+      .filter { it.nonce == nonce && it.payloadDigest == gate.payloadDigest }
+      .map { it.principalId }
+      .toSet()
+
   /**
    * The latest NON-abandoned pod for a task ref, or null. Abandoned pods are excluded
    * deliberately: an abandoned pod is no longer evidence — its
@@ -194,7 +303,16 @@ data class LeadState(
 /** Bounded-view cap for cognition-controllable / anomaly lists: the
  * journal remains the complete record; these FOLD VIEWS keep only a tail so a hostile or
  * buggy strategy cannot grow re-fold memory without bound. Higher than [statusTail]'s 20 —
- * these carry security-relevant tails (escalations, stale releases, mis-origined entries). */
+ * these carry security-relevant tails (escalations, stale releases, mis-origined entries).
+ *
+ * The nonce/approval records ([LeadState.issuedNonces], [LeadState.consumedNonces],
+ * [LeadState.approvals], [LeadState.nonceLessReleases]) sit DELIBERATELY outside this
+ * cap: they are correctness-bearing records, not views. Evicting a consumed nonce
+ * re-enables the replay it exists to reject; evicting an issued nonce or a recorded
+ * approval silently voids a live authorization. Their bound is the ticket, not a tail —
+ * TICKET_DONE clears them — and their kinds are origin-gated, so only the substrate and
+ * the authorization layer can grow them: a party positioned to flood them could already
+ * write worse. */
 private const val ANOMALY_TAIL = 100
 
 /** The lead kinds only the substrate ever authors. Any of these
@@ -223,6 +341,8 @@ private val SUBSTRATE_AUTHORED_KINDS =
     LeadKinds.POD_SPAWN_ABANDONED,
     LeadKinds.POD_EVENT,
     LeadKinds.COGNITION_MALFORMED,
+    LeadKinds.NONCE_ISSUED,
+    LeadKinds.NONCE_CONSUMED,
   )
 
 /** A fold failure with its position identified — a malformed payload on a known kind
@@ -257,6 +377,14 @@ private fun foldOne(s0: LeadState, e: JournalEntry): LeadState {
   // handled by foldRelease; COGNITION_PROPOSED is legitimately cognition-origin.) Checked
   // before the payload parse, so a forged entry with a garbage payload is recorded, not thrown.
   if (e.kind in SUBSTRATE_AUTHORED_KINDS && e.origin != ORIGIN_SUBSTRATE) {
+    return s.copy(
+      misOriginedEntries = (s.misOriginedEntries + (e.seq to e.kind)).takeLast(ANOMALY_TAIL)
+    )
+  }
+  // Same teeth, different sole author: an approval accumulates toward quorum, so its one
+  // legitimate origin is the authorization layer — approval-shaped entries from anywhere
+  // else (cognition, a pod, an import) are quorum-stuffing and land visibly, never counted.
+  if (e.kind == LeadKinds.APPROVAL_RECORDED && e.origin != ORIGIN_AUTH_LAYER) {
     return s.copy(
       misOriginedEntries = (s.misOriginedEntries + (e.seq to e.kind)).takeLast(ANOMALY_TAIL)
     )
@@ -299,7 +427,11 @@ private fun foldOne(s0: LeadState, e: JournalEntry): LeadState {
           commitManifestDigest = null,
           openGates = emptyMap(),
           releasedGates = emptySet(),
+          nonceLessReleases = emptySet(),
           staleReleases = emptyList(),
+          issuedNonces = emptyMap(),
+          consumedNonces = emptySet(),
+          approvals = emptyMap(),
           pods = emptyMap(),
           pendingSpawnIntents = emptyMap(),
         )
@@ -407,6 +539,62 @@ private fun foldOne(s0: LeadState, e: JournalEntry): LeadState {
               .takeLast(ANOMALY_TAIL),
         )
       }
+      LeadKinds.NONCE_ISSUED -> {
+        val issued = IssuedNonce(p.str("nonce"), p.str("gateId"), p.str("payloadDigest"), e.seq)
+        when {
+          // A re-issue of an existing value would REBIND it (or resurrect a spent one) —
+          // the first binding stands and the attempt is retained visibly.
+          issued.nonce in s.issuedNonces ->
+            s.copy(
+              escalations =
+                (s.escalations +
+                    "nonce re-issued at seq=${e.seq} for gate '${issued.gateId}' — first binding kept")
+                  .takeLast(ANOMALY_TAIL)
+            )
+          else -> {
+            // Recorded even when the gate is unknown (the substrate's assertion stands in
+            // the record; a release still needs an open gate whose digest agrees), but an
+            // issue-before-open is contract drift worth seeing.
+            val flagged =
+              if (issued.gateId !in s.openGates)
+                s.copy(
+                  escalations =
+                    (s.escalations +
+                        "nonce issued at seq=${e.seq} for unknown gate '${issued.gateId}'")
+                      .takeLast(ANOMALY_TAIL)
+                )
+              else s
+            flagged.copy(issuedNonces = flagged.issuedNonces + (issued.nonce to issued))
+          }
+        }
+      }
+      LeadKinds.NONCE_CONSUMED -> {
+        val nonce = p.str("nonce")
+        when {
+          nonce !in s.issuedNonces ->
+            s.copy(
+              escalations =
+                (s.escalations + "consume of unknown nonce at seq=${e.seq} — dropped")
+                  .takeLast(ANOMALY_TAIL)
+            )
+          // Already spent: bookkeeping after a release the fold consumed itself — no-op.
+          nonce in s.consumedNonces -> s
+          else -> s.copy(consumedNonces = s.consumedNonces + nonce)
+        }
+      }
+      LeadKinds.APPROVAL_RECORDED -> {
+        val gateId = p.str("gateId")
+        val approval = RecordedApproval(p.str("principalId"), p.str("nonce"), p.str("payloadDigest"), e.seq)
+        val current = s.approvals[gateId].orEmpty()
+        val duplicate =
+          current.any {
+            it.principalId == approval.principalId &&
+              it.nonce == approval.nonce &&
+              it.payloadDigest == approval.payloadDigest
+          }
+        if (duplicate) s
+        else s.copy(approvals = s.approvals + (gateId to (current + approval)))
+      }
       LeadKinds.COGNITION_PROPOSED ->
         s.copy(cognitionSpendUsd = s.cognitionSpendUsd + accruedCost(p))
       // A turn that produced garbage was billed exactly like one that produced a decision, so
@@ -438,9 +626,30 @@ private fun accruedCost(p: kotlinx.serialization.json.JsonObject): Double =
 
 /**
  * Release handling — the lead-level teeth. Honored iff origin == auth layer AND the
- * released digest matches the gate as opened. Wrong origin is the shared fold's visible
- * rejection (re-asserted here by simply not honoring); auth-origin-but-wrong-digest or
- * unknown-gate releases are retained visibly as [LeadState.staleReleases].
+ * released digest matches the gate as opened AND the nonce discipline holds. Wrong origin
+ * is the shared fold's visible rejection (re-asserted here by simply not honoring);
+ * everything else auth-origin-but-unfaithful is retained visibly as
+ * [LeadState.staleReleases].
+ *
+ * NONCE DISCIPLINE (single-use, journal-derived): a release naming a nonce is honored
+ * only if that nonce was issued FOR THIS GATE, bound at issue to THIS digest, and never
+ * consumed — and honoring it consumes it in the derived state, so a second release naming
+ * the same nonce folds stale. Replay rejection therefore survives restart by
+ * construction: it is a property of re-folding the journal, not of any in-memory table.
+ * A release naming NO nonce is honored only while its gate has never had one issued — the
+ * pre-ceremony stub path, kept so journals written before nonces existed keep their
+ * meaning — and once a nonce exists for a gate, omitting the field is indiscipline, not
+ * an exemption. That condition is per-gate LIVE STATE, not a journal epoch: a gate whose
+ * mint step fails or is skipped stays on the pre-ceremony rule until a nonce exists for
+ * it, and refusing nonce-less releases outright once the ceremony is wired is step 2's
+ * call. Nonce-less honors are marked in [LeadState.nonceLessReleases] so the disposition
+ * stays legible after the fact.
+ *
+ * On the re-open shapes several cells exercise: the daemon opens each gateId at most once
+ * per ticket (LeadDaemon's seen-gate guard), so a re-opened gate is a journal-level fold
+ * surface, not a transition the daemon currently produces. On a real payload change today
+ * the gate stays open on the old digest and the voiding path that fires is an explicit
+ * [LeadKinds.NONCE_CONSUMED] — which the step-2 ceremony must remember to journal.
  */
 private fun foldRelease(
   s: LeadState,
@@ -450,12 +659,32 @@ private fun foldRelease(
   if (e.origin != ORIGIN_AUTH_LAYER) return s // forged provenance: never honored here; shared fold records the rejection
   val gateId = p.str("gateId")
   val digest = p.strOrNull("payloadDigest")
+  val nonce = p.strOrNull("nonce")
   val gate = s.openGates[gateId]
-  if (gate == null || digest != gate.payloadDigest) {
-    return s.copy(staleReleases = (s.staleReleases + (e.seq to gateId)).takeLast(ANOMALY_TAIL))
+  fun stale(): LeadState =
+    s.copy(staleReleases = (s.staleReleases + (e.seq to gateId)).takeLast(ANOMALY_TAIL))
+  if (gate == null || digest != gate.payloadDigest) return stale()
+  val consumed: Set<String>
+  val nonceLess: Set<String>
+  if (nonce == null) {
+    if (s.issuedNonces.values.any { it.gateId == gateId }) return stale()
+    consumed = s.consumedNonces
+    nonceLess = s.nonceLessReleases + gateId
+  } else {
+    val issued = s.issuedNonces[nonce]
+    val faithful =
+      issued != null &&
+        issued.gateId == gateId &&
+        issued.payloadDigest == digest &&
+        nonce !in s.consumedNonces
+    if (!faithful) return stale()
+    consumed = s.consumedNonces + nonce
+    nonceLess = s.nonceLessReleases
   }
   return s.copy(
     releasedGates = s.releasedGates + gateId,
+    nonceLessReleases = nonceLess,
+    consumedNonces = consumed,
     phase =
       when (gate.gateKind) {
         GateKinds.PLAN_APPROVAL -> TicketPhase.PLAN_APPROVED
