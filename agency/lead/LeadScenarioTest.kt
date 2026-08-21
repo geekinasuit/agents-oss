@@ -34,7 +34,12 @@ class LeadScenarioTest {
 
   private val fixture: String by lazy {
     val srcdir = System.getenv("TEST_SRCDIR") ?: error("TEST_SRCDIR not set (not under bazel test)")
-    val f = File(srcdir, "_main/agency/lead/lead_fixture")
+    // The runfiles path comes from BUILD ($(rlocationpath)): its leading repo segment
+    // depends on whether this module is the build root or a consumed dependency.
+    val rloc =
+        System.getenv("LEAD_FIXTURE")
+            ?: error("LEAD_FIXTURE not set (lead_scenario_test supplies it via rlocationpath)")
+    val f = File(srcdir, rloc)
     check(f.exists()) { "lead_fixture not found in runfiles at $f" }
     f.absolutePath
   }

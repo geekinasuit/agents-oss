@@ -20,7 +20,12 @@ class ScenarioTest {
 
   private val fixture: String by lazy {
     val srcdir = System.getenv("TEST_SRCDIR") ?: error("TEST_SRCDIR not set (not under bazel test)")
-    val f = File(srcdir, "_main/agency/shared/journal/journal_fixture")
+    // The runfiles path comes from BUILD ($(rlocationpath)): its leading repo segment
+    // depends on whether this module is the build root or a consumed dependency.
+    val rloc =
+        System.getenv("JOURNAL_FIXTURE")
+            ?: error("JOURNAL_FIXTURE not set (scenario_test supplies it via rlocationpath)")
+    val f = File(srcdir, rloc)
     check(f.exists()) { "journal_fixture not found in runfiles at $f" }
     f.absolutePath
   }

@@ -3,6 +3,9 @@
 module(
     name = "agency",
     version = "0.1.1",
+    # REPO.bazel uses ignore_directories(), a Bazel 8+ API; without this a Bazel 7
+    # consumer gets a Starlark name error inside this module instead of a version message.
+    bazel_compatibility = [">=8.0.0"],
 )
 
 bazel_dep(name = "bazel_skylib", version = "1.8.2")

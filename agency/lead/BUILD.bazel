@@ -169,17 +169,33 @@ kt_jvm_test(
     ],
 )
 
-kt_jvm_test(
-    name = "lead_scenario_test",
-    size = "medium",
+kt_jvm_library(
+    name = "lead_scenario_test_lib",
+    testonly = True,
     srcs = ["LeadScenarioTest.kt"],
-    data = [":lead_fixture"],
-    test_class = "com.geekinasuit.agency.lead.LeadScenarioTest",
-    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
         ":lead",
         "//agency/shared/journal",
         "@maven//:junit_junit",
+    ],
+)
+
+# Native java_test around the Kotlin sources, not kt_jvm_test: the fixture's runfiles
+# path arrives through `env` via $(rlocationpath), whose leading repo segment is `_main`
+# when this module is the build root and the module's canonical name when consumed — only
+# the build can spell it. Location expansion in `env` is documented core-Bazel behavior;
+# kt_jvm_test passes env values through unexpanded, and a consumer builds these tests
+# under whatever rules_kotlin version its own build resolves, so only documented core
+# behavior is safe to lean on here.
+java_test(
+    name = "lead_scenario_test",
+    size = "medium",
+    data = [":lead_fixture"],
+    env = {"LEAD_FIXTURE": "$(rlocationpath :lead_fixture)"},
+    test_class = "com.geekinasuit.agency.lead.LeadScenarioTest",
+    runtime_deps = [
+        ":lead_scenario_test_lib",
+        "@maven//:org_xerial_sqlite_jdbc",
     ],
 )
 
