@@ -74,6 +74,31 @@ class QuorumTest {
         """{"type":"group","threshold":2,"children":[{"type":"signer","principalId":"a"},{"type":"signer","principalId":"a"}]}"""
       )
     }
+    // Mixed depth: a leaf beside a subgroup holding the same principal.
+    assertThrows {
+      QuorumGroup(
+        2,
+        listOf(SignerLeaf("a"), QuorumGroup(1, listOf(SignerLeaf("a"), SignerLeaf("b")))),
+      )
+    }
+    // Parsed, with the duplicate deeper on one side than the other.
+    assertThrows {
+      parseQuorum(
+        """{"type":"group","threshold":2,"children":[{"type":"signer","principalId":"a"},{"type":"group","threshold":1,"children":[{"type":"group","threshold":1,"children":[{"type":"signer","principalId":"a"}]},{"type":"signer","principalId":"b"}]}]}"""
+      )
+    }
+  }
+
+  @Test
+  fun childrenAreSnapshottedSoCallerMutationCannotSmuggleARejectedTree() {
+    // The constructor's guarantees are about the list it validated: with an aliased
+    // mutable list, a caller could mutate an admitted tree into a constructor-rejected
+    // one (a repeated leaf, an oversize group) after validation ran.
+    val kids = mutableListOf<QuorumNode>(SignerLeaf("a"), SignerLeaf("b"))
+    val g = QuorumGroup(2, kids)
+    kids.add(SignerLeaf("a")) // would be a repeated principal if the list aliased
+    assertEquals(2, g.children.size)
+    assertTrue(quorumSatisfied(g, setOf("a", "b")))
   }
 
   @Test
@@ -106,6 +131,9 @@ class QuorumTest {
     assertThrows { parseQuorum("""{"type":"group","threshold":1,"children":"kids"}""") } // children not an array
     assertThrows { parseQuorum("""{"type":"group","threshold":1,"children":["leaf"]}""") } // child not an object
     assertThrows { parseQuorum("""{"type":"group","threshold":"many","children":[{"type":"signer","principalId":"a"}]}""") } // non-integer threshold
+    assertThrows { parseQuorum("""{"type":"group","threshold":"5","children":[{"type":"signer","principalId":"a"}]}""") } // string-typed number: our writers emit numbers, so parse strictly
+    assertThrows { parseQuorum("""{"type":"signer","principalId":{"id":"a"}}""") } // structured where a scalar belongs
+    assertThrows { parseQuorum("""{"type":"signer","principalId":123}""") } // a stringified number is a principal nobody wrote
     assertThrows { parseQuorum("""{"type":"group","threshold":2,"children":[{"type":"signer","principalId":"a"}]}""") } // bounds via constructor
   }
 

@@ -9,6 +9,7 @@ import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
 import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -173,10 +174,28 @@ class AuthFoldTest {
     // disposition is marked, so derived state can tell this release from a nonced one.
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
-    s.release("g1", "d1")
+    val releaseSeq = s.release("g1", "d1").seq
     val st = s.lead()
     assertTrue("g1" in st.releasedGates)
-    assertTrue("g1" in st.nonceLessReleases)
+    assertEquals(releaseSeq, st.nonceLessReleases["g1"])
+  }
+
+  @Test
+  fun reReleaseUnderCeremonyIsDistinguishableFromTheNonceLessMark() {
+    // The marker is keyed to the seq of the release it describes: after a pre-ceremony
+    // honor, a re-open + ceremony release of the same gate must neither erase the mark
+    // nor let it read as covering the ceremony release.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    val preSeq = s.release("g1", "d1").seq // pre-ceremony honor
+    s.gateOpened("g1", "d2") // re-opened on a new digest
+    s.nonceIssued("n1", "g1", "d2")
+    val ceremonySeq = s.release("g1", "d2", nonce = "n1").seq
+    val st = s.lead()
+    assertTrue("g1" in st.releasedGates)
+    assertTrue("n1" in st.consumedNonces)
+    assertEquals(preSeq, st.nonceLessReleases["g1"])
+    assertTrue(ceremonySeq != preSeq)
   }
 
   @Test
@@ -215,6 +234,38 @@ class AuthFoldTest {
     val st = s.lead()
     assertFalse("g2" in st.releasedGates)
     assertEquals(1, st.staleReleases.size)
+  }
+
+  @Test
+  fun inventedNonceIsStaleNotAnAuthorization() {
+    // The forged-nonce clause (`issued != null`): a release naming a nonce the substrate
+    // never minted must fold stale. A fold that defaulted the failed lookup to a record
+    // built from the release's own claims would let any release author the authorization
+    // it claims to carry — this is the cell that fails if that clause goes vacuous.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.release("g1", "d1", nonce = "never-minted")
+    val st = s.lead()
+    assertFalse("g1" in st.releasedGates)
+    assertEquals(1, st.staleReleases.size)
+    assertTrue(st.consumedNonces.isEmpty())
+  }
+
+  @Test
+  fun forgedNonceAgainstAGateUnderTheCeremonyIsStale() {
+    // The complement of the cell above: here the gate HAS a live nonce, so an
+    // implementation keying on "some nonce exists for this gate" rather than looking up
+    // the NAMED value would honor the forgery. Refusal must also mint nothing and leave
+    // the real nonce untouched.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    s.release("g1", "d1", nonce = "n-forged") // gate + digest agree; value never minted
+    val st = s.lead()
+    assertFalse("g1" in st.releasedGates)
+    assertEquals(1, st.staleReleases.size)
+    assertTrue("n-forged" !in st.consumedNonces)
+    assertTrue("n1" !in st.consumedNonces)
   }
 
   @Test
@@ -294,6 +345,68 @@ class AuthFoldTest {
   }
 
   @Test
+  fun nullNonceFieldOnAMintFailsClassified() {
+    // JsonNull IS a JsonPrimitive whose content is the string "null": without the
+    // explicit refusal, a null-valued mint would fold onward as an issued nonce named
+    // the guessable four-character string "null". The nonce is REQUIRED on a mint, so a
+    // null there is payload-contract drift and must fail CLASSIFIED, not fold.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.append(
+      LeadKinds.NONCE_ISSUED,
+      buildJsonObject {
+        put("nonce", JsonNull)
+        put("gateId", "g1")
+        put("payloadDigest", "d1")
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    val message =
+      try {
+        s.lead()
+        throw AssertionError("expected LeadFoldException")
+      } catch (expected: LeadFoldException) {
+        expected.message.orEmpty()
+      }
+    assertTrue("'nonce'" in message)
+  }
+
+  @Test
+  fun nullNonceFieldOnAReleaseReadsAsAbsent() {
+    // The nonce is OPTIONAL on a release, so JsonNull reads as the ordinary JSON spelling
+    // of absence. Under the ceremony that folds stale (a null can neither name a nonce
+    // "null" nor act as an exemption); on a pre-ceremony gate it is the omission it
+    // claims to be — honored and marked, exactly as if the field were left out.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    s.append(
+      KIND_GATE_RELEASED,
+      buildJsonObject {
+        put("gateId", "g1")
+        put("payloadDigest", "d1")
+        put("nonce", JsonNull)
+      },
+      ORIGIN_AUTH_LAYER,
+    )
+    s.gateOpened("g2", "d2")
+    s.append(
+      KIND_GATE_RELEASED,
+      buildJsonObject {
+        put("gateId", "g2")
+        put("payloadDigest", "d2")
+        put("nonce", JsonNull)
+      },
+      ORIGIN_AUTH_LAYER,
+    )
+    val st = s.lead()
+    assertFalse("g1" in st.releasedGates)
+    assertEquals(1, st.staleReleases.size)
+    assertTrue("g2" in st.releasedGates)
+    assertTrue("g2" in st.nonceLessReleases)
+  }
+
+  @Test
   fun cognitionOriginNonceKindsAreNeverHonored() {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
@@ -368,6 +481,19 @@ class AuthFoldTest {
       listOf(3L to LeadKinds.APPROVAL_RECORDED, 4L to LeadKinds.APPROVAL_RECORDED),
       st.misOriginedEntries,
     )
+  }
+
+  @Test
+  fun approvalForUnknownGateOrUnmintedNonceIsRecordedAndFlagged() {
+    // Mirrors NONCE_ISSUED's flagged-but-kept pattern: the auth layer's assertion stands
+    // in the record (a release re-verifies against live state anyway), but an approval
+    // naming a gate never opened or a nonce never minted is contract drift worth seeing.
+    val s = open(newStoreDir())
+    s.approval("ghost", "operator", "n9", "d1")
+    val st = s.lead()
+    assertEquals(1, st.approvals["ghost"]!!.size)
+    assertTrue(st.escalations.any { "unknown gate" in it })
+    assertTrue(st.escalations.any { "unminted nonce" in it })
   }
 
   @Test

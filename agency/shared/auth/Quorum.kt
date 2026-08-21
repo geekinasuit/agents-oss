@@ -1,11 +1,9 @@
 package com.geekinasuit.agency.shared.auth
 
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
@@ -44,19 +42,29 @@ data class SignerLeaf(val principalId: String) : QuorumNode {
  * one key. With leaves distinct, sibling subtrees have disjoint principal support, so k
  * satisfied children require k distinct approvers: leaf distinctness is what makes k-of-n
  * mean k PRINCIPALS, which is the property the key-custody argument rests on (a second
- * required signer makes one lost key insufficient).
+ * required signer makes one lost key insufficient — given the allow-list's matching
+ * guarantee that distinct principals hold byte-distinct keys; [AllowList] refuses
+ * cross-principal byte-sharing for exactly this reason, since two principals holding the
+ * same key bytes are one custodian however many schemes tag them).
+ *
+ * Not a data class: [children] is SNAPSHOTTED at construction (as [AllowList] snapshots
+ * its inputs), because every guarantee above is about this list — an aliased caller-held
+ * mutable list could otherwise carry a constructor-rejected tree into [quorumSatisfied],
+ * whose contract is that it evaluates trees the constructors admitted.
  */
-data class QuorumGroup(val threshold: Int, val children: List<QuorumNode>) : QuorumNode {
+class QuorumGroup(val threshold: Int, children: List<QuorumNode>) : QuorumNode {
+  val children: List<QuorumNode> = children.toList()
+
   init {
-    require(children.isNotEmpty()) { "a quorum group requires at least one child" }
-    require(children.size <= MAX_GROUP_SIZE) {
-      "a quorum group holds at most $MAX_GROUP_SIZE children (got ${children.size})"
+    require(this.children.isNotEmpty()) { "a quorum group requires at least one child" }
+    require(this.children.size <= MAX_GROUP_SIZE) {
+      "a quorum group holds at most $MAX_GROUP_SIZE children (got ${this.children.size})"
     }
-    require(threshold in 1..children.size) {
-      "threshold $threshold is outside 1..${children.size}"
+    require(threshold in 1..this.children.size) {
+      "threshold $threshold is outside 1..${this.children.size}"
     }
     val repeated =
-      children
+      this.children
         .flatMap { leafIds(it) }
         .groupingBy { it }
         .eachCount()
@@ -70,6 +78,13 @@ data class QuorumGroup(val threshold: Int, val children: List<QuorumNode>) : Quo
       )
     }
   }
+
+  override fun equals(other: Any?): Boolean =
+    other is QuorumGroup && other.threshold == threshold && other.children == children
+
+  override fun hashCode(): Int = 31 * threshold + children.hashCode()
+
+  override fun toString(): String = "QuorumGroup(threshold=$threshold, children=$children)"
 }
 
 private fun leafIds(node: QuorumNode): List<String> =
@@ -135,13 +150,10 @@ fun quorumFromJson(json: JsonObject): QuorumNode = parseNode(json, depth = 1)
 
 private fun parseNode(json: JsonObject, depth: Int): QuorumNode {
   require(depth <= MAX_QUORUM_DEPTH) { "quorum tree exceeds max depth $MAX_QUORUM_DEPTH" }
-  return when (val type = json.req("type")) {
-    "signer" -> SignerLeaf(json.req("principalId"))
+  return when (val type = json.req("type", "quorum node")) {
+    "signer" -> SignerLeaf(json.req("principalId", "quorum node"))
     "group" -> {
-      val thresholdRaw = json.req("threshold")
-      val threshold =
-        thresholdRaw.toIntOrNull()
-          ?: throw IllegalArgumentException("threshold '$thresholdRaw' is not an integer")
+      val threshold = json.reqInt("threshold", "quorum group")
       val childrenField =
         json["children"] ?: throw IllegalArgumentException("quorum group is missing 'children'")
       val children =
@@ -165,10 +177,3 @@ private fun parseNode(json: JsonObject, depth: Int): QuorumNode {
   }
 }
 
-private fun JsonObject.req(k: String): String {
-  val el = this[k] ?: throw IllegalArgumentException("quorum node is missing '$k'")
-  // JsonNull IS a JsonPrimitive whose content is the string "null" — without this check a
-  // null-valued field would build a node named "null" instead of refusing loudly.
-  require(el !is JsonNull) { "quorum node '$k' is null — null is a refusal, not a value" }
-  return el.jsonPrimitive.content
-}
