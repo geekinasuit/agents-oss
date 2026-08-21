@@ -54,6 +54,40 @@ class AuthorizationTest {
   }
 
   @Test
+  fun crossPrincipalByteSharedKeysAreOneCustodianAndRefused() {
+    // Two principals holding the same key BYTES under different scheme tags are one
+    // custodian: under a quorum tree they would read as two leaves while one keyholder
+    // clears both. Refused at the allow-list, the one place both claims are visible.
+    assertThrows {
+      AllowList(
+        listOf(
+          operator,
+          Principal("backup", "operator", listOf(SchemeKey("scheme-c", opKey.publicKey))),
+        )
+      )
+    }
+    // The SAME principal registering the same bytes under two schemes is scheme
+    // migration, not a custody collapse — admitted.
+    AllowList(
+      listOf(
+        Principal(
+          "operator",
+          "operator",
+          listOf(SchemeKey("s1", "aa".repeat(32)), SchemeKey("s2", "aa".repeat(32))),
+        )
+      )
+    )
+  }
+
+  @Test
+  fun keysAreSnapshottedSoCallerMutationCannotAlterAValidatedPrincipal() {
+    val keys = mutableListOf(opKey)
+    val p = Principal("operator", "operator", keys)
+    keys.add(opKey) // would be the same key listed twice if the list aliased
+    assertEquals(1, p.keys.size)
+  }
+
+  @Test
   fun principalListingTheSameKeyTwiceIsRefusedAsItsOwnMistake() {
     val message =
       try {

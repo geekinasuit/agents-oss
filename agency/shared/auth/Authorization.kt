@@ -1,10 +1,8 @@
 package com.geekinasuit.agency.shared.auth
 
 import java.security.SecureRandom
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
@@ -30,23 +28,40 @@ data class SchemeKey(val schemeId: String, val publicKey: String) {
  * ([role]), verified how ([keys] — at least one, because an approver with no registered
  * key can never produce a verifiable approval). Key equality is byte-exact on the stored
  * string; any per-scheme normalization happens before a key enters an allow-list.
+ *
+ * Not a data class: [keys] is SNAPSHOTTED at construction, same reason as
+ * [QuorumGroup.children] — the init guarantees are about this list, and an aliased
+ * caller-held mutable list could change what the type reports after validation ran.
  */
-data class Principal(val principalId: String, val role: String, val keys: List<SchemeKey>) {
+class Principal(val principalId: String, val role: String, keys: List<SchemeKey>) {
+  val keys: List<SchemeKey> = keys.toList()
+
   init {
     require(principalId.isNotBlank()) { "principalId must be non-blank" }
     require(role.isNotBlank()) { "role must be non-blank" }
-    require(keys.isNotEmpty()) { "a principal requires at least one key" }
+    require(this.keys.isNotEmpty()) { "a principal requires at least one key" }
     // Refused here, at the type that owns the list, so the message names the actual
     // mistake — one principal repeating its own key — rather than surfacing later as a
     // "claimed by both X and X" collision between a principal and itself.
     val repeated =
-      keys.groupingBy { it }.eachCount().filterValues { it > 1 }.keys.firstOrNull()
+      this.keys.groupingBy { it }.eachCount().filterValues { it > 1 }.keys.firstOrNull()
     if (repeated != null) {
       throw IllegalArgumentException(
         "principal '$principalId' lists key ${repeated.schemeId}:${repeated.publicKey} twice"
       )
     }
   }
+
+  override fun equals(other: Any?): Boolean =
+    other is Principal &&
+      other.principalId == principalId &&
+      other.role == role &&
+      other.keys == keys
+
+  override fun hashCode(): Int =
+    (principalId.hashCode() * 31 + role.hashCode()) * 31 + keys.hashCode()
+
+  override fun toString(): String = "Principal(principalId=$principalId, role=$role, keys=$keys)"
 }
 
 /**
@@ -56,6 +71,13 @@ data class Principal(val principalId: String, val role: String, val keys: List<S
  * resolving to two principals would make "who approved" ambiguous at exactly the moment
  * it must not be. (A principal repeating its own key is refused earlier, at [Principal]
  * construction, with a message that says so.)
+ *
+ * Cross-principal BYTE-sharing is refused regardless of scheme tag: two principals whose
+ * keys share bytes are one custodian, however many schemes tag the bytes — under a
+ * quorum tree they would read as two leaves while one keyholder clears both, which is
+ * exactly the "second required signer" collapse the tree's leaf-distinctness bound
+ * exists to prevent. The SAME principal may register the same bytes under two schemes
+ * (scheme migration); scheme-tagged lookup identity is unchanged.
  */
 class AllowList(principals: List<Principal>) {
   private val byId: Map<String, Principal>
@@ -64,6 +86,7 @@ class AllowList(principals: List<Principal>) {
   init {
     val ids = mutableMapOf<String, Principal>()
     val keys = mutableMapOf<SchemeKey, Principal>()
+    val bytesHolder = mutableMapOf<String, Principal>()
     for (p in principals) {
       val priorId = ids.put(p.principalId, p)
       if (priorId != null) {
@@ -74,6 +97,14 @@ class AllowList(principals: List<Principal>) {
         if (prior != null) {
           throw IllegalArgumentException(
             "key ${k.schemeId}:${k.publicKey} is claimed by both '${prior.principalId}' and '${p.principalId}'"
+          )
+        }
+        val holder = bytesHolder.put(k.publicKey, p)
+        if (holder != null && holder !== p) {
+          throw IllegalArgumentException(
+            "public key ${k.publicKey} is held by both '${holder.principalId}' and '${p.principalId}' — " +
+              "a different scheme tag does not make it a different custodian, and byte-shared keys " +
+              "collapse quorum distinctness"
           )
         }
       }
@@ -135,13 +166,13 @@ data class ApprovalEvidence(
   companion object {
     fun fromJson(json: JsonObject): ApprovalEvidence =
       ApprovalEvidence(
-        schemeId = json.req("schemeId"),
-        publicKey = json.req("publicKey"),
-        signature = json.req("signature"),
-        carrierArtifactId = json.req("carrierArtifactId"),
-        gateId = json.req("gateId"),
-        payloadDigest = json.req("payloadDigest"),
-        nonce = json.req("nonce"),
+        schemeId = json.req("schemeId", "approval evidence"),
+        publicKey = json.req("publicKey", "approval evidence"),
+        signature = json.req("signature", "approval evidence"),
+        carrierArtifactId = json.req("carrierArtifactId", "approval evidence"),
+        gateId = json.req("gateId", "approval evidence"),
+        payloadDigest = json.req("payloadDigest", "approval evidence"),
+        nonce = json.req("nonce", "approval evidence"),
       )
   }
 }
@@ -162,10 +193,3 @@ fun freshNonceHex(rng: SecureRandom = SecureRandom()): String {
   return bytes.joinToString("") { "%02x".format(it) }
 }
 
-private fun JsonObject.req(k: String): String {
-  val el = this[k] ?: throw IllegalArgumentException("approval evidence is missing '$k'")
-  // JsonNull IS a JsonPrimitive whose content is the string "null" — without this check a
-  // null-valued field would pass the non-blank init as the seven-character string "null".
-  require(el !is JsonNull) { "approval evidence '$k' is null — null is a refusal, not a value" }
-  return el.jsonPrimitive.content
-}

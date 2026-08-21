@@ -179,7 +179,13 @@ data class IssuedNonce(
   val gateId: String,
   val payloadDigest: String,
   val issuedSeq: Long,
-)
+) {
+  init {
+    require(nonce.isNotBlank()) { "an issued nonce requires a non-blank value" }
+    require(gateId.isNotBlank()) { "an issued nonce requires a non-blank gateId" }
+    require(payloadDigest.isNotBlank()) { "an issued nonce requires a non-blank payloadDigest" }
+  }
+}
 
 /** One accepted approval as journaled, with the binding it committed to retained —
  * consumers filter on (nonce, payloadDigest) against the gate's CURRENT state, so a
@@ -189,7 +195,13 @@ data class RecordedApproval(
   val nonce: String,
   val payloadDigest: String,
   val seq: Long,
-)
+) {
+  init {
+    require(principalId.isNotBlank()) { "a recorded approval requires a non-blank principalId" }
+    require(nonce.isNotBlank()) { "a recorded approval requires a non-blank nonce" }
+    require(payloadDigest.isNotBlank()) { "a recorded approval requires a non-blank payloadDigest" }
+  }
+}
 
 data class PodRecord(
   val podId: String,
@@ -222,10 +234,14 @@ data class LeadState(
   val commitManifestDigest: String? = null,
   val openGates: Map<String, OpenGate> = emptyMap(),
   val releasedGates: Set<String> = emptySet(),
-  /** Gates released by the nonce-less pre-ceremony path — the disposition marker that
-   * keeps "was this release under the ceremony?" answerable from derived state, matching
-   * how every other classification this fold makes stays legible after the fact. */
-  val nonceLessReleases: Set<String> = emptySet(),
+  /** Gates released by the nonce-less pre-ceremony path, keyed to the seq of the RELEASE
+   * the mark describes — the disposition marker that keeps "was this release under the
+   * ceremony?" answerable from derived state, matching how every other classification
+   * this fold makes stays legible after the fact. Keyed by seq so the journal-level
+   * re-open shape stays unambiguous: a re-opened gate later released under the ceremony
+   * keeps its old mark, and the mark's seq says which release it describes (never the
+   * current one). */
+  val nonceLessReleases: Map<String, Long> = emptyMap(),
   val staleReleases: List<Pair<Long, String>> = emptyList(), // (seq, gateId) — auth origin, but digest mismatch, unknown gate, or nonce indiscipline (consumed/unknown/misbound/absent-where-required)
   /** Every nonce issued this ticket, by value — consumed ones stay listed ([consumedNonces]
    * marks them) so a re-issue of a spent value is detectable as the anomaly it is. */
@@ -306,13 +322,15 @@ data class LeadState(
  * these carry security-relevant tails (escalations, stale releases, mis-origined entries).
  *
  * The nonce/approval records ([LeadState.issuedNonces], [LeadState.consumedNonces],
- * [LeadState.approvals], [LeadState.nonceLessReleases]) sit DELIBERATELY outside this
- * cap: they are correctness-bearing records, not views. Evicting a consumed nonce
- * re-enables the replay it exists to reject; evicting an issued nonce or a recorded
- * approval silently voids a live authorization. Their bound is the ticket, not a tail —
- * TICKET_DONE clears them — and their kinds are origin-gated, so only the substrate and
- * the authorization layer can grow them: a party positioned to flood them could already
- * write worse. */
+ * [LeadState.approvals]) sit DELIBERATELY outside this cap: they are correctness-bearing
+ * records, not views. Evicting a consumed nonce re-enables the replay it exists to
+ * reject; evicting an issued nonce or a recorded approval silently voids a live
+ * authorization. [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
+ * an audit marker whose absence is itself a claim ("released under the ceremony"), so an
+ * evicted entry would not lose the answer, it would invert it. All four share the same
+ * bound: the ticket, not a tail — TICKET_DONE clears them — and their kinds are
+ * origin-gated, so only the substrate and the authorization layer can grow them: a party
+ * positioned to flood them could already write worse. */
 private const val ANOMALY_TAIL = 100
 
 /** The lead kinds only the substrate ever authors. Any of these
@@ -427,7 +445,7 @@ private fun foldOne(s0: LeadState, e: JournalEntry): LeadState {
           commitManifestDigest = null,
           openGates = emptyMap(),
           releasedGates = emptySet(),
-          nonceLessReleases = emptySet(),
+          nonceLessReleases = emptyMap(),
           staleReleases = emptyList(),
           issuedNonces = emptyMap(),
           consumedNonces = emptySet(),
@@ -593,7 +611,22 @@ private fun foldOne(s0: LeadState, e: JournalEntry): LeadState {
               it.payloadDigest == approval.payloadDigest
           }
         if (duplicate) s
-        else s.copy(approvals = s.approvals + (gateId to (current + approval)))
+        else {
+          // Recorded even when the gate or nonce is unknown (the auth layer's assertion
+          // stands in the record; a release re-verifies against live state anyway), but
+          // an approval naming a gate never opened or a nonce never minted is contract
+          // drift worth seeing — the same flagged-but-kept pattern as NONCE_ISSUED.
+          val drift = buildList {
+            if (gateId !in s.openGates)
+              add("approval recorded at seq=${e.seq} for unknown gate '$gateId'")
+            if (approval.nonce !in s.issuedNonces)
+              add("approval recorded at seq=${e.seq} for unminted nonce on gate '$gateId'")
+          }
+          val flagged =
+            if (drift.isEmpty()) s
+            else s.copy(escalations = (s.escalations + drift).takeLast(ANOMALY_TAIL))
+          flagged.copy(approvals = flagged.approvals + (gateId to (current + approval)))
+        }
       }
       LeadKinds.COGNITION_PROPOSED ->
         s.copy(cognitionSpendUsd = s.cognitionSpendUsd + accruedCost(p))
@@ -642,8 +675,9 @@ private fun accruedCost(p: kotlinx.serialization.json.JsonObject): Double =
  * an exemption. That condition is per-gate LIVE STATE, not a journal epoch: a gate whose
  * mint step fails or is skipped stays on the pre-ceremony rule until a nonce exists for
  * it, and refusing nonce-less releases outright once the ceremony is wired is step 2's
- * call. Nonce-less honors are marked in [LeadState.nonceLessReleases] so the disposition
- * stays legible after the fact.
+ * call. Nonce-less honors are marked in [LeadState.nonceLessReleases], keyed by gate to
+ * the honoring release's seq, so the disposition stays legible after the fact — and a
+ * later ceremony release of a re-opened gate stays distinguishable from the mark.
  *
  * On the re-open shapes several cells exercise: the daemon opens each gateId at most once
  * per ticket (LeadDaemon's seen-gate guard), so a re-opened gate is a journal-level fold
@@ -665,11 +699,11 @@ private fun foldRelease(
     s.copy(staleReleases = (s.staleReleases + (e.seq to gateId)).takeLast(ANOMALY_TAIL))
   if (gate == null || digest != gate.payloadDigest) return stale()
   val consumed: Set<String>
-  val nonceLess: Set<String>
+  val nonceLess: Map<String, Long>
   if (nonce == null) {
     if (s.issuedNonces.values.any { it.gateId == gateId }) return stale()
     consumed = s.consumedNonces
-    nonceLess = s.nonceLessReleases + gateId
+    nonceLess = s.nonceLessReleases + (gateId to e.seq)
   } else {
     val issued = s.issuedNonces[nonce]
     val faithful =
@@ -694,8 +728,20 @@ private fun foldRelease(
   )
 }
 
-private fun kotlinx.serialization.json.JsonObject.str(k: String): String =
-  this[k]!!.jsonPrimitive.content
+/** Required payload field. JsonNull IS a JsonPrimitive whose content is the string
+ * "null", so without the explicit check a null-valued field on a known kind would fold
+ * onward as a working four-character string (a mint of the guessable nonce "null")
+ * instead of failing CLASSIFIED as the payload-contract drift it is. */
+private fun kotlinx.serialization.json.JsonObject.str(k: String): String {
+  val el = this[k] ?: throw IllegalArgumentException("payload field '$k' is missing")
+  require(el !is kotlinx.serialization.json.JsonNull) { "payload field '$k' is null" }
+  return el.jsonPrimitive.content
+}
 
-private fun kotlinx.serialization.json.JsonObject.strOrNull(k: String): String? =
-  this[k]?.jsonPrimitive?.content
+/** Optional payload field: absent and JsonNull both read as "no value" — an optional
+ * field explicitly set to null must not become the string "null". */
+private fun kotlinx.serialization.json.JsonObject.strOrNull(k: String): String? {
+  val el = this[k] ?: return null
+  if (el is kotlinx.serialization.json.JsonNull) return null
+  return el.jsonPrimitive.content
+}
