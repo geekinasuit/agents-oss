@@ -15,3 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: bazel test
         run: bazel test //...
+      # The script suite is deliberately outside bazel (the release tool and its tests are
+      # .main.kts files); the runner self-locates, so this tests the checked-out tree.
+      - name: script tests
+        run: scripts/run-script-tests.sh
