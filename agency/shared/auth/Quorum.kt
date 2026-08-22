@@ -45,7 +45,9 @@ data class SignerLeaf(val principalId: String) : QuorumNode {
  * required signer makes one lost key insufficient — given the allow-list's matching
  * guarantee that distinct principals hold byte-distinct keys; [AllowList] refuses
  * cross-principal byte-sharing for exactly this reason, since two principals holding the
- * same key bytes are one custodian however many schemes tag them).
+ * same key bytes are one custodian however many schemes tag them — where "byte-distinct"
+ * is exactness on the STORED string, under [SchemeKey]'s normalize-before-entry
+ * contract).
  *
  * Not a data class: [children] is SNAPSHOTTED at construction (as [AllowList] snapshots
  * its inputs), because every guarantee above is about this list — an aliased caller-held

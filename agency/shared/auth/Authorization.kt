@@ -78,6 +78,11 @@ class Principal(val principalId: String, val role: String, keys: List<SchemeKey>
  * exactly the "second required signer" collapse the tree's leaf-distinctness bound
  * exists to prevent. The SAME principal may register the same bytes under two schemes
  * (scheme migration); scheme-tagged lookup identity is unchanged.
+ *
+ * "Bytes" here means the STORED string, compared exactly — [SchemeKey]'s contract is
+ * that any per-scheme normalization happens before a key enters an allow-list. Two
+ * unnormalized spellings of one underlying key are distinct strings to this refusal, so
+ * the custodian-collapse guarantee is only as strong as that pre-entry normalization.
  */
 class AllowList(principals: List<Principal>) {
   private val byId: Map<String, Principal>

@@ -199,6 +199,21 @@ class AuthFoldTest {
   }
 
   @Test
+  fun nonceLessReplayFoldsStaleAndTheMarkKeepsTheFirstSeq() {
+    // The pre-ceremony honor is single-use per gate, mirroring the consumed-nonce rule:
+    // a byte-identical second release folds stale — visibly — and the mark still names
+    // the release that actually honored the gate, never the latest replay.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    val firstSeq = s.release("g1", "d1").seq
+    val replaySeq = s.release("g1", "d1").seq
+    val st = s.lead()
+    assertTrue("g1" in st.releasedGates)
+    assertEquals(firstSeq, st.nonceLessReleases["g1"])
+    assertEquals(listOf(replaySeq to "g1"), st.staleReleases)
+  }
+
+  @Test
   fun authorizationVoidOnPayloadChange() {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
@@ -369,6 +384,33 @@ class AuthFoldTest {
         expected.message.orEmpty()
       }
     assertTrue("'nonce'" in message)
+  }
+
+  @Test
+  fun numberTypedRequiredFieldFailsClassified() {
+    // Same doctrine as the null-field cell above: a numeric nonce on a mint is
+    // payload-contract drift, refused classified — never coerced onward as the working
+    // string "123".
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.append(
+      LeadKinds.NONCE_ISSUED,
+      buildJsonObject {
+        put("nonce", 123)
+        put("gateId", "g1")
+        put("payloadDigest", "d1")
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    val message =
+      try {
+        s.lead()
+        throw AssertionError("expected LeadFoldException")
+      } catch (expected: LeadFoldException) {
+        expected.message.orEmpty()
+      }
+    assertTrue("'nonce'" in message)
+    assertTrue("JSON string" in message)
   }
 
   @Test
