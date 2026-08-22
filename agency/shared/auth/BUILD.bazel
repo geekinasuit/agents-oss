@@ -1,0 +1,51 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+# Authorization vocabulary for the 3-way ceremony (2a.4): principals + scheme-tagged keys
+# + the allow-list (it lives with us, never with the approval carrier), approval evidence
+# (scheme-tagged so a multi-scheme journal stays re-verifiable), the substrate-issued
+# nonce mint, and the quorum predicate — an MCMS-style tree of k-of-n signer groups,
+# evaluated as data (1 ≤ k ≤ n ≤ 32, depth-capped on the data path).
+#
+# Substrate-neutral by standing rule: no transport, relay, or event-format concept may
+# appear here. The mechanical re-verification layer verifies against these types; the
+# lead fold keeps its own journal-local records and does not depend on this target.
+
+kt_jvm_library(
+    name = "auth",
+    srcs = [
+        "AuthJson.kt",
+        "Authorization.kt",
+        "Quorum.kt",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "quorum_test",
+    size = "small",
+    srcs = ["QuorumTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.auth.QuorumTest",
+    deps = [
+        ":auth",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "authorization_test",
+    size = "small",
+    srcs = ["AuthorizationTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.auth.AuthorizationTest",
+    deps = [
+        ":auth",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
