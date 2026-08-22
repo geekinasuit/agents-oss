@@ -676,8 +676,14 @@ private fun accruedCost(p: kotlinx.serialization.json.JsonObject): Double =
  * mint step fails or is skipped stays on the pre-ceremony rule until a nonce exists for
  * it, and refusing nonce-less releases outright once the ceremony is wired is step 2's
  * call. Nonce-less honors are marked in [LeadState.nonceLessReleases], keyed by gate to
- * the honoring release's seq, so the disposition stays legible after the fact — and a
- * later ceremony release of a re-opened gate stays distinguishable from the mark.
+ * the FIRST honoring release's seq, so the disposition stays legible after the fact — the
+ * honor is itself single-use per gate, mirroring the consumed-nonce rule: a second
+ * nonce-less release of a marked gate folds stale rather than silently re-honoring and
+ * retargeting the mark. That also means a re-opened gate cannot be honored nonce-less a
+ * second time within a ticket (the guard reads the mark, which [LeadKinds.TICKET_DONE]
+ * clears with the rest of the per-ticket state) — deliberate conservatism on a stub
+ * path, and visible in [LeadState.staleReleases] rather than silent. A later ceremony
+ * release of a re-opened gate stays distinguishable from the mark.
  *
  * On the re-open shapes several cells exercise: the daemon opens each gateId at most once
  * per ticket (LeadDaemon's seen-gate guard), so a re-opened gate is a journal-level fold
@@ -702,6 +708,9 @@ private fun foldRelease(
   val nonceLess: Map<String, Long>
   if (nonce == null) {
     if (s.issuedNonces.values.any { it.gateId == gateId }) return stale()
+    // A nonce-less honor is itself single-use per gate, mirroring the consumed-nonce
+    // rule: a replay folds stale, and the mark keeps the first honoring seq.
+    if (gateId in s.nonceLessReleases) return stale()
     consumed = s.consumedNonces
     nonceLess = s.nonceLessReleases + (gateId to e.seq)
   } else {
@@ -731,15 +740,22 @@ private fun foldRelease(
 /** Required payload field. JsonNull IS a JsonPrimitive whose content is the string
  * "null", so without the explicit check a null-valued field on a known kind would fold
  * onward as a working four-character string (a mint of the guessable nonce "null")
- * instead of failing CLASSIFIED as the payload-contract drift it is. */
+ * instead of failing CLASSIFIED as the payload-contract drift it is. Non-string scalars
+ * are refused for the same reason — a numeric 123 must not fold onward as the string
+ * "123" — matching the strict readers the shared auth codec sets the doctrine with. */
 private fun kotlinx.serialization.json.JsonObject.str(k: String): String {
   val el = this[k] ?: throw IllegalArgumentException("payload field '$k' is missing")
   require(el !is kotlinx.serialization.json.JsonNull) { "payload field '$k' is null" }
-  return el.jsonPrimitive.content
+  val prim = el.jsonPrimitive
+  require(prim.isString) { "payload field '$k' must be a JSON string, got '${prim.content}'" }
+  return prim.content
 }
 
 /** Optional payload field: absent and JsonNull both read as "no value" — an optional
- * field explicitly set to null must not become the string "null". */
+ * field explicitly set to null must not become the string "null". Deliberately tolerant
+ * of non-string scalars, unlike [str]: on the release path a coerced number can only
+ * miss (an unminted nonce, a mismatched digest — both fold stale, visibly), and
+ * [accruedCost]'s malformed-means-zero contract sits on this reader. */
 private fun kotlinx.serialization.json.JsonObject.strOrNull(k: String): String? {
   val el = this[k] ?: return null
   if (el is kotlinx.serialization.json.JsonNull) return null
