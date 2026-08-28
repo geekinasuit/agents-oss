@@ -1,6 +1,8 @@
 #!/usr/bin/env kotlin
 
 @file:DependsOn("com.github.ajalt.clikt:clikt-jvm:5.1.0")
+@file:DependsOn("org.apache.commons:commons-compress:1.27.1")
+@file:Import("lib/ReleaseCore.kts")
 
 /**
  * Release automation: packages the repository's tracked files into a source tarball,
@@ -12,17 +14,30 @@
  *
  * Notes: when --notes-file is absent, the notes are generated — a changelog of
  * merged-commit subjects since the previous release (the highest vX.Y.Z tag the FORGE
- * holds, newest first, PR numbers intact), closed by the consumer pin block. --dry-run
- * prints the notes that would ship, so they can be reviewed before a real publish. A tag
- * that already exists is refused, including on a dry run: publishing would bind the release
- * to that tag and drop the target commit, so the release is wrong either way, and the
- * pre-declared next version is what wants bumping.
+ * holds, newest first, PR numbers intact), closed by the consumer pin block. When
+ * --notes-file is given, its content ships as written PLUS the pin block appended — the
+ * pin section is the one part a consumer actually needs, so no notes path omits it; a pin
+ * block already in the supplied file is not detected, so it would ship duplicated.
+ * --dry-run prints the notes that would ship, so they can be reviewed before a real
+ * publish. A tag that already exists is refused, including on a dry run: publishing would
+ * bind the release to that tag and drop the target commit, so the release is wrong either
+ * way, and the pre-declared next version is what wants bumping.
+ *
+ * The archive is written with normalized entry metadata — fixed order (the tracked
+ * fileset's), zero mtimes, zero uid/gid, mode by executable bit alone, no gzip timestamp
+ * (see scripts/lib/ReleaseCore.kts for the exact contract and its honest residual) — so
+ * its bytes are a function of the released commit's content. That is what makes the
+ * dry-run pin block REAL: the hash a dry run prints is the hash the publish records.
  *
  * Requirements: run from the repository root of a jj workspace (colocated or not) with a
- * clean working tree; the `gh` CLI authenticated for this repository; network (the forge is
- * asked which tags exist, and clikt is fetched from Maven Central by the script runner on
- * first run). Generating notes additionally needs the previous release tag present in this
- * workspace, since the changelog range is resolved here; --notes-file skips that.
+ * clean working tree (asserted structurally: the working-copy commit must be empty); the
+ * `gh` CLI authenticated for this repository; network (the forge is asked which tags exist,
+ * `jj git fetch` refreshes remote-tracking bookmarks so the target-commit-pushed check is a
+ * local read, and clikt + commons-compress are fetched from Maven Central by the script
+ * runner on first run). That fetch runs on --dry-run too, so a dry run updates remote-tracking
+ * bookmarks — the one repository state a dry run changes. Generating notes additionally
+ * needs the previous release tag present in this workspace, since the changelog range is
+ * resolved here; --notes-file skips that.
  */
 
 import com.github.ajalt.clikt.core.CliktCommand
@@ -69,13 +84,6 @@ fun exec(vararg cmd: String): String {
     return ran.out
 }
 
-/**
- * [run] the command where a nonzero exit is an ANSWER ("this revision does not resolve
- * here") rather than a breakage — returns the whole [Ran] so the caller can tell the answer
- * apart from a real failure by inspecting stderr, which a plain null cannot express.
- */
-fun probe(vararg cmd: String): Ran = run(*cmd)
-
 data class RepoFacts(val dirty: Boolean, val head: String, val files: String, val remote: String)
 
 /**
@@ -92,28 +100,12 @@ fun forgeTags(repoSlug: String): List<String> =
     exec("gh", "api", "repos/$repoSlug/tags", "--paginate", "--jq", ".[].name")
         .lines().map { it.trim() }.filter { it.isNotEmpty() }
 
-/**
- * Highest vX.Y.Z tag by numeric component compare (so v0.10.0 outranks v0.9.0, which a
- * lexicographic compare gets backwards), or null when the repository holds no release tag.
- * Treated as the predecessor of the release being cut, which assumes releases are cut in
- * ascending order from one line of history — true of this module, and the assumption to
- * revisit first if a maintenance branch ever gets its own releases.
- */
-fun highestReleaseTag(names: List<String>): String? =
-    names
-        .mapNotNull { name ->
-            Regex("""v(\d+)\.(\d+)\.(\d+)""").matchEntire(name)
-                ?.let { m -> name to m.groupValues.drop(1).map(String::toInt) }
-        }
-        .maxWithOrNull(compareBy({ it.second[0] }, { it.second[1] }, { it.second[2] }))
-        ?.first
-
 /** The previous release's commit as this workspace resolves it, or null when the workspace
- * has not fetched that tag. A nonzero exit for any other reason is a breakage, not an
- * answer: the two are told apart by jj's own "doesn't exist" wording, so a broken command
- * cannot masquerade as a missing tag. */
+ * has not fetched that tag. A nonzero exit here is an ANSWER ("this revision does not
+ * resolve here"), not a breakage — told apart from a real failure by jj's own "doesn't
+ * exist" wording, so a broken command cannot masquerade as a missing tag. */
 fun resolvePrevLocally(prevTag: String): String? {
-    val ran = probe("jj", "log", "-r", prevTag, "-T", "commit_id", "--no-graph")
+    val ran = run("jj", "log", "-r", prevTag, "-T", "commit_id", "--no-graph")
     if (ran.code == 0) return ran.out
     if (!ran.err.contains("doesn't exist")) {
         fail("could not resolve $prevTag in this workspace: ${ran.err}")
@@ -123,10 +115,13 @@ fun resolvePrevLocally(prevTag: String): String? {
 
 /** Merged-commit subjects in prev..head, newest first — the literal first line of each
  * description, one per commit. Squash subjects carry their PR number already; nothing here
- * truncates or rewords. */
+ * truncates or rewords. Blank-description commits are dropped by ReleaseCore's filter,
+ * which records that as a decision. */
 fun changelogSubjects(prev: String, head: String): List<String> =
-    exec("jj", "log", "-r", "$prev..$head", "-T", "description.first_line() ++ \"\\n\"", "--no-graph")
-        .lines().map { it.trim() }.filter { it.isNotEmpty() }
+    ReleaseCore.changelogSubjects(
+        exec("jj", "log", "-r", "$prev..$head", "-T", "description.first_line() ++ \"\\n\"", "--no-graph")
+            .lines()
+    )
 
 class Release : CliktCommand(name = "release") {
     override fun help(context: Context) =
@@ -136,7 +131,7 @@ class Release : CliktCommand(name = "release") {
         .required()
         .validate { require(Regex("""v\d+\.\d+\.\d+""").matches(it)) { "tag must look like v0.1.0, was '$it'" } }
 
-    private val notesFile: File? by option(help = "markdown file with the release notes; when absent, notes are generated (changelog since the previous tag + the consumer pin block)")
+    private val notesFile: File? by option(help = "markdown file with the release notes; ships as written plus the consumer pin block appended (do not include your own — it is always appended, so a duplicate would ship). When absent, notes are generated (changelog since the previous tag + the pin block)")
         .file(mustExist = true, canBeDir = false)
 
     private val dryRun: Boolean by option(help = "do everything except publish; print the gh command instead")
@@ -164,18 +159,38 @@ class Release : CliktCommand(name = "release") {
         if (!File(".jj").exists()) fail(".jj not found — this repository is worked with jj")
 
         val facts = RepoFacts(
-            dirty = !exec("jj", "st").contains("The working copy has no changes."),
+            // Structural, not prose: the working-copy commit must be empty. The tarball is
+            // built from files on disk while --target names @-, so this gate is what makes
+            // those the same bytes — and no status-message wording, commit description, or
+            // tracked filename can talk it open (see ReleaseCore.isDirty).
+            dirty = ReleaseCore.isDirty(exec("jj", "diff", "-r", "@", "--summary")),
             head = exec("jj", "log", "-r", "@-", "-T", "commit_id", "--no-graph"),
             files = exec("jj", "file", "list", "-r", "@-"),
-            remote = exec("jj", "git", "remote", "list").lineSequence().first()
-                .substringAfter(' ').trim(),
+            remote = try {
+                ReleaseCore.pickRemoteUrl(exec("jj", "git", "remote", "list").lines())
+            } catch (e: IllegalArgumentException) {
+                fail(e.message ?: "could not choose a remote")
+            },
         )
         if (facts.dirty) fail("working tree is dirty — commit or discard changes before releasing")
 
         val repoSlug = Regex("""github\.com[:/]([^/]+/[^/.\s]+)""").find(facts.remote)
             ?.groupValues?.get(1) ?: fail("could not parse a github.com owner/repo from remote '${facts.remote}'")
 
-        // ---- previous release (for the generated changelog) ----
+        // ---- refusals before any archive work ----
+        // gh release create --target needs facts.head on the forge, and the dry run catches
+        // that early. The clone already knows: a commit is pushed iff it is reachable from a
+        // remote-tracking bookmark. Asking jj rather than the forge keeps this a clean local
+        // yes/no — a network, auth, or rate-limit failure surfaces as a failed `jj git fetch`,
+        // never as a false "not pushed" the way one gh exit code would. Fetch first so the
+        // remote-tracking bookmarks reflect the forge now; gh release create stays the
+        // authority if they drift before publish.
+        exec("jj", "git", "fetch")
+        val unpushed = exec(
+            "jj", "log", "--no-graph", "-r", "${facts.head} ~ ::remote_bookmarks()", "-T", "commit_id"
+        ).isNotBlank()
+        if (unpushed) fail("target commit ${facts.head} is not on the forge — push before releasing")
+
         val tags = forgeTags(repoSlug)
         // Publishing binds the release to a pre-existing tag and drops the target commit, so
         // an existing tag makes THIS release wrong whatever its release state — refused here
@@ -187,55 +202,70 @@ class Release : CliktCommand(name = "release") {
                     " version, so bump it before cutting again"
             )
         }
-        val prevTag = highestReleaseTag(tags)
-        // A repository that has tags but none shaped vX.Y.Z would otherwise get the
-        // first-release notes, which read as a fact rather than the inference they are.
-        if (prevTag == null && tags.isNotEmpty()) {
-            fail("no vX.Y.Z release tag among ${tags.size} tags — release-tag shape is what the changelog range is computed from")
+
+        // ---- generated-notes preconditions, still before any archive work ----
+        // Everything in this block belongs to the generated changelog, so --notes-file
+        // skips all of it: a repository whose tags fit no release shape can still take a
+        // hand-written release, because it is never asked the previous-release question.
+        var prevTag: String? = null
+        var changelogLines: List<String>? = null
+        if (notesFile == null) {
+            prevTag = ReleaseCore.highestReleaseTag(tags)
+            // A repository that has tags but none shaped vX.Y.Z would otherwise get the
+            // first-release notes, which read as a fact rather than the inference they are.
+            if (prevTag == null && tags.isNotEmpty()) {
+                fail("no vX.Y.Z release tag among ${tags.size} tags — release-tag shape is what the changelog range is computed from")
+            }
+            if (prevTag != null) {
+                // Only the generated path needs the predecessor present locally: the
+                // changelog range is resolved in this workspace, so a tag published
+                // elsewhere (or before a fetch here) has to say what to do instead of
+                // surfacing a bare revision error.
+                if (resolvePrevLocally(prevTag) == null) {
+                    fail(
+                        "$prevTag exists on the forge but not in this workspace — fetch" +
+                            " before releasing, or pass --notes-file to skip the generated changelog"
+                    )
+                }
+                changelogLines = changelogSubjects(prevTag, facts.head)
+            }
         }
 
         // ---- build the source tarball from the tracked fileset ----
         val assetName = "$moduleName-$tag.tar.gz"
         val workDir = createTempDirectory("release-$moduleName").toFile()
-        val fileList = File(workDir, "files.txt").apply { writeText(facts.files + "\n") }
+        // Cleanup on every exit path, fail() included — fail() exits the process, and a
+        // shutdown hook is the one place that sees every exit. Nothing below hands out
+        // workDir paths that outlive the run except the uploaded asset, which gh has
+        // already read by then.
+        Runtime.getRuntime().addShutdownHook(Thread { workDir.deleteRecursively() })
         val asset = File(workDir, assetName)
-        exec("tar", "czf", asset.absolutePath, "-T", fileList.absolutePath)
+        val trackedPaths = facts.files.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        ReleaseCore.writeReproducibleTarGz(File("."), trackedPaths, asset)
 
         val digest = MessageDigest.getInstance("SHA-256").digest(asset.readBytes())
         val integrity = "sha256-" + Base64.getEncoder().encodeToString(digest)
 
         val assetUrl = "https://github.com/$repoSlug/releases/download/$tag/$assetName"
-        val pinBlock = """
-            bazel_dep(name = "$moduleName", version = "$version")
-            archive_override(
-                module_name = "$moduleName",
-                urls = ["$assetUrl"],
-                integrity = "$integrity",
-            )
-        """.trimIndent()
+        val pinBlock = ReleaseCore.pinBlock(moduleName, version, assetUrl, integrity)
 
-        // ---- notes: --notes-file verbatim, else generated (changelog + pin block) ----
-        val notes = notesFile ?: File(workDir, "notes.md").apply {
-            val heading = if (prevTag == null) "## Changes" else "## Changes since $prevTag"
-            val changes = when {
-                prevTag == null -> "First release tag in this repository."
-                else -> {
-                    // Only the generated path needs the predecessor present locally, which is
-                    // why the check lives here: the changelog range is resolved in this
-                    // workspace, so a tag published elsewhere (or before a fetch here) has to
-                    // say what to do instead of surfacing a bare revision error.
-                    if (resolvePrevLocally(prevTag) == null) {
-                        fail(
-                            "$prevTag exists on the forge but not in this workspace — fetch" +
-                                " before releasing, or pass --notes-file to skip the generated changelog"
-                        )
+        // ---- notes: --notes-file plus the pin block, else generated (changelog + pin block) ----
+        val notes = File(workDir, "notes.md").apply {
+            val supplied = notesFile
+            if (supplied != null) {
+                writeText(supplied.readText().trimEnd() + "\n\n" + ReleaseCore.pinSection(pinBlock))
+            } else {
+                val heading = if (prevTag == null) "## Changes" else "## Changes since $prevTag"
+                val changes = when {
+                    prevTag == null -> "First release tag in this repository."
+                    else -> {
+                        val subjects = changelogLines.orEmpty()
+                        if (subjects.isEmpty()) "No merged changes since $prevTag."
+                        else subjects.joinToString("\n") { "- $it" }
                     }
-                    val subjects = changelogSubjects(prevTag, facts.head)
-                    if (subjects.isEmpty()) "No merged changes since $prevTag."
-                    else subjects.joinToString("\n") { "- $it" }
                 }
+                writeText("$heading\n\n$changes\n\n" + ReleaseCore.pinSection(pinBlock))
             }
-            writeText("$heading\n\n$changes\n\n## Consume from another Bazel module\n\n```\n$pinBlock\n```\n")
         }
 
         // ---- publish ----
@@ -245,7 +275,7 @@ class Release : CliktCommand(name = "release") {
         if (dryRun) {
             println("dry run — skipping: gh release create $tag ${asset.name} --repo $repoSlug --target ${facts.head}")
             println()
-            println("--- release notes (${if (notesFile != null) "from --notes-file" else "generated"}) ---")
+            println("--- release notes (${if (notesFile != null) "from --notes-file + pin block" else "generated"}) ---")
             println(notes.readText().trimEnd())
             println("--- end release notes ---")
         } else {
