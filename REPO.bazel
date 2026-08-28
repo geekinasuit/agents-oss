@@ -1,0 +1,13 @@
+# Keep package wildcards out of the root workspace's own build outputs. As the root
+# module Bazel ignores its convenience symlinks automatically, but consumed as an
+# external repo (a local_path_override during development) nothing marks them, and
+# `@agency//...` from the consumer recurses into another workspace's output tree and
+# fails loading. REPO.bazel travels with the repo in both configurations; .bazelignore
+# is read for the main repository only.
+#
+# The glob matches every convenience symlink regardless of checkout: three are fixed
+# (bazel-bin/out/testlogs), but bazel-<name> is minted from the containing directory's
+# name, which this repo does not control. `.gitignore` uses the same `bazel-*`.
+ignore_directories([
+    "bazel-*",
+])

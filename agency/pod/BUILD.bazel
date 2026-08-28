@@ -235,9 +235,16 @@ kt_jvm_test(
 # substrate libs (//agency/shared/harness) on one classpath — the exact co-linking case
 # AGENCY-027 exists for. Pointed at the client test, a second family arriving through the
 # harness would not move the query result and CI would stay green.
+#
+# The expression names its target through the module's own repo (`@agency`), never a bare
+# `//agency/pod:` label: genquery expression strings parse against the MAIN repo of
+# whatever build is running, so the bare form resolves only when this module IS the root —
+# from a consumer it is a package-not-found analysis error that aborts the whole
+# invocation. `@agency` resolves to this module both as root and as a dependency, provided
+# the consumer keeps the default `repo_name` for its bazel_dep on `agency`.
 genquery(
     name = "acp_coroutines_deps",
-    expression = "filter(coroutines, deps(//agency/pod:acp_pod_engine_test))",
+    expression = "filter(coroutines, deps(@agency//agency/pod:acp_pod_engine_test))",
     opts = [
         "--notool_deps",
         "--noimplicit_deps",

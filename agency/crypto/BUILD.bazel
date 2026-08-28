@@ -1,4 +1,4 @@
-load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
 
 # Step-0 crypto probe for the authorization layer: does this platform, this toolchain, and
 # this dependency actually produce the bytes BIP-340 and NIP-44 define?
@@ -44,33 +44,56 @@ kt_jvm_library(
 # dependency too, so :probe_support does not also belong in deps. The alternative would be to
 # widen the support API to public, which would advertise a test-scope reference
 # implementation as if it were something to build on.
-kt_jvm_test(
-    name = "bip340_vector_test",
-    size = "small",
+kt_jvm_library(
+    name = "bip340_vector_test_lib",
+    testonly = True,
     srcs = ["Bip340VectorTest.kt"],
     associates = [":probe_support"],
-    data = ["testdata/bip340-test-vectors.csv"],
-    test_class = "com.geekinasuit.agency.crypto.Bip340VectorTest",
-    # The natives load reflectively from the classpath — runtime-only, like the sqlite JDBC
-    # driver in agency/shared/journal.
-    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
     deps = [
         "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jvm",
         "@maven//:junit_junit",
     ],
 )
 
-kt_jvm_test(
-    name = "nip44_vector_test",
+# Native java_test around the Kotlin sources, same split as the scenario tests in
+# agency/lead and agency/shared/journal: the vector file's runfiles path arrives through
+# `env` via $(rlocationpath) — its leading repo segment depends on whether this module is
+# the build root or a consumed dependency, so only the build can spell it, and only native
+# java_test's location expansion in `env` is documented core behavior.
+java_test(
+    name = "bip340_vector_test",
     size = "small",
+    data = ["testdata/bip340-test-vectors.csv"],
+    env = {"BIP340_VECTORS": "$(rlocationpath testdata/bip340-test-vectors.csv)"},
+    test_class = "com.geekinasuit.agency.crypto.Bip340VectorTest",
+    runtime_deps = [
+        ":bip340_vector_test_lib",
+        # The natives load reflectively from the classpath — runtime-only, like the sqlite
+        # JDBC driver in agency/shared/journal.
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm",
+    ],
+)
+
+kt_jvm_library(
+    name = "nip44_vector_test_lib",
+    testonly = True,
     srcs = ["Nip44VectorTest.kt"],
     associates = [":probe_support"],
-    data = ["testdata/nip44.vectors.json"],
-    test_class = "com.geekinasuit.agency.crypto.Nip44VectorTest",
-    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
     deps = [
         "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jvm",
         "@maven//:junit_junit",
         "@maven//:org_json_json",
+    ],
+)
+
+java_test(
+    name = "nip44_vector_test",
+    size = "small",
+    data = ["testdata/nip44.vectors.json"],
+    env = {"NIP44_VECTORS": "$(rlocationpath testdata/nip44.vectors.json)"},
+    test_class = "com.geekinasuit.agency.crypto.Nip44VectorTest",
+    runtime_deps = [
+        ":nip44_vector_test_lib",
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm",
     ],
 )

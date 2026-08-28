@@ -23,7 +23,7 @@ import org.junit.Test
  */
 class Nip44VectorTest {
     private val vectors: JSONObject by lazy {
-        JSONObject(ProbeVectors.read("nip44.vectors.json")).getJSONObject("v2")
+        JSONObject(ProbeVectors.read("NIP44_VECTORS")).getJSONObject("v2")
     }
 
     private fun valid(name: String) = vectors.getJSONObject("valid").getJSONArray(name)

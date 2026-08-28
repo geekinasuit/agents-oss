@@ -37,7 +37,13 @@ the install (the batteries drive a wire-faithful fake agent); it is required to 
 real-adapter pod canary.
 
 Consume from another Bazel module with `bazel_dep(name = "agency", ...)` plus an
-`archive_override` on a release archive until the module is in a registry.
+`archive_override` on a release archive until the module is in a registry. Requires
+Bazel 8+, and keep the default `repo_name`: the `agency/pod` genquery targets resolve
+`@agency` against the root module's repo mapping, so renaming the dep fails analysis.
+The JDK-21 pin in this module's `.bazelrc` is only needed to *run* its own test suite
+(the rules_kotlin launcher rejects JDK 24+); compiling against `@agency//...` needs no
+flags. You don't inherit this module's `.bazelrc`, so to *run* its suite on JDK 24+ set
+`--java_runtime_version` to a JDK ≤ 23 yourself.
 
 ## License
 

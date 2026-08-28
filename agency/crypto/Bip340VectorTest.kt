@@ -45,7 +45,7 @@ class Bip340VectorTest {
     )
 
     private val vectors: List<Vector> by lazy {
-        ProbeVectors.read("bip340-test-vectors.csv")
+        ProbeVectors.read("BIP340_VECTORS")
             .lineSequence()
             .drop(1) // header
             .filter { it.isNotBlank() }

@@ -9,10 +9,18 @@ import java.io.File
  * verbatim — see testdata/PROVENANCE.md for sources and for which vectors each probe uses.
  */
 internal object ProbeVectors {
-    /** Reads a checked-in vector file out of the test's runfiles. */
-    fun read(name: String): String {
+    /**
+     * Reads a checked-in vector file out of the test's runfiles.
+     *
+     * [envVar] names an environment variable carrying the file's runfiles path, which the
+     * test target supplies via `env = {"...": "$(rlocationpath testdata/...)"}` — the path's
+     * leading repo segment is `_main` when this module is the build root and the module's
+     * canonical name when consumed, so only the build can spell it.
+     */
+    fun read(envVar: String): String {
         val srcdir = System.getenv("TEST_SRCDIR") ?: error("TEST_SRCDIR not set (not under bazel test)")
-        val f = File(srcdir, "_main/agency/crypto/testdata/$name")
+        val rloc = System.getenv(envVar) ?: error("$envVar not set (the test target supplies it via rlocationpath)")
+        val f = File(srcdir, rloc)
         check(f.exists()) { "vector file not found in runfiles at $f" }
         return f.readText()
     }

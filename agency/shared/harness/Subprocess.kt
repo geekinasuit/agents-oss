@@ -12,6 +12,7 @@ import java.nio.file.Files
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
+import java.util.stream.Collectors
 
 /** Terminal outcome of a subprocess: captured streams + exit + wall time. */
 data class ProcResult(
@@ -50,7 +51,9 @@ class RunningProc(val process: Process, val startedAtMs: Long) {
    */
   fun killTreeNow(): Long {
     val t0 = System.nanoTime()
-    val snapshot = process.toHandle().descendants().toList()
+    // Collectors.toList(), not Stream.toList() (Java 16+): the compile JDK is the
+    // consuming root module's choice, so these sources stay on pre-16 APIs.
+    val snapshot = process.toHandle().descendants().collect(Collectors.toList())
     snapshot.forEach { it.destroyForcibly() }
     process.destroyForcibly()
     process.waitFor(10, TimeUnit.SECONDS)
@@ -95,7 +98,9 @@ object Subprocess {
 
   /** Kill a process and all its descendants (grandchildren etc.), then the root. */
   fun killTree(process: Process) {
-    process.toHandle().descendants().toList().forEach { it.destroyForcibly() }
+    // Collectors.toList(), not Stream.toList() (Java 16+): the compile JDK is the
+    // consuming root module's choice, so these sources stay on pre-16 APIs.
+    process.toHandle().descendants().collect(Collectors.toList()).forEach { it.destroyForcibly() }
     process.destroyForcibly()
   }
 

@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.stream.Collectors
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -974,7 +975,9 @@ class AcpPodEngineTest {
 
   private fun descendantPidsOf(pid: Long): List<Long> =
     ProcessHandle.of(pid)
-      .map { h -> h.descendants().toList().map { d -> d.pid() } }
+      // Collectors.toList(), not Stream.toList() (Java 16+): the compile JDK is the
+      // consuming root module's choice, so these sources stay on pre-16 APIs.
+      .map { h -> h.descendants().collect(Collectors.toList()).map { d -> d.pid() } }
       .orElse(emptyList())
 
   private fun awaitDescendants(pid: Long, atLeast: Int): List<Long> {
