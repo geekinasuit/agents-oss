@@ -10,7 +10,7 @@
  * and prints the ready-to-paste `bazel_dep` + `archive_override` block for consumers.
  *
  * Usage:
- *   scripts/release.main.kts --tag v0.1.0 [--notes-file notes.md] [--dry-run]
+ *   scripts/release.main.kts --tag v0.1.0 [--notes-file notes.md] [--dry-run] [--skip-consumer-smoke]
  *
  * Notes: when --notes-file is absent, the notes are generated — a changelog of
  * merged-commit subjects since the previous release (the highest vX.Y.Z tag the FORGE
@@ -29,9 +29,18 @@
  * its bytes are a function of the released commit's content. That is what makes the
  * dry-run pin block REAL: the hash a dry run prints is the hash the publish records.
  *
+ * Before publishing, a consumer-smoke gate extracts the just-built tarball and runs
+ * `bazel test @<module>//...` against it from a throwaway consumer workspace — proving the
+ * packaged bytes build and test as an EXTERNAL dependency (canonical name `<module>+`, not
+ * the root's `_main`) rather than only as the root module. A real publish always runs it; a
+ * dry run runs it too (so the dry run is the gate's first real exercise) and can skip it with
+ * --skip-consumer-smoke to preview notes without the ~90s build. It is a MINIMAL consumer
+ * config (a JDK 21 pin), a consumability floor — not a promise about any named downstream.
+ *
  * Requirements: run from the repository root of a jj workspace (colocated or not) with a
  * clean working tree (asserted structurally: the working-copy commit must be empty); the
- * `gh` CLI authenticated for this repository; network (the forge is asked which tags exist,
+ * `gh` CLI authenticated for this repository; `bazel` on PATH (the consumer-smoke gate runs
+ * it, on --dry-run too unless --skip-consumer-smoke); network (the forge is asked which tags exist,
  * `jj git fetch` refreshes remote-tracking bookmarks so the target-commit-pushed check is a
  * local read, and clikt + commons-compress are fetched from Maven Central by the script
  * runner on first run). That fetch runs on --dry-run too, so a dry run updates remote-tracking
@@ -82,6 +91,69 @@ fun exec(vararg cmd: String): String {
     val ran = run(*cmd)
     if (ran.code != 0) fail("command failed: ${cmd.joinToString(" ")}\n${ran.out}\n${ran.err}")
     return ran.out
+}
+
+/**
+ * Run [cmd] in [dir] with its stdout and stderr streamed straight to this process's
+ * terminal, returning the exit code. Distinct from [run], whose output is PARSED: here the
+ * output is a ~90s bazel build the operator watches live, so it is inherited, not captured.
+ */
+fun runStreaming(dir: File, vararg cmd: String): Int =
+    try {
+        ProcessBuilder(*cmd).directory(dir).inheritIO().start().waitFor()
+    } catch (e: java.io.IOException) {
+        fail("could not run '${cmd.joinToString(" ")}' in $dir: ${e.message}")
+    }
+
+/**
+ * Consumer-smoke gate: prove the just-built [asset] tarball builds and tests as an EXTERNAL
+ * Bazel dependency before it is published. The tarball is extracted to a throwaway directory
+ * (so exactly the shipped bytes are under test — this also catches a file the module needs
+ * but forgot to track, which pointing at the working copy would silently pass), and a
+ * throwaway consumer whose local_path_override names the extracted module pulls it in. As a
+ * DEPENDENCY its canonical repo name resolves to `<module>+`, never the root module's
+ * `_main` — the exact condition AGENCY-038 is about. `bazel test @<module>//...` must pass,
+ * or the release is refused.
+ *
+ * This checks the module is consumable under a MINIMAL consumer config — a JDK 21 runtime
+ * pin, which agency's test launcher needs (a 24+ runtime rejects the security-manager flag
+ * its tests set) — NOT that any particular downstream's config works: coach, for one,
+ * carries a --config=ci for a sandbox issue agents-oss does not have. It is a consumability
+ * floor, not a promise about a named consumer.
+ */
+fun consumerSmoke(asset: File, moduleName: String, version: String) {
+    val probeRoot = createTempDirectory("release-consumer-$moduleName").toFile()
+    Runtime.getRuntime().addShutdownHook(Thread { probeRoot.deleteRecursively() })
+
+    val moduleDir = File(probeRoot, "module")
+    ReleaseCore.extractTarGz(asset, moduleDir)
+    val bazelVersionFile = File(moduleDir, ".bazelversion")
+    if (!bazelVersionFile.isFile) {
+        fail("packaged tarball has no .bazelversion — the consumer smoke pins the module's bazel version from it")
+    }
+
+    val workspace = File(probeRoot, "consumer").apply { mkdirs() }
+    File(workspace, "MODULE.bazel")
+        .writeText(ReleaseCore.consumerProbeModule(moduleName, version, moduleDir.absolutePath))
+    File(workspace, ".bazelversion").writeText(bazelVersionFile.readText().trim() + "\n")
+    // Minimal consumer config, NOT coach's: only the JDK 21 runtime pin agency's test
+    // launcher needs. Mirrors agents-oss's own .bazelrc, under which its CI is green.
+    File(workspace, ".bazelrc").writeText(
+        "common --java_runtime_version=21\ncommon --tool_java_runtime_version=21\ntest --test_output=errors\n"
+    )
+    // Its own output base under probeRoot, torn down with the rest, so the probe's Bazel
+    // analysis and action state never mingle with the developer's default output base.
+    val outputBase = File(probeRoot, "ob")
+
+    println("consumer smoke: bazel test @$moduleName//... against the packaged tarball")
+    val code = runStreaming(
+        workspace,
+        "bazel", "--output_base=${outputBase.absolutePath}", "test", "@$moduleName//...",
+    )
+    if (code != 0) {
+        fail("consumer smoke FAILED (exit $code) — the packaged module does not build/test as an external dependency")
+    }
+    println("consumer smoke: passed")
 }
 
 data class RepoFacts(val dirty: Boolean, val head: String, val files: String, val remote: String)
@@ -137,8 +209,21 @@ class Release : CliktCommand(name = "release") {
     private val dryRun: Boolean by option(help = "do everything except publish; print the gh command instead")
         .flag()
 
+    private val skipConsumerSmoke: Boolean by option(
+        "--skip-consumer-smoke",
+        help = "skip the consumer-smoke gate; honored ONLY with --dry-run (a real publish always runs it)." +
+            " For previewing notes without the ~90s consumer build.",
+    ).flag()
+
     override fun run() {
         val version = tag.removePrefix("v")
+
+        // Argument check, up front: skipping the gate is a dry-run-only preview. Refusing it
+        // here — before any fetch, tag query, or tarball build — makes it an argument error,
+        // not work thrown away just before publish.
+        if (skipConsumerSmoke && !dryRun) {
+            fail("--skip-consumer-smoke is only valid with --dry-run; a real publish always runs the consumer-smoke gate")
+        }
 
         // ---- repository facts ----
         if (!File("MODULE.bazel").isFile) fail("run from the repository root (MODULE.bazel not found)")
@@ -266,6 +351,16 @@ class Release : CliktCommand(name = "release") {
                 }
                 writeText("$heading\n\n$changes\n\n" + ReleaseCore.pinSection(pinBlock))
             }
+        }
+
+        // ---- consumer-smoke gate: the packaged module must build+test as an external dep ----
+        // Runs before publish and refuses it on failure. A real publish ALWAYS runs it; a dry
+        // run may skip it to preview notes without the ~90s consumer build (the skip-on-real-
+        // publish misuse is already refused at the top of run(), so here skip implies dry run).
+        if (skipConsumerSmoke) {
+            println("consumer smoke: SKIPPED (--skip-consumer-smoke; dry run only)")
+        } else {
+            consumerSmoke(asset, moduleName, version)
         }
 
         // ---- publish ----

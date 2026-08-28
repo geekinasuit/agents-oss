@@ -17,9 +17,11 @@
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import java.io.File
 import java.nio.file.Files
 import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 import kotlin.io.path.createTempDirectory
 import kotlin.system.exitProcess
 
@@ -166,6 +168,46 @@ ok("pin block names the module and version",
     "bazel_dep(name = \"agency\", version = \"0.2.0\")" in pin)
 ok("pin block carries the integrity", "integrity = \"sha256-abc\"," in pin)
 ok("pin section fences the block", ReleaseCore.pinSection(pin).let { "```" in it && pin in it })
+
+// ---- consumerProbeModule shape ----
+
+val probeModule = ReleaseCore.consumerProbeModule("agency", "0.1.2", "/tmp/extracted/agency")
+ok("probe depends on the module by name and version",
+    "bazel_dep(name = \"agency\", version = \"0.1.2\")" in probeModule)
+ok("probe local_path_overrides to the extracted path",
+    "local_path_override(" in probeModule && "path = \"/tmp/extracted/agency\"," in probeModule)
+// The root of the probe workspace is a DISTINCT module, not agency — that is what makes
+// agency a dependency (canonical `agency+`) rather than the root (`_main`).
+ok("probe root is a distinct consumer module", "module(name = \"agency_consumer_probe\"" in probeModule)
+ok("probe ends with a trailing newline", probeModule.endsWith("\n"))
+
+// ---- extractTarGz round-trips the writer ----
+
+// out1 is the writer's archive of zed.txt, a/one.txt (plain, 644), b/two.sh (exec, 755),
+// built above before the mtime re-touch — its content is the original fixture.
+val extractDir = File(fixtureRoot, "extracted")
+val extractedNames = ReleaseCore.extractTarGz(out1, extractDir)
+eq("extraction returns the archived names in order", paths, extractedNames)
+eq("a plain file round-trips its content", "plain file\n", File(extractDir, "a/one.txt").readText())
+eq("an executable round-trips its content", "#!/bin/sh\necho hi\n", File(extractDir, "b/two.sh").readText())
+ok("the executable bit is restored", File(extractDir, "b/two.sh").canExecute())
+ok("a plain file is not made executable", !File(extractDir, "a/one.txt").canExecute())
+
+// A crafted archive whose entry name escapes the root ("../") is refused, not written
+// outside it — the reading counterpart of the writer's symlink refusal.
+val evil = File(fixtureRoot, "evil.tar.gz")
+GZIPOutputStream(evil.outputStream()).use { gz ->
+    TarArchiveOutputStream(gz).use { tar ->
+        val body = "pwned\n".toByteArray()
+        val e = TarArchiveEntry("../escape.txt").apply { size = body.size.toLong() }
+        tar.putArchiveEntry(e)
+        tar.write(body)
+        tar.closeArchiveEntry()
+    }
+}
+refuses("a path-traversal entry is refused") {
+    ReleaseCore.extractTarGz(evil, File(fixtureRoot, "evil-out"))
+}
 
 // ---- verdict ----
 
