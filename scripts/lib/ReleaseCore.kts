@@ -14,9 +14,11 @@
  */
 
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import java.io.File
 import java.nio.file.Files
+import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 object ReleaseCore {
@@ -145,4 +147,62 @@ object ReleaseCore {
      * actually needs. */
     fun pinSection(pinBlock: String): String =
         "## Consume from another Bazel module\n\n```\n$pinBlock\n```\n"
+
+    /**
+     * Extracts a tar.gz [archive] into [destDir], restoring the executable bit that
+     * [writeReproducibleTarGz] encodes, and returns the archived entry names in read order.
+     * The inverse of the writer, and the release consumer-smoke gate's way of testing
+     * exactly the bytes that ship: an extracted tarball omits any file the module needs but
+     * forgot to track, so a build against it catches that gap, which a build against the
+     * working copy cannot.
+     *
+     * Entry paths are confined to [destDir]: one resolving outside it (a "../" name) is
+     * refused rather than written — the reading counterpart of the writer's symlink refusal.
+     * The writer emits regular files only, so a non-file entry is refused rather than
+     * silently skipped, keeping the two halves the same shape.
+     */
+    fun extractTarGz(archive: File, destDir: File): List<String> {
+        destDir.mkdirs()
+        val destPrefix = destDir.canonicalPath + File.separator
+        val names = mutableListOf<String>()
+        GZIPInputStream(archive.inputStream().buffered()).use { gz ->
+            TarArchiveInputStream(gz).use { tar ->
+                while (true) {
+                    val entry = tar.nextEntry ?: break
+                    require(entry.isFile) { "archive entry is not a regular file: ${entry.name}" }
+                    val out = File(destDir, entry.name)
+                    require(out.canonicalPath.startsWith(destPrefix)) {
+                        "archive entry escapes the extraction root: ${entry.name}"
+                    }
+                    out.parentFile?.mkdirs()
+                    out.outputStream().use { tar.copyTo(it) }
+                    // Owner-execute bit from the entry mode → executable for all, mirroring
+                    // the writer's 0755/0644 split; scripts in the tarball stay runnable.
+                    out.setExecutable((entry.mode and "100".toInt(8)) != 0, false)
+                    names.add(entry.name)
+                }
+            }
+        }
+        return names
+    }
+
+    /**
+     * MODULE.bazel for a throwaway consumer that pulls [moduleName] in as a LOCAL dependency,
+     * so its canonical repo name resolves to `<moduleName>+` (the dependency form) rather
+     * than the root module's `_main`. The release consumer-smoke gate writes this beside an
+     * extracted tarball and runs `bazel test @<moduleName>//...` against it — which is how a
+     * `_main`-root assumption anywhere in the module surfaces before a consumer hits it.
+     * [version] rides along for parity with the published pin, though local_path_override
+     * makes the declared version advisory.
+     */
+    fun consumerProbeModule(moduleName: String, version: String, modulePath: String): String =
+        """
+        module(name = "${moduleName}_consumer_probe", version = "0.0.0")
+
+        bazel_dep(name = "$moduleName", version = "$version")
+        local_path_override(
+            module_name = "$moduleName",
+            path = "$modulePath",
+        )
+        """.trimIndent() + "\n"
 }
