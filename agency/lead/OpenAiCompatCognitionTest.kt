@@ -81,7 +81,7 @@ class OpenAiCompatCognitionTest {
   fun metaIsSubstrateOwnedAndNotTakenFromTheEndpointsReply() {
     // The envelope's own `model` field is endpoint-controlled. If it reached meta it would
     // reach the journal, where a provider could then name itself whatever it liked in a
-    // row the substrate authored (AGENCY-029).
+    // row the substrate authored.
     val out =
       cognitionFor(
           FakeOpenAiEndpoint.reply(
