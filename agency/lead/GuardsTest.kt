@@ -411,6 +411,31 @@ class GuardsTest {
   }
 
   @Test
+  fun proposedRowMetaCannotOverwriteTheSubstratesOwnAccount() {
+    val dir = tmp.newFolder()
+    // COGNITION_PROPOSED is a cognition-origin row, but its top-level strategy / reasoning /
+    // proposals are still the substrate's structured account of the turn. A strategy's free-form
+    // meta must not be able to redefine them by colliding on a key.
+    val junk =
+      CognitionOutput(
+        listOf(Proposal.ProposeStatus("real work")),
+        "the substrate's own reasoning record",
+        meta = mapOf("strategy" to "spoofed", "reasoning" to "spoofed provenance"),
+      )
+    val rig = Rig(dir, mutableListOf(junk), ticket = null)
+    rig.daemon.driveUntilQuiescent()
+
+    val row = rig.store.readAll().single { it.kind == LeadKinds.COGNITION_PROPOSED }
+    assertTrue("substrate strategy name survives", row.payloadJson.contains("programmed"))
+    assertTrue(
+      "substrate reasoning survives",
+      row.payloadJson.contains("the substrate's own reasoning record"),
+    )
+    assertFalse("colliding meta values are dropped", row.payloadJson.contains("spoofed"))
+    rig.store.close()
+  }
+
+  @Test
   fun anAttemptCapBelowOneIsRefusedAtConstruction() {
     val dir = tmp.newFolder()
     // Zero would skip cognition entirely and then escalate as though it had asked — a

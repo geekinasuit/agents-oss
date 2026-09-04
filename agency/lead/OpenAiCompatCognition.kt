@@ -28,7 +28,7 @@ class OpenAiCompatCognition(
   /**
    * [CognitionOutput.meta] is built from a fixed set of substrate-owned keys and never
    * from the provider's response object, so no field the endpoint controls can collide
-   * with the substrate's own account of the turn when the row is journaled (AGENCY-029).
+   * with the substrate's own account of the turn when the row is journaled.
    *
    * It carries token counts and no `costUsd`. Cost is not the observable on a free local
    * model, and writing a 0.0 into the key [LeadState.cognitionSpendUsd] accumulates would

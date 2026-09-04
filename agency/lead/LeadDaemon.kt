@@ -897,9 +897,12 @@ class LeadDaemon(
     store.append(
       LeadKinds.COGNITION_PROPOSED,
       buildJsonObject {
+        // Provenance meta first, our structured account last: strategy / reasoning / proposals
+        // are the substrate's own record of the turn, and a meta key colliding with one of ours
+        // must not be able to overwrite them. Mirrors journalMalformedCognition.
+        for ((k, v) in out.meta) put(k, v.take(MAX_JOURNALED_STRING))
         put("strategy", cognition.name)
         put("reasoning", out.reasoning.take(MAX_JOURNALED_STRING))
-        for ((k, v) in out.meta) put(k, v.take(MAX_JOURNALED_STRING))
         put(
           "proposals",
           buildJsonArray {
