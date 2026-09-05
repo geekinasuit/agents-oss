@@ -19,3 +19,33 @@ jobs:
       # .main.kts files); the runner self-locates, so this tests the checked-out tree.
       - name: script tests
         run: scripts/run-script-tests.sh
+
+  # Enforce the CONTRIBUTING sign-off (Developer Certificate of Origin). PRs only — the
+  # base..head range is a pull_request concept, and the post-merge push to main carries only
+  # the squashed result.
+  dco:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: DCO sign-off check
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          shas="$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")"
+          fail=0
+          for sha in $shas; do
+            if ! git show -s --format='%B' "$sha" | grep -qiE '^Signed-off-by: .+ <[^>]+>$'; then
+              echo "::error::Commit ${sha} has no Signed-off-by line (see CONTRIBUTING.md; add with 'git commit -s')."
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "Every commit must carry 'Signed-off-by: Name <email>' (CONTRIBUTING.md). Add with: git commit -s"
+            exit 1
+          fi
+          echo "DCO: all commits signed off."
