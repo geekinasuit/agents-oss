@@ -21,8 +21,8 @@ jobs:
         run: scripts/run-script-tests.sh
 
   # Enforce the CONTRIBUTING sign-off (Developer Certificate of Origin). PRs only — the
-  # base..head range is a pull_request concept, and the post-merge push to main carries only
-  # the squashed result.
+  # per-PR commit range is a pull_request concept, and the post-merge push to main carries
+  # only the squashed result.
   dco:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -32,11 +32,17 @@ jobs:
           fetch-depth: 0
       - name: DCO sign-off check
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          shas="$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")"
+          # Diff from the CURRENT tip of the base branch, not the event payload's base.sha.
+          # That sha is frozen when the event fires, so once main advances and the branch is
+          # rebased onto it, a base.sha range sweeps in main's own commits — GitHub's unsigned
+          # squash merges — and false-fails. Fetch the base ref so origin/<base> is current;
+          # the range is then only the PR's own commits.
+          git fetch --no-tags --quiet origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          shas="$(git rev-list --no-merges "origin/${BASE_REF}..${HEAD_SHA}")"
           fail=0
           for sha in $shas; do
             if ! git show -s --format='%B' "$sha" | grep -qiE '^Signed-off-by: .+ <[^>]+>$'; then
