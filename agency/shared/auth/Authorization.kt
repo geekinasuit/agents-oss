@@ -125,10 +125,22 @@ class AllowList(principals: List<Principal>) {
 
 /**
  * The evidence record a release (or a rejected attempt) carries: the signed approval
- * itself — scheme-tagged key + signature + the carrier's own id for the signed artifact —
- * and what it committed to (gate, payload digest, nonce). Journaled verbatim so every
+ * itself — scheme-tagged key + signature over [signedPreimage], the canonical serialization
+ * the signature commits to — plus the carrier's own id for the artifact and a copy of what
+ * the approval committed to (gate, payload digest, nonce). Journaled verbatim so every
  * release is independently re-verifiable after the fact by anyone holding the allow-list,
  * without trusting the process that wrote it.
+ *
+ * [signedPreimage] is the evidence; the flat [publicKey], [payloadDigest], and [nonce]
+ * beside it are INDICES, not what a verifier trusts. A signature is over an identity
+ * derived by hashing the preimage, so a record giving only (key, signature, digest, nonce)
+ * proves the key signed SOME identity — never that the identity commits to THAT digest and
+ * THAT nonce (the committing fields are exactly what such a flattening omits). The
+ * mechanical layer recomputes the identity from [signedPreimage], verifies the signature
+ * over it, and reads the committed key/digest/nonce out of the verified serialization; the
+ * flat columns are for lookup only. [signedPreimage] is opaque here — how it serializes and
+ * how an identity recomputes from it is the verifying layer's business, kept out of this
+ * substrate-neutral vocabulary.
  */
 data class ApprovalEvidence(
   val schemeId: String,
@@ -136,11 +148,19 @@ data class ApprovalEvidence(
   val signature: String,
   /** The approval artifact's id in whatever substrate carried it — opaque here. Named for
    * the CARRIER abstraction, not any carrier's own noun, so the one field that points
-   * outward still reads substrate-neutral. */
+   * outward still reads substrate-neutral. A convenience for locating the artifact in its
+   * carrier, never a verification input: the mechanical layer recomputes identity from
+   * [signedPreimage] and never trusts this id. */
   val carrierArtifactId: String,
   val gateId: String,
   val payloadDigest: String,
   val nonce: String,
+  /** The canonical serialization the [signature] commits to — the evidence proper (see the
+   * class KDoc). Opaque bytes here; the verifying layer recomputes the signed identity from
+   * it. Nullable so a record that predates the field still parses: a null preimage cannot be
+   * re-verified, so the verifying layer treats it as unverifiable (fail-closed), never a
+   * pass. */
+  val signedPreimage: String? = null,
 ) {
   init {
     for ((name, v) in
@@ -155,6 +175,11 @@ data class ApprovalEvidence(
       )) {
       require(v.isNotBlank()) { "$name must be non-blank" }
     }
+    // Nullable — a record predating the field parses to null — but a PRESENT preimage is
+    // held to the same non-blank bar as the required fields.
+    signedPreimage?.let {
+      require(it.isNotBlank()) { "signedPreimage, when present, must be non-blank" }
+    }
   }
 
   fun toJson(): JsonObject =
@@ -166,6 +191,9 @@ data class ApprovalEvidence(
       put("gateId", gateId)
       put("payloadDigest", payloadDigest)
       put("nonce", nonce)
+      // Omitted when null so a record without a preimage serializes to exactly the pre-field
+      // shape — absence and a written value stay distinguishable on the way back in.
+      signedPreimage?.let { put("signedPreimage", it) }
     }
 
   companion object {
@@ -178,6 +206,7 @@ data class ApprovalEvidence(
         gateId = json.req("gateId", "approval evidence"),
         payloadDigest = json.req("payloadDigest", "approval evidence"),
         nonce = json.req("nonce", "approval evidence"),
+        signedPreimage = json.optStr("signedPreimage", "approval evidence"),
       )
   }
 }

@@ -42,3 +42,13 @@ internal fun JsonObject.reqInt(k: String, voice: String): Int {
   return prim.content.toIntOrNull()
     ?: throw IllegalArgumentException("$voice '$k' ('${prim.content}') is not an integer")
 }
+
+/**
+ * Optional string field: an ABSENT key reads as null — the one relaxation, so a record
+ * written before this field existed still parses. A PRESENT key is held to [req]'s full
+ * strictness (JsonNull, structured-where-scalar, and non-string scalars all refused): a
+ * field someone bothered to write is data, parsed as strictly as a required one, and an
+ * explicit `"k": null` stays a refusal, not a way to spell absence.
+ */
+internal fun JsonObject.optStr(k: String, voice: String): String? =
+  if (this[k] == null) null else req(k, voice)
