@@ -91,6 +91,10 @@ object LeadFixture {
         ticketSource = FileTicketSource(File(a.req("ticket-file"))),
         workdir = File(dir),
         effects = EffectReceiver(dir),
+        // The fixture releases nonce-less (AuthStub.appendRelease / --forge-origin), the
+        // pre-ceremony path quorum does not gate — so DENY_ALL is the honest auth here: no
+        // ceremony release is wired for it to clear.
+        leadAuth = LeadAuth.DENY_ALL,
         faults = ExitFault(a.opt("fault")),
         dedupEffects = !a.has("no-dedup"),
       )
@@ -109,7 +113,7 @@ object LeadFixture {
    */
   private fun release(store: SqliteStore, a: ArgMap) {
     val gateKind = a.req("gate-kind")
-    val lead = leadFold(store.readAll())
+    val lead = leadFold(store.readAll(), LeadAuth.DENY_ALL)
     val gate =
       lead.pendingGates.firstOrNull { it.gateKind == gateKind }
         ?: run {
@@ -145,7 +149,7 @@ object LeadFixture {
 
   private fun replay(store: SqliteStore, dir: String) {
     val entries = store.readAll()
-    val lead = leadFold(entries)
+    val lead = leadFold(entries, LeadAuth.DENY_ALL)
     val shared = fold(entries)
     val effectLines =
       lead.doneTickets.plus(listOfNotNull(lead.currentTicket)).associateWith {

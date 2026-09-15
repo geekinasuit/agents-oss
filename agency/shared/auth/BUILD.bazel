@@ -7,12 +7,16 @@ load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
 # evaluated as data (1 ≤ k ≤ n ≤ 32, depth-capped on the data path).
 #
 # Substrate-neutral by standing rule: no transport, relay, or event-format concept may
-# appear here. The mechanical re-verification layer verifies against these types; the
-# lead fold keeps its own journal-local records and does not depend on this target.
+# appear here. The mechanical re-verification layer verifies against these types: the lead
+# fold re-verifies each approval's signature over its committed preimage (ApprovalVerifier +
+# parseCommitted) and gates release on a quorum over the resulting verified approvers, so
+# //agency/lead depends on this target (a clean downward edge, like its journal dep). The
+# fold keeps its own journal-local records; only the verifying vocabulary is shared.
 
 kt_jvm_library(
     name = "auth",
     srcs = [
+        "ApprovalVerification.kt",
         "AuthJson.kt",
         "Authorization.kt",
         "Quorum.kt",
@@ -42,6 +46,19 @@ kt_jvm_test(
     size = "small",
     srcs = ["AuthorizationTest.kt"],
     test_class = "com.geekinasuit.agency.shared.auth.AuthorizationTest",
+    deps = [
+        ":auth",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "approval_verification_test",
+    size = "small",
+    srcs = ["ApprovalVerificationTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.auth.ApprovalVerificationTest",
     deps = [
         ":auth",
         "@maven//:junit_junit",

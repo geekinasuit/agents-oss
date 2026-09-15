@@ -1,7 +1,14 @@
 package com.geekinasuit.agency.lead
 
+import com.geekinasuit.agency.shared.auth.AllowList
+import com.geekinasuit.agency.shared.auth.ApprovalEvidence
+import com.geekinasuit.agency.shared.auth.ApprovalVerifier
+import com.geekinasuit.agency.shared.auth.Principal
 import com.geekinasuit.agency.shared.auth.QuorumGroup
+import com.geekinasuit.agency.shared.auth.SchemeKey
 import com.geekinasuit.agency.shared.auth.SignerLeaf
+import com.geekinasuit.agency.shared.auth.committedPreimage
+import com.geekinasuit.agency.shared.auth.oneOfOne
 import com.geekinasuit.agency.shared.auth.quorumSatisfied
 import com.geekinasuit.agency.shared.journal.JournalStore
 import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
@@ -35,7 +42,35 @@ class AuthFoldTest {
 
   private fun open(dir: String): JournalStore = SqliteStore(dir, componentId = "lead")
 
-  private fun JournalStore.lead(): LeadState = leadFold(readAll())
+  // -- authorization harness ----------------------------------------------------------------
+  //
+  // A permissive LeadAuth for the fold cells: every test principal is allow-listed under a
+  // distinct key, the verifier ACCEPTS unconditionally (the real crypto adapter is step 3 —
+  // these cells exercise the fold's verify-and-quorum WIRING, not secp256k1), and the quorum
+  // is 1-of-N so a single verified approval clears a ceremony release. Cells that need a
+  // richer tree compose one themselves over boundApprovers
+  // (approvalsAccumulateDurablyAndDeduplicate); cells that need a STRICTER auth (revocation,
+  // rejection) build their own LeadAuth and fold with it.
+
+  private val principalIds = listOf("council-a", "council-b", "ops-a", "ops-b", "operator")
+
+  private fun pubKeyFor(principalId: String): String = "pk-$principalId"
+
+  private fun allowListOf(vararg ids: String): AllowList =
+    AllowList(
+      ids.map { Principal(it, role = "authorizer", keys = listOf(SchemeKey("test", pubKeyFor(it)))) }
+    )
+
+  private val acceptingVerifier = ApprovalVerifier { _, _, _, _ -> true }
+
+  private val testAuth =
+    LeadAuth(
+      allowList = allowListOf(*principalIds.toTypedArray()),
+      verifier = acceptingVerifier,
+      quorum = QuorumGroup(1, principalIds.map { SignerLeaf(it) }),
+    )
+
+  private fun JournalStore.lead(): LeadState = leadFold(readAll(), testAuth)
 
   // -- append helpers ----------------------------------------------------------------------
 
@@ -82,6 +117,10 @@ class AuthFoldTest {
       ORIGIN_AUTH_LAYER,
     )
 
+  /** A FLAT approval with NO evidence sub-object — it cannot re-verify, so it lands in
+   * unverifiedApprovals, never verifiedApprovals. Kept for cells that test the origin gate
+   * (which fires before verification) or the fail-to-verify path; a cell that needs an
+   * approval to COUNT uses [approvalFor]. */
   private fun JournalStore.approval(
     gateId: String,
     principalId: String,
@@ -100,6 +139,74 @@ class AuthFoldTest {
       origin,
     )
 
+  /** A VERIFYING approval: a real evidence sub-object whose signed preimage commits to
+   * ([pubKeyFor] [principalId], gateId, digest, nonce). Under [testAuth]'s accepting verifier
+   * and allow-list it re-verifies and lands in verifiedApprovals as [principalId] — the
+   * approval a ceremony release's quorum is actually met by. */
+  private fun JournalStore.approvalFor(
+    gateId: String,
+    principalId: String,
+    nonce: String,
+    digest: String,
+  ) {
+    val pk = pubKeyFor(principalId)
+    append(
+      LeadKinds.APPROVAL_RECORDED,
+      buildJsonObject {
+        put("gateId", gateId)
+        put("principalId", principalId)
+        put("nonce", nonce)
+        put("payloadDigest", digest)
+        put(
+          "evidence",
+          ApprovalEvidence(
+              schemeId = "test",
+              publicKey = pk,
+              signature = "sig-$principalId",
+              carrierArtifactId = "carrier-$nonce",
+              gateId = gateId,
+              payloadDigest = digest,
+              nonce = nonce,
+              signedPreimage = committedPreimage(pk, gateId, digest, nonce),
+            )
+            .toJson(),
+        )
+      },
+      ORIGIN_AUTH_LAYER,
+    )
+  }
+
+  /** Append an APPROVAL_RECORDED carrying a caller-built [evidence] — for the verification
+   * cells that need a hand-crafted evidence object (null preimage, a flat field disagreeing
+   * with the preimage, an out-of-allow-list key, a signature over other bytes). */
+  private fun JournalStore.approvalWithEvidence(
+    gateId: String,
+    principalId: String,
+    nonce: String,
+    digest: String,
+    evidence: ApprovalEvidence,
+  ) =
+    append(
+      LeadKinds.APPROVAL_RECORDED,
+      buildJsonObject {
+        put("gateId", gateId)
+        put("principalId", principalId)
+        put("nonce", nonce)
+        put("payloadDigest", digest)
+        put("evidence", evidence.toJson())
+      },
+      ORIGIN_AUTH_LAYER,
+    )
+
+  /** Fold with a caller-supplied auth instead of [testAuth] — for the cells that vary the
+   * allow-list, verifier, or quorum (recovery contract, quorum tree, provenance anchor). */
+  private fun JournalStore.leadWith(auth: LeadAuth): LeadState = leadFold(readAll(), auth)
+
+  private fun sha256Hex(s: String): String =
+    java.security.MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") {
+      "%02x".format(it)
+    }
+
   // -- nonce single-use --------------------------------------------------------------------
 
   @Test
@@ -110,6 +217,7 @@ class AuthFoldTest {
     val before = s.lead()
     assertEquals("n1", before.openNonceFor(before.openGates["g1"]!!)?.nonce)
 
+    s.approvalFor("g1", "operator", "n1", "d1") // a verified approval meets the quorum
     s.release("g1", "d1", nonce = "n1")
     val st = s.lead()
     assertTrue("g1" in st.releasedGates)
@@ -124,6 +232,7 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1")
+    s.approvalFor("g1", "operator", "n1", "d1")
     s.release("g1", "d1", nonce = "n1")
     val replaySeq = s.release("g1", "d1", nonce = "n1").seq
     val st = s.lead()
@@ -137,6 +246,7 @@ class AuthFoldTest {
     val first = open(dir)
     first.gateOpened("g1", "d1")
     first.nonceIssued("n1", "g1", "d1")
+    first.approvalFor("g1", "operator", "n1", "d1")
     first.release("g1", "d1", nonce = "n1")
     first.close()
 
@@ -190,6 +300,7 @@ class AuthFoldTest {
     val preSeq = s.release("g1", "d1").seq // pre-ceremony honor
     s.gateOpened("g1", "d2") // re-opened on a new digest
     s.nonceIssued("n1", "g1", "d2")
+    s.approvalFor("g1", "operator", "n1", "d2")
     val ceremonySeq = s.release("g1", "d2", nonce = "n1").seq
     val st = s.lead()
     assertTrue("g1" in st.releasedGates)
@@ -235,6 +346,7 @@ class AuthFoldTest {
     assertEquals(2, st.staleReleases.size)
 
     // The fresh nonce releases it.
+    s.approvalFor("g1", "operator", "n2", "d2")
     s.release("g1", "d2", nonce = "n2")
     assertTrue("g1" in s.lead().releasedGates)
   }
@@ -306,6 +418,7 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1")
+    s.approvalFor("g1", "operator", "n1", "d1")
     s.release("g1", "d1", nonce = "n1") // honored; n1 consumed
     s.nonceIssued("n2", "g1", "d1") // a second nonce for the SAME gate and digest
     val reReleaseSeq = s.release("g1", "d1", nonce = "n2").seq
@@ -326,9 +439,11 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1")
+    s.approvalFor("g1", "operator", "n1", "d1")
     s.release("g1", "d1", nonce = "n1") // honored on d1
     s.gateOpened("g1", "d2") // re-opened on a new digest
     s.nonceIssued("n2", "g1", "d2")
+    s.approvalFor("g1", "operator", "n2", "d2")
     s.release("g1", "d2", nonce = "n2") // must be honored on d2
     val st = s.lead()
     assertTrue("g1" in st.releasedGates)
@@ -347,9 +462,11 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1")
+    s.approvalFor("g1", "operator", "n1", "d1")
     s.release("g1", "d1", nonce = "n1") // honored on d1
     s.gateOpened("g1", "d2")
     s.nonceIssued("n2", "g1", "d2")
+    s.approvalFor("g1", "operator", "n2", "d2")
     s.release("g1", "d2", nonce = "n2") // honored on d2
     s.gateOpened("g1", "d1") // re-opened on the ALREADY-RELEASED d1
     s.nonceIssued("n3", "g1", "d1")
@@ -534,15 +651,15 @@ class AuthFoldTest {
     val first = open(dir)
     first.gateOpened("g1", "d1")
     first.nonceIssued("n1", "g1", "d1")
-    first.approval("g1", "council-a", "n1", "d1")
-    first.approval("g1", "council-a", "n1", "d1") // re-delivery: idempotent
+    first.approvalFor("g1", "council-a", "n1", "d1")
+    first.approvalFor("g1", "council-a", "n1", "d1") // re-delivery: idempotent
     first.close()
 
     // A k-of-n quorum fills across restarts because accumulation is journal-derived.
     val second = open(dir)
-    second.approval("g1", "ops-a", "n1", "d1")
+    second.approvalFor("g1", "ops-a", "n1", "d1")
     val st = second.lead()
-    assertEquals(2, st.approvals["g1"]!!.size)
+    assertEquals(2, st.verifiedApprovals["g1"]!!.size)
 
     val gate = st.openGates["g1"]!!
     val approvers = st.boundApprovers(gate, "n1")
@@ -567,13 +684,13 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1")
-    s.approval("g1", "council-a", "n1", "d1")
+    s.approvalFor("g1", "council-a", "n1", "d1")
     s.gateOpened("g1", "d2") // re-opened on a new digest
     s.nonceIssued("n2", "g1", "d2")
     val st = s.lead()
     val gate = st.openGates["g1"]!!
     // Present in the record, excluded from the bound set under the new digest and nonce.
-    assertEquals(1, st.approvals["g1"]!!.size)
+    assertEquals(1, st.verifiedApprovals["g1"]!!.size)
     assertTrue(st.boundApprovers(gate, "n2").isEmpty())
   }
 
@@ -584,7 +701,7 @@ class AuthFoldTest {
     s.approval("g1", "operator", "n1", "d1", origin = ORIGIN_COGNITION)
     s.approval("g1", "operator", "n1", "d1", origin = ORIGIN_SUBSTRATE)
     val st = s.lead()
-    assertTrue(st.approvals.isEmpty())
+    assertTrue(st.verifiedApprovals.isEmpty())
     // seq 1 is the chain's genesis entry; the appends here start at 2.
     assertEquals(
       listOf(3L to LeadKinds.APPROVAL_RECORDED, 4L to LeadKinds.APPROVAL_RECORDED),
@@ -594,13 +711,13 @@ class AuthFoldTest {
 
   @Test
   fun approvalForUnknownGateOrUnmintedNonceIsRecordedAndFlagged() {
-    // Mirrors NONCE_ISSUED's flagged-but-kept pattern: the auth layer's assertion stands
-    // in the record (a release re-verifies against live state anyway), but an approval
-    // naming a gate never opened or a nonce never minted is contract drift worth seeing.
+    // Mirrors NONCE_ISSUED's flagged-but-kept pattern: a VERIFIED approval whose committed
+    // gate was never opened / nonce never minted is kept (a release re-checks against live
+    // state anyway) but the drift is flagged — verification and drift are orthogonal.
     val s = open(newStoreDir())
-    s.approval("ghost", "operator", "n9", "d1")
+    s.approvalFor("ghost", "operator", "n9", "d1")
     val st = s.lead()
-    assertEquals(1, st.approvals["ghost"]!!.size)
+    assertEquals(1, st.verifiedApprovals["ghost"]!!.size)
     assertTrue(st.escalations.any { "unknown gate" in it })
     assertTrue(st.escalations.any { "unminted nonce" in it })
   }
@@ -611,15 +728,212 @@ class AuthFoldTest {
     s.append(LeadKinds.TICKET_CLAIMED, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1")
-    s.approval("g1", "operator", "n1", "d1")
+    s.approvalFor("g1", "operator", "n1", "d1")
     s.release("g1", "d1", nonce = "n1")
+    // The ceremony release actually HONORS here (verifying approval + met quorum), so the
+    // clear below is clearing real per-ticket state, not passing vacuously.
+    assertTrue("g1" in s.lead().releasedGates)
     s.gateOpened("g2", "d2")
     s.release("g2", "d2") // pre-ceremony path, so the clear below has a marker to clear
     s.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
     val st = s.lead()
     assertTrue(st.issuedNonces.isEmpty())
     assertTrue(st.consumedNonces.isEmpty())
-    assertTrue(st.approvals.isEmpty())
+    assertTrue(st.verifiedApprovals.isEmpty())
+    assertTrue(st.unverifiedApprovals.isEmpty())
     assertTrue(st.nonceLessReleases.isEmpty())
+  }
+
+  // -- mechanical re-verification (2b) ------------------------------------------------------
+
+  @Test
+  fun failsClosedOnAnAbsentPreimageEvenUnderAnAcceptingVerifier() {
+    // The load-bearing closure: signedPreimage is nullable so legacy records parse, and the
+    // fold treats a null preimage as UNVERIFIABLE — never a pass. Uses the accepting verifier
+    // ([testAuth]), so the ONLY thing between this approval and a release is the
+    // null-preimage check itself; were it to regress, the release would clear.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    s.approvalWithEvidence(
+      "g1",
+      "operator",
+      "n1",
+      "d1",
+      ApprovalEvidence("test", pubKeyFor("operator"), "sig", "carrier", "g1", "d1", "n1", signedPreimage = null),
+    )
+    s.release("g1", "d1", nonce = "n1")
+    val st = s.lead()
+    assertTrue(st.verifiedApprovals.isEmpty())
+    assertTrue(st.unverifiedApprovals.any { "no signed preimage" in it.second })
+    assertFalse("g1" in st.releasedGates)
+    assertEquals(1, st.staleReleases.size)
+  }
+
+  @Test
+  fun splitSourceFlatKeyDisagreeingWithThePreimageIsUnverified() {
+    // The split-source hole 2b closes: the preimage is authority. Here the flat evidence key
+    // names council-a (allow-listed) but the preimage commits to operator — the layers
+    // disagree, so the approval is unverified, naming the disagreeing layer, and neither key
+    // puts an approver in the quorum.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    val preimage = committedPreimage(pubKeyFor("operator"), "g1", "d1", "n1")
+    s.approvalWithEvidence(
+      "g1",
+      "operator",
+      "n1",
+      "d1",
+      ApprovalEvidence("test", pubKeyFor("council-a"), "sig", "carrier", "g1", "d1", "n1", signedPreimage = preimage),
+    )
+    s.release("g1", "d1", nonce = "n1")
+    val st = s.lead()
+    assertTrue(st.verifiedApprovals.isEmpty())
+    assertTrue(st.unverifiedApprovals.any { "evidence publicKey disagrees" in it.second })
+    assertFalse("g1" in st.releasedGates)
+  }
+
+  @Test
+  fun aSignerWhosePreimageKeyIsNotAllowListedIsUnverified() {
+    // Resolution is off the PREIMAGE's key: the preimage commits to pk-ghost, which no
+    // principal holds, so it resolves to nobody and is unverified — the allow-list lives with
+    // us, and a carrier cannot add a signer by naming one.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    val preimage = committedPreimage("pk-ghost", "g1", "d1", "n1")
+    s.approvalWithEvidence(
+      "g1",
+      "operator",
+      "n1",
+      "d1",
+      ApprovalEvidence("test", "pk-ghost", "sig", "carrier", "g1", "d1", "n1", signedPreimage = preimage),
+    )
+    s.release("g1", "d1", nonce = "n1")
+    val st = s.lead()
+    assertTrue(st.verifiedApprovals.isEmpty())
+    assertTrue(st.unverifiedApprovals.any { "not in the allow-list" in it.second })
+    assertFalse("g1" in st.releasedGates)
+  }
+
+  @Test
+  fun anUnparseablePreimageFoldsUnverifiedNotAPass() {
+    // A preimage that is not the canonical committed-approval serialization: parseCommitted
+    // returns null, the fold records it unverified, and no release honors. (The parse's own
+    // negative surface is in ApprovalVerificationTest; this is the fold consuming that null.)
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    s.approvalWithEvidence(
+      "g1",
+      "operator",
+      "n1",
+      "d1",
+      ApprovalEvidence("test", pubKeyFor("operator"), "sig", "carrier", "g1", "d1", "n1", signedPreimage = "not-a-canonical-array"),
+    )
+    s.release("g1", "d1", nonce = "n1")
+    val st = s.lead()
+    assertTrue(st.verifiedApprovals.isEmpty())
+    assertTrue(st.unverifiedApprovals.any { "not a canonical committed approval" in it.second })
+    assertFalse("g1" in st.releasedGates)
+  }
+
+  @Test
+  fun aQuorumTreeGatesReleaseOverDistinctVerifiedApprovers() {
+    // Release gates on the FOLD's quorum tree, evaluated over the verified-approver set: a
+    // 2-group root needs an approver in each group. One approval leaves it unmet (the release
+    // folds stale); a second, in the other group, meets it — order-independent, since a
+    // quorum is a property of the set, not the arrival sequence.
+    val auth =
+      LeadAuth(
+        allowList = allowListOf("council-a", "ops-a"),
+        verifier = acceptingVerifier,
+        quorum =
+          QuorumGroup(
+            2,
+            listOf(
+              QuorumGroup(1, listOf(SignerLeaf("council-a"))),
+              QuorumGroup(1, listOf(SignerLeaf("ops-a"))),
+            ),
+          ),
+      )
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+
+    // Only one group represented: quorum unmet, the release folds stale (n1 not consumed).
+    s.approvalFor("g1", "ops-a", "n1", "d1")
+    s.release("g1", "d1", nonce = "n1")
+    assertFalse("g1" in s.leadWith(auth).releasedGates)
+
+    // A second, distinct approver from the other group meets the 2-of-2 root; a fresh release
+    // over the same (still-unconsumed) nonce now honors.
+    s.approvalFor("g1", "council-a", "n1", "d1")
+    s.release("g1", "d1", nonce = "n1")
+    assertTrue("g1" in s.leadWith(auth).releasedGates)
+  }
+
+  @Test
+  fun foldTimeVerificationIsAFunctionOfAuthNotJournalAlone() {
+    // The recovery contract 2b widens: state is a function of (journal, auth). One journal,
+    // folded under two LeadAuths that differ ONLY in the allow-list. Under one that lists the
+    // signer, the ceremony release reaches quorum and the gate releases; re-fold the SAME
+    // journal under one that has REVOKED that principal and the same release folds stale — the
+    // gate is no longer released. Authorization is re-decided at recovery, not frozen at write.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    s.approvalFor("g1", "council-a", "n1", "d1")
+    s.release("g1", "d1", nonce = "n1")
+
+    val granting = LeadAuth(allowListOf("council-a"), acceptingVerifier, oneOfOne("council-a"))
+    val revoked = LeadAuth(allowListOf("ops-a"), acceptingVerifier, oneOfOne("council-a"))
+
+    assertTrue("g1" in s.leadWith(granting).releasedGates)
+    val refolded = s.leadWith(revoked)
+    assertFalse("g1" in refolded.releasedGates)
+    assertEquals(1, refolded.staleReleases.size)
+  }
+
+  @Test
+  fun theSignatureIsVerifiedOverTheSamePreimageTheFoldParses() {
+    // Provenance anchored on an INDEPENDENT hash, not codec self-agreement: the verifier
+    // accepts iff the signature equals sha256(preimage) computed here in the test. An approval
+    // signed over the SAME canonical preimage the fold parses verifies and releases; one
+    // signed over OTHER bytes does not.
+    val shaVerifier =
+      ApprovalVerifier { _, _, signature, preimage -> signature == "sha256:" + sha256Hex(preimage) }
+    val auth = LeadAuth(allowListOf("operator"), shaVerifier, oneOfOne("operator"))
+    val pk = pubKeyFor("operator")
+
+    val good = open(newStoreDir())
+    good.gateOpened("g1", "d1")
+    good.nonceIssued("n1", "g1", "d1")
+    val preimage = committedPreimage(pk, "g1", "d1", "n1")
+    good.approvalWithEvidence(
+      "g1",
+      "operator",
+      "n1",
+      "d1",
+      ApprovalEvidence("test", pk, "sha256:" + sha256Hex(preimage), "carrier", "g1", "d1", "n1", signedPreimage = preimage),
+    )
+    good.release("g1", "d1", nonce = "n1")
+    assertTrue("g1" in good.leadWith(auth).releasedGates)
+
+    val bad = open(newStoreDir())
+    bad.gateOpened("g1", "d1")
+    bad.nonceIssued("n1", "g1", "d1")
+    bad.approvalWithEvidence(
+      "g1",
+      "operator",
+      "n1",
+      "d1",
+      ApprovalEvidence("test", pk, "sha256:" + sha256Hex("not the preimage"), "carrier", "g1", "d1", "n1", signedPreimage = preimage),
+    )
+    bad.release("g1", "d1", nonce = "n1")
+    val st = bad.leadWith(auth)
+    assertFalse("g1" in st.releasedGates)
+    assertTrue(st.unverifiedApprovals.any { "does not verify" in it.second })
   }
 }

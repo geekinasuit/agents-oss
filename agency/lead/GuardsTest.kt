@@ -69,6 +69,7 @@ class GuardsTest {
         ticketSource = FileTicketSource(ticketFile),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // guard mechanics; releases are nonce-less
         cognitionRetryBackoffMs = 0, // no wall-clock wait in tests; the CAP is the property
         maxCognitionAttempts = maxAttempts,
       )
@@ -214,6 +215,7 @@ class GuardsTest {
         ticketSource = FileTicketSource(File(dir, "ticket.txt")),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // guard mechanics; releases are nonce-less
       )
     val honest = daemon(ScriptedCognition(), FakePodRunner())
     val f1 = honest.driveUntilQuiescent() // planner ran, plan gate open
@@ -275,6 +277,7 @@ class GuardsTest {
         ticketSource = FileTicketSource(File(dir, "ticket.txt")),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // guard mechanics; releases are nonce-less
       )
     val folded = daemon.driveUntilQuiescent()
     // The plan was recorded on the RECOMPUTED digest, not the lie, and the mismatch is visible.
@@ -605,6 +608,7 @@ class GuardsTest {
         ticketSource = FileTicketSource(File(dir, "ticket.txt")),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // guard mechanics; releases are nonce-less
       )
     val folded = daemon.driveUntilQuiescent()
     assertEquals("the plan binds the raw-byte digest", rawSha, folded.lead.planArtifactSha)

@@ -63,6 +63,14 @@ class LeadDaemon(
   private val ticketSource: TicketSource,
   private val workdir: File,
   private val effects: EffectReceiver,
+  /** The authorization context every fold verifies against — allow-list, signature verifier,
+   * and release quorum ([LeadAuth]). REQUIRED, no default, for the same reason [podSpec] is:
+   * which principals and quorum authorize a release is a security-load-bearing choice, and a
+   * silently-defaulted one would be exactly the footgun [leadFold] refuses at the fold. A
+   * daemon not yet wired for the real ceremony passes [LeadAuth.DENY_ALL] explicitly — the
+   * honest spelling of "this daemon cannot clear a ceremony gate yet"; its nonce-less
+   * pre-ceremony releases still fold as before (quorum gates only the nonce path). */
+  private val leadAuth: LeadAuth,
   private val timers: TimerService = TimerService.NOOP,
   private val faults: FaultInjector = FaultInjector.NONE,
   private val dedupEffects: Boolean = true,
@@ -357,7 +365,7 @@ class LeadDaemon(
 
   fun refold(): Folded {
     val entries = store.readAll()
-    return Folded(entries.size, fold(entries), leadFold(entries))
+    return Folded(entries.size, fold(entries), leadFold(entries, leadAuth))
   }
 
   // ---- adopt ----
