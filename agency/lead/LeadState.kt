@@ -234,6 +234,16 @@ data class LeadState(
   val commitManifestDigest: String? = null,
   val openGates: Map<String, OpenGate> = emptyMap(),
   val releasedGates: Set<String> = emptySet(),
+  /** For each gate, the payload digests it has ALREADY been released on — the epoch-precise
+   * single-release guard. [releasedGates] answers "released at all this ticket?" (gate-keyed,
+   * epoch-blind); this answers "released on THIS digest?", the question that stops a decided
+   * gate being cleared a second time by a fresh, valid, never-consumed nonce minted for the
+   * same digest, while still admitting the legitimate re-release of a gate re-opened on a NEW
+   * digest (a distinct authorization surface). A Set per gate, not one digest, so a digest
+   * revisited across re-opens is still caught. Correctness-bearing (evicting an entry
+   * re-enables a re-release), so it sits outside [ANOMALY_TAIL] and is bounded by the ticket:
+   * [LeadKinds.TICKET_DONE] clears it, as it does [nonceLessReleases]. */
+  val releasedDigests: Map<String, Set<String>> = emptyMap(),
   /** Gates released by the nonce-less pre-ceremony path, keyed to the seq of the RELEASE
    * the mark describes — the disposition marker that keeps "was this release under the
    * ceremony?" answerable from derived state, matching how every other classification
@@ -445,6 +455,7 @@ private fun foldOne(s0: LeadState, e: JournalEntry): LeadState {
           commitManifestDigest = null,
           openGates = emptyMap(),
           releasedGates = emptySet(),
+          releasedDigests = emptyMap(),
           nonceLessReleases = emptyMap(),
           staleReleases = emptyList(),
           issuedNonces = emptyMap(),
@@ -704,6 +715,13 @@ private fun foldRelease(
   fun stale(): LeadState =
     s.copy(staleReleases = (s.staleReleases + (e.seq to gateId)).takeLast(ANOMALY_TAIL))
   if (gate == null || digest != gate.payloadDigest) return stale()
+  // Single-release per (gate, digest): a gate already released on THIS digest is decided, so
+  // a second release folds stale rather than re-honoring — whether it carries a fresh nonce
+  // or none. The nonce-less path has its own per-gate mark ([nonceLessReleases]); this is the
+  // nonce path's missing analogue, and keying on the digest (not the gate id) keeps a gate
+  // re-opened on a NEW digest releasable, since that is a distinct authorization surface.
+  // Placed before the nonce branch so both paths inherit it.
+  if (gate.payloadDigest in s.releasedDigests[gateId].orEmpty()) return stale()
   val consumed: Set<String>
   val nonceLess: Map<String, Long>
   if (nonce == null) {
@@ -726,6 +744,8 @@ private fun foldRelease(
   }
   return s.copy(
     releasedGates = s.releasedGates + gateId,
+    releasedDigests =
+      s.releasedDigests + (gateId to (s.releasedDigests[gateId].orEmpty() + gate.payloadDigest)),
     nonceLessReleases = nonceLess,
     consumedNonces = consumed,
     phase =
