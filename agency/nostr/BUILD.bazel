@@ -20,6 +20,7 @@ kt_jvm_library(
     srcs = [
         "Bip340.kt",
         "Bip340ApprovalVerifier.kt",
+        "Nip44.kt",
         "NostrEvent.kt",
     ],
     visibility = ["//visibility:public"],
@@ -71,5 +72,40 @@ kt_jvm_test(
         # this verifier re-checks a signature over.
         "//agency/shared/auth",
         "@maven//:junit_junit",
+    ],
+)
+
+# The production NIP-44 codec, against the spec's own vectors plus the properties the probe could
+# not assert (null-not-throw on hostile input, the point-multiply trap, nonce freshness, the
+# length ceiling). Unlike every test above it, this one needs the spec's vector file at runtime,
+# and $(rlocationpath) expansion in `env` is documented core behavior only for a native
+# java_test — so it is a java_test wrapping a kt_jvm_library, the same split agency/crypto uses
+# for its probe vectors, rather than the kt_jvm_test its neighbours use. The file is shared from
+# //agency/crypto (one copy, one published digest). associates= makes the test a friend of the
+# codec's module so it can reach the internal seams the vectors need — the nonce-injecting
+# encrypt, the intermediate key schedule, the padding rule, and the module's Hex codec.
+kt_jvm_library(
+    name = "nip44_test_lib",
+    testonly = True,
+    srcs = ["Nip44Test.kt"],
+    associates = [":nostr"],
+    deps = [
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jvm",
+        "@maven//:junit_junit",
+        "@maven//:org_json_json",
+    ],
+)
+
+java_test(
+    name = "nip44_test",
+    size = "small",
+    data = ["//agency/crypto:testdata/nip44.vectors.json"],
+    env = {"NIP44_VECTORS": "$(rlocationpath //agency/crypto:testdata/nip44.vectors.json)"},
+    test_class = "com.geekinasuit.agency.nostr.Nip44Test",
+    runtime_deps = [
+        ":nip44_test_lib",
+        # The natives load reflectively from the classpath — runtime-only, like the sign/verify
+        # test above and the sqlite JDBC driver in agency/shared/journal.
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm",
     ],
 )
