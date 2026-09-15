@@ -20,6 +20,7 @@ kt_jvm_library(
         "AuthJson.kt",
         "Authorization.kt",
         "Quorum.kt",
+        "SpecValidation.kt",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -59,6 +60,19 @@ kt_jvm_test(
     size = "small",
     srcs = ["ApprovalVerificationTest.kt"],
     test_class = "com.geekinasuit.agency.shared.auth.ApprovalVerificationTest",
+    deps = [
+        ":auth",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "spec_validation_test",
+    size = "small",
+    srcs = ["SpecValidationTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.auth.SpecValidationTest",
     deps = [
         ":auth",
         "@maven//:junit_junit",
