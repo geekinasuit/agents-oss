@@ -295,6 +295,73 @@ class AuthFoldTest {
     assertEquals(1, st.staleReleases.size)
   }
 
+  @Test
+  fun aReleasedGateIsNotReReleasedByAFreshNonceOnTheSameDigest() {
+    // Single-release per (gate, digest): a gate already released for a payload is DECIDED,
+    // and a SECOND fresh, valid, never-consumed nonce minted for the SAME gate+digest must
+    // not honor it again. The nonce path had no analogue of the nonce-less path's per-gate
+    // single-use guard (the `gateId in nonceLessReleases` check), so a second minted nonce
+    // cleared an already-decided gate a second time — the clause this cell fails without.
+    // The re-release folds stale and consumes nothing.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    s.release("g1", "d1", nonce = "n1") // honored; n1 consumed
+    s.nonceIssued("n2", "g1", "d1") // a second nonce for the SAME gate and digest
+    val reReleaseSeq = s.release("g1", "d1", nonce = "n2").seq
+    val st = s.lead()
+    assertTrue("g1" in st.releasedGates)
+    assertTrue("n1" in st.consumedNonces)
+    assertTrue("n2" !in st.consumedNonces)
+    assertEquals(listOf(reReleaseSeq to "g1"), st.staleReleases)
+  }
+
+  @Test
+  fun aReOpenOnANewDigestPermitsAFreshReleaseOfAnAlreadyReleasedGate() {
+    // The single-release key is the DIGEST epoch, not the gate id: a gate released for d1
+    // and then re-opened on d2 is a fresh authorization surface, so a release naming d2 is
+    // honored even though the gate already sits in releasedGates. This is the cell that
+    // fails if the guard keys on gateId alone — it would fold the legitimate d2 release
+    // stale.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    s.release("g1", "d1", nonce = "n1") // honored on d1
+    s.gateOpened("g1", "d2") // re-opened on a new digest
+    s.nonceIssued("n2", "g1", "d2")
+    s.release("g1", "d2", nonce = "n2") // must be honored on d2
+    val st = s.lead()
+    assertTrue("g1" in st.releasedGates)
+    assertTrue("n1" in st.consumedNonces)
+    assertTrue("n2" in st.consumedNonces)
+    assertTrue(st.staleReleases.isEmpty())
+  }
+
+  @Test
+  fun aDigestRevisitedAcrossReopensIsStillRefused() {
+    // releasedDigests is a Set per gate, not a single last-digest, precisely so a digest
+    // REVISITED across re-opens (d1 → d2 → d1) is still refused. This is the ONLY shape where
+    // Set-vs-single-value differs: a single-value guard would retain only d2 and would
+    // re-honor the revisited d1. The cell fails if releasedDigests ever collapses to one
+    // digest per gate.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    s.release("g1", "d1", nonce = "n1") // honored on d1
+    s.gateOpened("g1", "d2")
+    s.nonceIssued("n2", "g1", "d2")
+    s.release("g1", "d2", nonce = "n2") // honored on d2
+    s.gateOpened("g1", "d1") // re-opened on the ALREADY-RELEASED d1
+    s.nonceIssued("n3", "g1", "d1")
+    val revisitSeq = s.release("g1", "d1", nonce = "n3").seq // must fold stale
+    val st = s.lead()
+    assertTrue("g1" in st.releasedGates)
+    assertTrue("n1" in st.consumedNonces)
+    assertTrue("n2" in st.consumedNonces)
+    assertTrue("n3" !in st.consumedNonces)
+    assertEquals(listOf(revisitSeq to "g1"), st.staleReleases)
+  }
+
   // -- nonce bookkeeping anomalies ----------------------------------------------------------
 
   @Test
