@@ -89,6 +89,24 @@ kt_jvm_test(
 )
 
 kt_jvm_test(
+    name = "auth_fold_test",
+    size = "small",
+    srcs = ["AuthFoldTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.AuthFoldTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":lead",
+        # Test-only: the composition cell feeds the fold's bound-approver set to the quorum
+        # evaluator; the lead library itself keeps journal-local records and takes no dep.
+        "//agency/shared/auth",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
     name = "wake_loop_test",
     size = "small",
     srcs = ["WakeLoopTest.kt"],
