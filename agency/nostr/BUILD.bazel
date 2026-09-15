@@ -1,0 +1,75 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+# The nostr substrate adapter for the 2a.4 authorization gate: the NIP-01 event codec (id +
+# sign/verify) and the bip340 realization of the authorization layer's ApprovalVerifier port.
+#
+# THE DEPENDENCY EDGE POINTS INWARD, by the standing rule: this module depends on
+# //agency/shared/auth (it implements auth's port and reads its committed preimage); auth and the
+# lead fold NEVER depend on nostr and never see a NIP number, an npub, a relay URL, or any type
+# from here. Swapping the substrate means replacing this module, not editing auth. There is no
+# transport here yet — no relay connection, no socket, nothing that binds or dials (A4-2); that is
+# step 3b. This module is pure and hermetic.
+#
+# secp256k1: the -jvm coordinate carries the API (compiled against here); the native lives in
+# -jni-jvm and rides each CONSUMING TEST as runtime_deps, exactly as agency/crypto documents — a
+# target using this library at runtime for signing/verifying must carry the -jni-jvm jar itself or
+# it compiles green and dies at first use.
+
+kt_jvm_library(
+    name = "nostr",
+    srcs = [
+        "Bip340.kt",
+        "Bip340ApprovalVerifier.kt",
+        "NostrEvent.kt",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agency/shared/auth",
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jvm",
+    ],
+)
+
+# Hermetic and native-free: the id is sha256 over a hand-rolled NIP-01 serialization, and the
+# anchor oracle is kotlinx-serialization (a DIFFERENT serializer), so this cell needs no crypto
+# native — only the JSON library to build the independent preimage.
+kt_jvm_test(
+    name = "event_id_test",
+    size = "small",
+    srcs = ["EventIdTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.EventIdTest",
+    deps = [
+        ":nostr",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "nostr_event_sign_verify_test",
+    size = "small",
+    srcs = ["NostrEventSignVerifyTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.NostrEventSignVerifyTest",
+    # The natives load reflectively from the classpath — runtime-only, like the sqlite JDBC
+    # driver in agency/shared/journal and the same split agency/crypto uses.
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":nostr",
+        "@maven//:junit_junit",
+    ],
+)
+
+kt_jvm_test(
+    name = "bip340_approval_verifier_test",
+    size = "small",
+    srcs = ["Bip340ApprovalVerifierTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.Bip340ApprovalVerifierTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":nostr",
+        # committedPreimage: the authorization layer's own canonical serialization, the message
+        # this verifier re-checks a signature over.
+        "//agency/shared/auth",
+        "@maven//:junit_junit",
+    ],
+)
