@@ -144,6 +144,114 @@ class AuthorizationTest {
   }
 
   @Test
+  fun evidenceRoundTripsWithSignedPreimage() {
+    val evidence =
+      ApprovalEvidence(
+        schemeId = "scheme-a",
+        publicKey = "aa".repeat(32),
+        signature = "ff".repeat(64),
+        carrierArtifactId = "evt-123",
+        gateId = "gate-plan-t1",
+        payloadDigest = "dd".repeat(32),
+        nonce = "ee".repeat(32),
+        signedPreimage = "[0,\"${"aa".repeat(32)}\",1700000000,1,[],\"approve\"]",
+      )
+    val round = ApprovalEvidence.fromJson(evidence.toJson())
+    assertEquals(evidence, round)
+    assertEquals(evidence.signedPreimage, round.signedPreimage)
+  }
+
+  @Test
+  fun legacyEvidenceWithoutSignedPreimageParsesToNull() {
+    // A record journaled before the preimage field existed carries no 'signedPreimage' key.
+    // It must still parse — these are immutable evidence entries — with the preimage null.
+    // (The verifying layer treats a null preimage as unverifiable, never a pass; that
+    // decision lives in the fold, not here.)
+    assertNull(ApprovalEvidence.fromJson(evidenceJson()).signedPreimage)
+  }
+
+  @Test
+  fun signedPreimageWhenPresentIsHeldToTheSameBarAsRequiredFields() {
+    // Absence is the only relaxation. An explicit JSON null is a refusal — the codec's
+    // stance on every other field — not a second way to spell absence.
+    assertThrows {
+      ApprovalEvidence.fromJson(evidenceJson("signedPreimage" to kotlinx.serialization.json.JsonNull))
+    }
+    // A present-but-blank preimage is refused at construction.
+    assertThrows {
+      ApprovalEvidence(
+        "scheme-a", "aa", "sig", "evt", "gate", "digest", nonce = "nn", signedPreimage = " ")
+    }
+  }
+
+  @Test
+  fun evidenceFieldsRejectNonStringScalarsAndStructuredValues() {
+    // fromJson parses SHAPE, not merely presence: a number or an object where a string
+    // belongs is a foreign or hand-authored document, refused rather than coerced.
+    assertThrows {
+      ApprovalEvidence.fromJson(evidenceJson("publicKey" to kotlinx.serialization.json.JsonPrimitive(123)))
+    }
+    assertThrows {
+      ApprovalEvidence.fromJson(
+        evidenceJson(
+          "gateId" to
+            kotlinx.serialization.json.buildJsonObject {
+              put("nested", kotlinx.serialization.json.JsonPrimitive("x"))
+            }
+        )
+      )
+    }
+    // The optional preimage relaxes on absence, NOT on type: a number here is still refused.
+    assertThrows {
+      ApprovalEvidence.fromJson(evidenceJson("signedPreimage" to kotlinx.serialization.json.JsonPrimitive(7)))
+    }
+  }
+
+  @Test
+  fun signedPreimageSurvivesAJsonTextRoundTripVerbatim() {
+    // fromJson(toJson()) round-trips an in-memory object graph and never crosses the JSON
+    // text boundary, so it cannot observe a string-escaping defect. That boundary is where
+    // the preimage is most exposed: it is the one field whose value is structured text —
+    // quotes and brackets — and the class KDoc promises it is journaled verbatim, which is a
+    // text-out then text-in trip. Serialize to a string and parse it back, the way the
+    // journal does, and assert the quote/bracket-laden value returns unchanged.
+    val preimage = "[0,\"${"aa".repeat(32)}\",1700000000,1,[],\"approve\"]"
+    val evidence =
+      ApprovalEvidence(
+        schemeId = "scheme-a",
+        publicKey = "aa".repeat(32),
+        signature = "ff".repeat(64),
+        carrierArtifactId = "evt-123",
+        gateId = "gate-plan-t1",
+        payloadDigest = "dd".repeat(32),
+        nonce = "ee".repeat(32),
+        signedPreimage = preimage,
+      )
+    val round = textRoundTrip(evidence)
+    assertEquals(evidence, round)
+    assertEquals(preimage, round.signedPreimage)
+  }
+
+  @Test
+  fun nullSignedPreimageIsOmittedFromJsonAndStaysNullAcrossText() {
+    // A null preimage is omitted from the object entirely, not written as JSON null, so
+    // absence stays distinguishable from a written value — and it parses back to null across
+    // the text boundary, never to the seven-character string "null".
+    val evidence =
+      ApprovalEvidence(
+        schemeId = "scheme-a",
+        publicKey = "aa".repeat(32),
+        signature = "ff".repeat(64),
+        carrierArtifactId = "evt-123",
+        gateId = "gate-plan-t1",
+        payloadDigest = "dd".repeat(32),
+        nonce = "ee".repeat(32),
+      )
+    assertFalse("signedPreimage" in evidence.toJson())
+    assertNull(textRoundTrip(evidence).signedPreimage)
+  }
+
+  @Test
   fun freshNonceIs32BytesHexAndNotRepeating() {
     val a = freshNonceHex()
     val b = freshNonceHex()
@@ -151,6 +259,34 @@ class AuthorizationTest {
     assertTrue(a.all { it in "0123456789abcdef" })
     assertTrue(a != b)
   }
+
+  // A complete, well-formed evidence object in the legacy shape (no signedPreimage), with
+  // the given fields overridden — for exercising fromJson's per-field refusals.
+  private fun evidenceJson(
+    vararg overrides: Pair<String, kotlinx.serialization.json.JsonElement>
+  ): kotlinx.serialization.json.JsonObject {
+    val base =
+      linkedMapOf<String, kotlinx.serialization.json.JsonElement>(
+        "schemeId" to kotlinx.serialization.json.JsonPrimitive("scheme-a"),
+        "publicKey" to kotlinx.serialization.json.JsonPrimitive("aa".repeat(32)),
+        "signature" to kotlinx.serialization.json.JsonPrimitive("ff".repeat(64)),
+        "carrierArtifactId" to kotlinx.serialization.json.JsonPrimitive("evt-123"),
+        "gateId" to kotlinx.serialization.json.JsonPrimitive("gate-plan-t1"),
+        "payloadDigest" to kotlinx.serialization.json.JsonPrimitive("dd".repeat(32)),
+        "nonce" to kotlinx.serialization.json.JsonPrimitive("ee".repeat(32)),
+      )
+    for ((k, v) in overrides) base[k] = v
+    return kotlinx.serialization.json.JsonObject(base)
+  }
+
+  // A real serialize-to-text then parse-from-text trip, the way the journal persists a
+  // record — distinct from fromJson(toJson()), which stays an in-memory object graph and so
+  // cannot see a string-escaping defect. Mirrors QuorumTest's parseQuorum.
+  private fun textRoundTrip(e: ApprovalEvidence): ApprovalEvidence =
+    ApprovalEvidence.fromJson(
+      kotlinx.serialization.json.Json.parseToJsonElement(e.toJson().toString())
+        as kotlinx.serialization.json.JsonObject
+    )
 
   private fun assertThrows(block: () -> Any) {
     try {
