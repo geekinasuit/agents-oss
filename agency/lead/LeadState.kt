@@ -1,10 +1,20 @@
 package com.geekinasuit.agency.lead
 
+import com.geekinasuit.agency.shared.auth.AllowList
+import com.geekinasuit.agency.shared.auth.ApprovalEvidence
+import com.geekinasuit.agency.shared.auth.ApprovalVerifier
+import com.geekinasuit.agency.shared.auth.QuorumNode
+import com.geekinasuit.agency.shared.auth.RejectingVerifier
+import com.geekinasuit.agency.shared.auth.SchemeKey
+import com.geekinasuit.agency.shared.auth.oneOfOne
+import com.geekinasuit.agency.shared.auth.parseCommitted
+import com.geekinasuit.agency.shared.auth.quorumSatisfied
 import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
 import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -127,16 +137,25 @@ object LeadKinds {
   const val NONCE_CONSUMED = "nonce-consumed"
 
   /**
-   * A signature-verified approval the authorization layer accepted and journaled (payload:
-   * gateId, principalId, nonce, payloadDigest, evidence{schemeId, publicKey, signature,
-   * carrierArtifactId}). AUTH-LAYER-authored — the one lead kind besides the release itself that is:
-   * approvals accumulate toward a quorum, so an approval-shaped entry from cognition or a
-   * pod stuffing the count is the same threat as a forged release, and gets the same
-   * treatment (never honored, retained visibly in [LeadState.misOriginedEntries]).
-   * Accumulation is durable so a k-of-n quorum can fill across restarts; the fold retains
-   * each approval's binding (nonce + digest) so an approval bound to a superseded digest
-   * can never satisfy the re-opened gate. The evidence sub-object is journal-resident
-   * audit — the fold does not consume it.
+   * A signature-carrying approval the authorization layer journaled (payload: gateId,
+   * principalId, nonce, payloadDigest, evidence{schemeId, publicKey, signature,
+   * carrierArtifactId, gateId, payloadDigest, nonce, signedPreimage}). AUTH-LAYER-authored —
+   * the one lead kind besides the release itself that is: approvals accumulate toward a
+   * quorum, so an approval-shaped entry from cognition or a pod stuffing the count is the
+   * same threat as a forged release, and gets the same treatment (never honored, retained
+   * visibly in [LeadState.misOriginedEntries]).
+   *
+   * The fold CONSUMES the evidence sub-object (2b): [foldApproval] re-derives the signer's
+   * identity from the signed preimage, re-verifies the signature over it, resolves the
+   * committed key to an allow-listed principal, and cross-checks the committed (gate, digest,
+   * nonce) against the flat copies — trusting the PREIMAGE, never the flat `principalId`. An
+   * approval that clears all of that lands in [LeadState.verifiedApprovals]; one that does not
+   * lands in [LeadState.unverifiedApprovals] with a reason and contributes nothing. Verified
+   * accumulation is durable so a k-of-n quorum can fill across restarts, and each verified
+   * approval keeps its binding (nonce + digest) so one bound to a superseded digest can never
+   * satisfy the re-opened gate. A null/absent preimage is fail-closed: unverifiable, never a
+   * pass — the closure the nullable [com.geekinasuit.agency.shared.auth.ApprovalEvidence]
+   * field defers to this fold.
    */
   const val APPROVAL_RECORDED = "approval-recorded"
 }
@@ -187,19 +206,51 @@ data class IssuedNonce(
   }
 }
 
-/** One accepted approval as journaled, with the binding it committed to retained —
- * consumers filter on (nonce, payloadDigest) against the gate's CURRENT state, so a
- * stale-bound approval is inert rather than silently counted. */
-data class RecordedApproval(
+/**
+ * One approval that RE-VERIFIED at fold time: its signature checked out over its committed
+ * preimage, the preimage's key resolved to an allow-listed principal, and the preimage's
+ * (gate, digest, nonce) agreed with the flat copies beside it. [principalId] is therefore
+ * the PREIMAGE-DERIVED identity (the allow-list principal for the committed key) — never the
+ * flat `principalId` a record claimed, which the fold no longer trusts. The binding it
+ * committed to is retained so consumers filter on (nonce, payloadDigest) against the gate's
+ * CURRENT state, leaving a stale-bound approval inert rather than silently counted.
+ */
+data class VerifiedApproval(
   val principalId: String,
   val nonce: String,
   val payloadDigest: String,
   val seq: Long,
 ) {
   init {
-    require(principalId.isNotBlank()) { "a recorded approval requires a non-blank principalId" }
-    require(nonce.isNotBlank()) { "a recorded approval requires a non-blank nonce" }
-    require(payloadDigest.isNotBlank()) { "a recorded approval requires a non-blank payloadDigest" }
+    require(principalId.isNotBlank()) { "a verified approval requires a non-blank principalId" }
+    require(nonce.isNotBlank()) { "a verified approval requires a non-blank nonce" }
+    require(payloadDigest.isNotBlank()) { "a verified approval requires a non-blank payloadDigest" }
+  }
+}
+
+/**
+ * The authorization context the fold verifies against — supplied to [leadFold], never
+ * journaled. It bundles the three things a release verdict is a function of BESIDES the
+ * journal: the [allowList] of principals permitted to authorize (it lives with us, never
+ * with the approval carrier), the signature [verifier] (a port; the real scheme adapter is
+ * later work, the fold's default is [RejectingVerifier]), and the [quorum] a gate's verified
+ * approvers must satisfy to release.
+ *
+ * Because verification happens AT THE FOLD, folded state is a function of (journal, auth):
+ * the same journal folded under a different [LeadAuth] can reach a different verdict — see
+ * [leadFold]'s recovery-contract note. [DENY_ALL] is the restrictive default: an empty
+ * allow-list, the rejecting verifier, and a quorum naming a principal that cannot exist, so
+ * nothing on the ceremony path can clear a gate. It is the honest spelling of "this daemon
+ * cannot authorize a ceremony release yet" — a nonce-LESS pre-ceremony release still folds
+ * as it always did (quorum gates only the nonce path; see [foldRelease]).
+ */
+class LeadAuth(
+  val allowList: AllowList,
+  val verifier: ApprovalVerifier,
+  val quorum: QuorumNode,
+) {
+  companion object {
+    val DENY_ALL: LeadAuth = LeadAuth(AllowList(emptyList()), RejectingVerifier, oneOfOne("__none__"))
   }
 }
 
@@ -257,10 +308,20 @@ data class LeadState(
    * marks them) so a re-issue of a spent value is detectable as the anomaly it is. */
   val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
   val consumedNonces: Set<String> = emptySet(),
-  /** gateId → accepted approvals with their bindings. Auth-layer-authored entries only;
-   * dedup at fold is by (principal, nonce, digest), so re-delivery of the same approval is
-   * idempotent while a re-approval under a fresh nonce accumulates. */
-  val approvals: Map<String, List<RecordedApproval>> = emptyMap(),
+  /** gateId → approvals that RE-VERIFIED at fold time (signature over preimage, key in the
+   * allow-list, committed binding agreeing with the flat copies). The set a release's quorum
+   * is evaluated over — an approval that did not verify never lands here, so the flat
+   * `principalId` a record claimed can no longer stuff a quorum. Auth-layer-authored entries
+   * only; dedup is by the PREIMAGE-DERIVED (principal, nonce, digest), so re-delivery of the
+   * same approval is idempotent while a re-approval under a fresh nonce accumulates. */
+  val verifiedApprovals: Map<String, List<VerifiedApproval>> = emptyMap(),
+  /** (seq, reason) for approval entries that did NOT verify — no evidence, no signed
+   * preimage, a preimage that did not parse, a signature that did not check out, a signer not
+   * in the allow-list, or a committed field disagreeing with a flat copy. Kept VISIBLE
+   * (never silently dropped), capped like the other anomaly tails, and cleared at
+   * [LeadKinds.TICKET_DONE] — the one approval-derived view bounded by a tail rather than
+   * correctness, because an unverified approval contributes nothing a release depends on. */
+  val unverifiedApprovals: List<Pair<Long, String>> = emptyList(),
   val pods: Map<String, PodRecord> = emptyMap(),
   val pendingSpawnIntents: Map<String, Long> = emptyMap(), // taskRef → intent seq: spawn journaled, POD_SPAWNED not yet
   val misOriginedEntries: List<Pair<Long, String>> = emptyList(), // (seq, kind): substrate-authored kind with a non-substrate origin — never honored
@@ -298,12 +359,12 @@ data class LeadState(
       }
       .maxByOrNull { it.issuedSeq }
 
-  /** Principals whose recorded approval binds the gate AS IT STANDS — same digest the gate
-   * is open on, same [nonce] — the set a quorum predicate is evaluated over. Approvals
-   * bound to a superseded digest or a different nonce are present in [approvals] but
-   * excluded here. */
+  /** Preimage-derived principals whose VERIFIED approval binds the gate AS IT STANDS — same
+   * digest the gate is open on, same [nonce] — the set a quorum predicate is evaluated over.
+   * Verified approvals bound to a superseded digest or a different nonce are present in
+   * [verifiedApprovals] but excluded here; approvals that never verified are absent entirely. */
   fun boundApprovers(gate: OpenGate, nonce: String): Set<String> =
-    approvals[gate.gateId]
+    verifiedApprovals[gate.gateId]
       .orEmpty()
       .filter { it.nonce == nonce && it.payloadDigest == gate.payloadDigest }
       .map { it.principalId }
@@ -332,10 +393,12 @@ data class LeadState(
  * these carry security-relevant tails (escalations, stale releases, mis-origined entries).
  *
  * The nonce/approval records ([LeadState.issuedNonces], [LeadState.consumedNonces],
- * [LeadState.approvals]) sit DELIBERATELY outside this cap: they are correctness-bearing
- * records, not views. Evicting a consumed nonce re-enables the replay it exists to
- * reject; evicting an issued nonce or a recorded approval silently voids a live
- * authorization. [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
+ * [LeadState.verifiedApprovals]) sit DELIBERATELY outside this cap: they are
+ * correctness-bearing records, not views. Evicting a consumed nonce re-enables the replay it
+ * exists to reject; evicting an issued nonce or a verified approval silently voids a live
+ * authorization. ([LeadState.unverifiedApprovals] IS capped by this tail — an approval that
+ * did not verify contributes nothing a release depends on, so it is a view, not a record.)
+ * [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
  * an audit marker whose absence is itself a claim ("released under the ceremony"), so an
  * evicted entry would not lose the answer, it would invert it. All four share the same
  * bound: the ticket, not a tail — TICKET_DONE clears them — and their kinds are
@@ -379,14 +442,29 @@ private val SUBSTRATE_AUTHORED_KINDS =
 class LeadFoldException(seq: Long, kind: String, cause: Throwable) :
   RuntimeException("lead fold failed at seq=$seq kind='$kind': ${cause.message}", cause)
 
-/** The lead state machine: `leadState = leadFold(entries)`. Folds the SAME entry
- * list the shared fold consumes — two folds, one list; composition, not extension. */
-fun leadFold(entries: List<JournalEntry>): LeadState {
+/**
+ * The lead state machine: `leadState = leadFold(entries, auth)`. Folds the SAME entry list
+ * the shared fold consumes — two folds, one list; composition, not extension.
+ *
+ * RECOVERY CONTRACT (widened by 2b): folded state is now a function of the journal AND
+ * [auth]. Approvals re-verify at fold time and a ceremony release gates on a quorum over the
+ * VERIFIED approvers ([foldRelease]), so the same journal can fold to a DIFFERENT verdict
+ * under a different [LeadAuth]: revoke a principal from the allow-list (or install a
+ * stricter quorum) and re-fold, and a gate that reached quorum before may no longer — its
+ * release folds stale, the gate drops out of [LeadState.releasedGates], and the phase never
+ * reaches the approved state it did under the old auth. That is deliberate — authorization
+ * is not frozen into the journal at write time; it is re-decided on the allow-list and
+ * quorum in force at recovery. [auth] is required, with no default: which principals and
+ * quorum a fold verifies against is a security-load-bearing choice, and a silent default
+ * would be the footgun this parameter exists to refuse. A substrate not yet wired for the
+ * ceremony passes [LeadAuth.DENY_ALL] explicitly.
+ */
+fun leadFold(entries: List<JournalEntry>, auth: LeadAuth): LeadState {
   var s = LeadState()
   for (e in entries) {
     s =
       try {
-        foldOne(s, e)
+        foldOne(s, e, auth)
       } catch (x: LeadFoldException) {
         throw x
       } catch (x: Exception) {
@@ -396,7 +474,7 @@ fun leadFold(entries: List<JournalEntry>): LeadState {
   return s
 }
 
-private fun foldOne(s0: LeadState, e: JournalEntry): LeadState {
+private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
   val s = s0
   // Provenance teeth, symmetric with the release check: the substrate
   // is the sole author of these state-carrying kinds. An entry of such a kind bearing any
@@ -460,7 +538,8 @@ private fun foldOne(s0: LeadState, e: JournalEntry): LeadState {
           staleReleases = emptyList(),
           issuedNonces = emptyMap(),
           consumedNonces = emptySet(),
-          approvals = emptyMap(),
+          verifiedApprovals = emptyMap(),
+          unverifiedApprovals = emptyList(),
           pods = emptyMap(),
           pendingSpawnIntents = emptyMap(),
         )
@@ -478,7 +557,7 @@ private fun foldOne(s0: LeadState, e: JournalEntry): LeadState {
             },
         )
       }
-      KIND_GATE_RELEASED -> foldRelease(s, e, p)
+      KIND_GATE_RELEASED -> foldRelease(s, e, p, auth)
       LeadKinds.POD_SPAWNED -> {
         val pod =
           PodRecord(
@@ -611,34 +690,7 @@ private fun foldOne(s0: LeadState, e: JournalEntry): LeadState {
           else -> s.copy(consumedNonces = s.consumedNonces + nonce)
         }
       }
-      LeadKinds.APPROVAL_RECORDED -> {
-        val gateId = p.str("gateId")
-        val approval = RecordedApproval(p.str("principalId"), p.str("nonce"), p.str("payloadDigest"), e.seq)
-        val current = s.approvals[gateId].orEmpty()
-        val duplicate =
-          current.any {
-            it.principalId == approval.principalId &&
-              it.nonce == approval.nonce &&
-              it.payloadDigest == approval.payloadDigest
-          }
-        if (duplicate) s
-        else {
-          // Recorded even when the gate or nonce is unknown (the auth layer's assertion
-          // stands in the record; a release re-verifies against live state anyway), but
-          // an approval naming a gate never opened or a nonce never minted is contract
-          // drift worth seeing — the same flagged-but-kept pattern as NONCE_ISSUED.
-          val drift = buildList {
-            if (gateId !in s.openGates)
-              add("approval recorded at seq=${e.seq} for unknown gate '$gateId'")
-            if (approval.nonce !in s.issuedNonces)
-              add("approval recorded at seq=${e.seq} for unminted nonce on gate '$gateId'")
-          }
-          val flagged =
-            if (drift.isEmpty()) s
-            else s.copy(escalations = (s.escalations + drift).takeLast(ANOMALY_TAIL))
-          flagged.copy(approvals = flagged.approvals + (gateId to (current + approval)))
-        }
-      }
+      LeadKinds.APPROVAL_RECORDED -> foldApproval(s, e, p, auth)
       LeadKinds.COGNITION_PROPOSED ->
         s.copy(cognitionSpendUsd = s.cognitionSpendUsd + accruedCost(p))
       // A turn that produced garbage was billed exactly like one that produced a decision, so
@@ -670,10 +722,22 @@ private fun accruedCost(p: kotlinx.serialization.json.JsonObject): Double =
 
 /**
  * Release handling — the lead-level teeth. Honored iff origin == auth layer AND the
- * released digest matches the gate as opened AND the nonce discipline holds. Wrong origin
- * is the shared fold's visible rejection (re-asserted here by simply not honoring);
- * everything else auth-origin-but-unfaithful is retained visibly as
+ * released digest matches the gate as opened AND the nonce discipline holds AND — on the
+ * nonce (ceremony) path — a quorum of VERIFIED approvers is satisfied. Wrong origin is the
+ * shared fold's visible rejection (re-asserted here by simply not honoring); everything else
+ * auth-origin-but-unfaithful (or quorum-unmet) is retained visibly as
  * [LeadState.staleReleases].
+ *
+ * QUORUM (2b): once a release names a faithful nonce, the gate clears only if
+ * [quorumSatisfied] holds over [LeadState.boundApprovers] — the preimage-derived principals
+ * whose VERIFIED approval binds this gate at this nonce and digest — against [auth]'s quorum
+ * tree. An unverified approval never enters that set (see [foldApproval]), so the flat
+ * `principalId` a record claimed cannot fill a quorum. Quorum sits INSIDE the nonce branch,
+ * after the faithfulness check: an unfaithful nonce still folds stale on faithfulness and
+ * never reaches the quorum gate, so the quorum check bites exactly the releases that would
+ * otherwise have cleared. Under [LeadAuth.DENY_ALL] the bound set is always empty and the
+ * quorum unsatisfiable, so no ceremony release clears — the honest default for a substrate
+ * whose verifier is not yet installed.
  *
  * NONCE DISCIPLINE (single-use, journal-derived): a release naming a nonce is honored
  * only if that nonce was issued FOR THIS GATE, bound at issue to THIS digest, and never
@@ -684,9 +748,18 @@ private fun accruedCost(p: kotlinx.serialization.json.JsonObject): Double =
  * pre-ceremony stub path, kept so journals written before nonces existed keep their
  * meaning — and once a nonce exists for a gate, omitting the field is indiscipline, not
  * an exemption. That condition is per-gate LIVE STATE, not a journal epoch: a gate whose
- * mint step fails or is skipped stays on the pre-ceremony rule until a nonce exists for
- * it, and refusing nonce-less releases outright once the ceremony is wired is step 2's
- * call. Nonce-less honors are marked in [LeadState.nonceLessReleases], keyed by gate to
+ * mint step fails or is skipped stays on the pre-ceremony rule until a nonce exists for it.
+ *
+ * 2b GATES THE NONCE PATH ONLY, and deliberately LEAVES the nonce-less pre-ceremony path
+ * open rather than refusing it outright. That is safe because the nonce-less path is not a
+ * quorum bypass: the `s.issuedNonces.values.any { it.gateId == gateId }` clause below folds
+ * a nonce-less release stale the instant its gate has ANY nonce issued, so a gate closes its
+ * pre-ceremony escape hatch the moment it enters the ceremony — per gate, with no later step
+ * required. `releaseOmittingTheNonceIsNotAnExemption` is the cell that holds this line, and
+ * it must stay green. Refusing nonce-less releases outright is deferred to when a daemon
+ * actually mints nonces (no step does yet — the fixture, scenario, and wake-loop releases
+ * are all nonce-less), at which point a gate that reached the ceremony can never take this
+ * path anyway. Nonce-less honors are marked in [LeadState.nonceLessReleases], keyed by gate to
  * the FIRST honoring release's seq, so the disposition stays legible after the fact — the
  * honor is itself single-use per gate, mirroring the consumed-nonce rule: a second
  * nonce-less release of a marked gate folds stale rather than silently re-honoring and
@@ -706,6 +779,7 @@ private fun foldRelease(
   s: LeadState,
   e: JournalEntry,
   p: kotlinx.serialization.json.JsonObject,
+  auth: LeadAuth,
 ): LeadState {
   if (e.origin != ORIGIN_AUTH_LAYER) return s // forged provenance: never honored here; shared fold records the rejection
   val gateId = p.str("gateId")
@@ -739,6 +813,10 @@ private fun foldRelease(
         issued.payloadDigest == digest &&
         nonce !in s.consumedNonces
     if (!faithful) return stale()
+    // Quorum over the VERIFIED approvers bound to this gate at this nonce and digest. Placed
+    // after faithfulness so an unfaithful nonce folds stale before it, and the quorum check
+    // bites exactly the releases that would otherwise clear. Unmet → stale, visibly.
+    if (!quorumSatisfied(auth.quorum, s.boundApprovers(gate, nonce))) return stale()
     consumed = s.consumedNonces + nonce
     nonceLess = s.nonceLessReleases
   }
@@ -754,6 +832,100 @@ private fun foldRelease(
         GateKinds.COMMIT_APPROVAL -> TicketPhase.COMMIT_APPROVED
         else -> s.phase
       },
+  )
+}
+
+/**
+ * APPROVAL_RECORDED handling — the mechanical re-verification (2b). An approval counts
+ * toward a quorum only if it RE-VERIFIES here: the fold reads the evidence sub-object,
+ * re-derives the signer's committed identity from the signed preimage, checks the signature
+ * over that preimage, resolves the committed key to an allow-listed principal, and confirms
+ * every committed field agrees with its flat copy. The PREIMAGE is the sole authority; the
+ * flat columns (top-level and evidence) are lookup indices held to agreement, never trusted —
+ * so the flat `principalId` a record claims can never by itself put an approver in a quorum.
+ *
+ * A verified approval lands in [LeadState.verifiedApprovals] under its COMMITTED gate, keyed
+ * by the preimage-derived principal, deduped on (principal, nonce, digest). Anything that
+ * fails a step lands in [LeadState.unverifiedApprovals] with a reason and contributes
+ * nothing — a null/absent preimage included (fail-closed: unverifiable, never a pass). The
+ * refusal names WHICH layer disagreed, so a split-source attempt is legible after the fact.
+ *
+ * The top-level payload framing (gateId/principalId/nonce/payloadDigest) is the auth layer's
+ * own contract, read strictly ([str] throws classified on a malformed required field); the
+ * evidence sub-object is carrier-provided PROOF, so a malformed or absent one is "unverified",
+ * never a fold crash — an approval that cannot be verified must not be able to brick recovery.
+ */
+private fun foldApproval(
+  s: LeadState,
+  e: JournalEntry,
+  p: kotlinx.serialization.json.JsonObject,
+  auth: LeadAuth,
+): LeadState {
+  val claimedGate = p.str("gateId")
+  val claimedPrincipal = p.str("principalId")
+  val claimedNonce = p.str("nonce")
+  val claimedDigest = p.str("payloadDigest")
+
+  fun unverified(reason: String): LeadState =
+    s.copy(
+      unverifiedApprovals =
+        (s.unverifiedApprovals + (e.seq to "approval at seq=${e.seq} $reason")).takeLast(ANOMALY_TAIL)
+    )
+
+  val evidenceObj = p["evidence"] as? JsonObject ?: return unverified("carries no evidence sub-object")
+  val evidence =
+    try {
+      ApprovalEvidence.fromJson(evidenceObj)
+    } catch (x: Exception) {
+      return unverified("has malformed evidence: ${x.message}")
+    }
+  val preimage =
+    evidence.signedPreimage
+      ?: return unverified("carries no signed preimage — cannot re-verify (fail-closed)")
+  val committed =
+    parseCommitted(preimage)
+      ?: return unverified("has a preimage that is not a canonical committed approval")
+  if (!auth.verifier.verifies(evidence.schemeId, committed.publicKey, evidence.signature, preimage))
+    return unverified("has a signature that does not verify over its preimage")
+  val principal =
+    auth.allowList.principalFor(SchemeKey(evidence.schemeId, committed.publicKey))
+      ?: return unverified("is signed by a key not in the allow-list")
+  // Three-layer agreement: the preimage is authority; the evidence's flat copies AND the
+  // top-level payload fields must match it, or the record names one thing and signs another.
+  if (evidence.publicKey != committed.publicKey) return unverified("evidence publicKey disagrees with the preimage")
+  if (evidence.gateId != committed.gateId) return unverified("evidence gateId disagrees with the preimage")
+  if (evidence.payloadDigest != committed.payloadDigest)
+    return unverified("evidence payloadDigest disagrees with the preimage")
+  if (evidence.nonce != committed.nonce) return unverified("evidence nonce disagrees with the preimage")
+  if (claimedGate != committed.gateId) return unverified("payload gateId disagrees with the preimage")
+  if (claimedNonce != committed.nonce) return unverified("payload nonce disagrees with the preimage")
+  if (claimedDigest != committed.payloadDigest)
+    return unverified("payload payloadDigest disagrees with the preimage")
+  if (claimedPrincipal != principal.principalId)
+    return unverified("payload principalId disagrees with the allow-list identity resolved from the preimage")
+
+  val verified = VerifiedApproval(principal.principalId, committed.nonce, committed.payloadDigest, e.seq)
+  val current = s.verifiedApprovals[committed.gateId].orEmpty()
+  val duplicate =
+    current.any {
+      it.principalId == verified.principalId &&
+        it.nonce == verified.nonce &&
+        it.payloadDigest == verified.payloadDigest
+    }
+  if (duplicate) return s
+  // Verified, but drift is still worth flagging: a verified approval can commit to a gate not
+  // yet opened or a nonce not yet minted (issue-before-open). Kept — a release re-checks
+  // against live state — with the same flagged-but-kept pattern as NONCE_ISSUED.
+  val drift = buildList {
+    if (committed.gateId !in s.openGates)
+      add("verified approval at seq=${e.seq} for unknown gate '${committed.gateId}'")
+    if (committed.nonce !in s.issuedNonces)
+      add("verified approval at seq=${e.seq} for unminted nonce on gate '${committed.gateId}'")
+  }
+  val flagged =
+    if (drift.isEmpty()) s else s.copy(escalations = (s.escalations + drift).takeLast(ANOMALY_TAIL))
+  return flagged.copy(
+    verifiedApprovals = flagged.verifiedApprovals + (committed.gateId to (current + verified))
   )
 }
 

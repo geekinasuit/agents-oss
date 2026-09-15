@@ -42,6 +42,10 @@ kt_jvm_library(
         "//agency/pod",
         "//agency/pod:acp_client",
         "//agency/pod:acp_pod_engine",
+        # The lead fold re-verifies approvals and gates release on a quorum (2a.4 step 2b), so
+        # it consumes the verifying vocabulary: allow-list, quorum, and the ApprovalVerifier
+        # port + preimage parse. A clean downward edge, like the journal dep.
+        "//agency/shared/auth",
         "//agency/shared/harness",
         "//agency/shared/journal",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
@@ -96,8 +100,9 @@ kt_jvm_test(
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
         ":lead",
-        # Test-only: the composition cell feeds the fold's bound-approver set to the quorum
-        # evaluator; the lead library itself keeps journal-local records and takes no dep.
+        # These cells build LeadAuth (allow-list + verifier + quorum) and feed the fold's
+        # verified-approver set to the quorum evaluator; the lead library depends on this
+        # target too (2b), so the test's use of it is direct, not a peek past the boundary.
         "//agency/shared/auth",
         "//agency/shared/journal",
         "@maven//:junit_junit",

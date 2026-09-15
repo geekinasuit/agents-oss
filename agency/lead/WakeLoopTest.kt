@@ -74,6 +74,7 @@ class WakeLoopTest {
         ticketSource = source ?: FileTicketSource(ticketFile),
         workdir = dir,
         effects = effects,
+        leadAuth = LeadAuth.DENY_ALL, // wake-loop mechanics; releases are nonce-less
         timers = { t, _ -> armed += t.id },
       )
   }
@@ -481,6 +482,7 @@ class WakeLoopTest {
         ticketSource = FileTicketSource(File(dir, "ticket.txt")), // absent: pure idle
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // wake-loop mechanics; releases are nonce-less
       )
     val folded = daemon.driveUntilQuiescent()
     assertTrue(
@@ -551,6 +553,7 @@ class WakeLoopTest {
         ticketSource = FileTicketSource(File(dir, "ticket.txt")),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // wake-loop mechanics; releases are nonce-less
       )
     val loop = Thread { daemon.runLoop() }
     loop.start()
@@ -647,6 +650,7 @@ class WakeLoopTest {
         ticketSource = FileTicketSource(File(dir, "ticket.txt")),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // wake-loop mechanics; releases are nonce-less
       )
     // runLoop adopts → claims t1 → the scripted playbook proposes the planner pod → boom.spawn
     // throws → the loop journals the fault and rethrows, ending the thread.
@@ -704,6 +708,7 @@ class WakeLoopTest {
         ticketSource = FileTicketSource(File(dir, "ticket.txt")),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // wake-loop mechanics; releases are nonce-less
       )
     val folded = daemon.driveUntilQuiescent()
     val result = store.readAll().first { it.kind == LeadKinds.POD_RESULT_RECORDED }
@@ -758,6 +763,7 @@ class WakeLoopTest {
         ticketSource = FileTicketSource(File(dir, "ticket.txt")),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // wake-loop mechanics; releases are nonce-less
       )
     val folded = daemon.driveUntilQuiescent()
     val result = store.readAll().first { it.kind == LeadKinds.POD_RESULT_RECORDED }

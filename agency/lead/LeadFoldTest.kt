@@ -29,7 +29,9 @@ class LeadFoldTest {
   private fun newStore(): JournalStore =
     SqliteStore(tmp.newFolder().absolutePath, componentId = "lead")
 
-  private fun JournalStore.lead(): LeadState = leadFold(readAll())
+  // These cells exercise the pipeline/phase fold with nonce-LESS pre-ceremony releases, which
+  // quorum does not gate, so DENY_ALL is the right auth: the fold behaves exactly as before.
+  private fun JournalStore.lead(): LeadState = leadFold(readAll(), LeadAuth.DENY_ALL)
 
   // -- small append helpers --------------------------------------------------------------
 

@@ -101,6 +101,7 @@ class OllamaCognitionSmokeTest {
         ticketSource = FileTicketSource(File(dir, "ticket.txt")),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // model-wake gate; releases nothing
         maxCognitionAttempts = OpenAiCompatCognition.MAX_ATTEMPTS_PER_WAKE,
       )
 
@@ -143,6 +144,7 @@ class OllamaCognitionSmokeTest {
         ticketSource = FileTicketSource(File(dir, "absent-ticket.txt")),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // model-wake gate; releases nothing
         maxCognitionAttempts = OpenAiCompatCognition.MAX_ATTEMPTS_PER_WAKE,
       )
     val thread = Thread { daemon.runLoop() }

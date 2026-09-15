@@ -68,6 +68,7 @@ class ClaudeCognitionSmokeTest {
         ticketSource = FileTicketSource(File(dir, "ticket.txt")),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // model-wake smoke; releases nothing
       )
 
     val folded = daemon.driveUntilQuiescent()
