@@ -74,6 +74,16 @@ java_test(
     ],
 )
 
+# The published NIP-44 vectors are SHARED with the production codec's test in //agency/nostr, not
+# copied: the file's SHA-256 in testdata/PROVENANCE.md is the digest the NIP-44 spec itself
+# publishes, so one copy keeps that a single source of truth rather than two files to keep in
+# step. Exported to that one package. This is the coexistence the module comment above anticipates
+# — the real codec lives beside this probe and shares its vectors.
+exports_files(
+    ["testdata/nip44.vectors.json"],
+    visibility = ["//agency/nostr:__pkg__"],
+)
+
 kt_jvm_library(
     name = "nip44_vector_test_lib",
     testonly = True,
