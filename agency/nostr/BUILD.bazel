@@ -7,9 +7,13 @@ load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
 # THE DEPENDENCY EDGE POINTS INWARD, by the standing rule: this module depends on
 # //agency/shared/auth (it implements auth's port and reads its committed preimage); auth and the
 # lead fold NEVER depend on nostr and never see a NIP number, an npub, a relay URL, or any type
-# from here. Swapping the substrate means replacing this module, not editing auth. There is no
-# transport here yet — no relay connection, no socket, nothing that binds or dials (A4-2); that is
-# step 3b. This module is pure and hermetic.
+# from here. Swapping the substrate means replacing this module, not editing auth.
+#
+# The :nostr LIBRARY is pure and hermetic — no relay connection, no socket, nothing that binds or
+# dials (A4-2). The transport that DOES dial (step 3b) is the separate :relay target below: it
+# depends on :nostr and takes the relay URL and the lead key as required configuration (§REPO_SEAM
+# keeps those values in coach). Keeping it a distinct target — not extra srcs on :nostr — is what
+# keeps the codec itself hermetic; a consumer that wants only the codec never links a socket.
 #
 # secp256k1: the -jvm coordinate carries the API (compiled against here); the native lives in
 # -jni-jvm and rides each CONSUMING TEST as runtime_deps, exactly as agency/crypto documents — a
@@ -146,6 +150,65 @@ kt_jvm_test(
     runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
     deps = [
         ":nostr",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# The relay TRANSPORT (step 3b): the socket that carries the wire format above. Kept out of :nostr
+# so the codec stays pure — this is the target that dials. It depends ONLY on :nostr's public
+# String-based API (it counts JSON openers on the raw text and hands the text to parseRelayMessage),
+# so it carries NO JSON dependency of its own; and it is built on the JDK's java.net.http.WebSocket,
+# so it adds no @maven dependency at all. The lead key rides in as configuration — the -jni native
+# is a runtime dep of the CONSUMING test that signs, not of this library.
+kt_jvm_library(
+    name = "relay",
+    srcs = ["RelayConnection.kt"],
+    visibility = ["//visibility:public"],
+    deps = [":nostr"],
+)
+
+# The fake relay test double: a raw-socket RFC-6455 SERVER (the JDK ships a WebSocket client but no
+# server), testonly, reused by the transport tests here and the hostile-relay cases in 3b-2. It
+# depends on nothing — the handshake, framing, and client-frame unmasking are all hand-rolled.
+kt_jvm_library(
+    name = "fake_relay",
+    testonly = True,
+    srcs = ["FakeRelay.kt"],
+    visibility = ["//visibility:private"],
+)
+
+# The transport's structural cells, native-free: connect-failure classification, fragment
+# reassembly, ping-survival, and the three ingress bounds (size, JSON-nesting depth, queued-message
+# count). Like nostr_wire_test it makes no signature check, so it needs no crypto native. The bound
+# cells push ~1 MiB and a message flood through a loopback socket, which is still milliseconds.
+kt_jvm_test(
+    name = "relay_connection_test",
+    size = "small",
+    srcs = ["RelayConnectionTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.RelayConnectionTest",
+    deps = [
+        ":fake_relay",
+        ":nostr",
+        ":relay",
+        "@maven//:junit_junit",
+    ],
+)
+
+# The NIP-42 auth handshake over the real BIP-340 primitive: the client signs a kind-22242 event and
+# the relay verdicts on it. Needs the native runtime-only, like nostr_wire_sign_test, because it
+# signs; and reads JSON directly (kotlinx) to pull the client event's id out of the ["AUTH", <event>]
+# frame the fake relay receives.
+kt_jvm_test(
+    name = "relay_connection_auth_test",
+    size = "small",
+    srcs = ["RelayConnectionAuthTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.RelayConnectionAuthTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":fake_relay",
+        ":nostr",
+        ":relay",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
