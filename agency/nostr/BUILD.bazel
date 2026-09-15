@@ -1,7 +1,8 @@
 load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
 
 # The nostr substrate adapter for the 2a.4 authorization gate: the NIP-01 event codec (id +
-# sign/verify) and the bip340 realization of the authorization layer's ApprovalVerifier port.
+# sign/verify, plus the JSON wire object and the relay-message envelopes) and the bip340
+# realization of the authorization layer's ApprovalVerifier port.
 #
 # THE DEPENDENCY EDGE POINTS INWARD, by the standing rule: this module depends on
 # //agency/shared/auth (it implements auth's port and reads its committed preimage); auth and the
@@ -22,11 +23,18 @@ kt_jvm_library(
         "Bip340ApprovalVerifier.kt",
         "Nip44.kt",
         "NostrEvent.kt",
+        "NostrWire.kt",
     ],
     visibility = ["//visibility:public"],
     deps = [
         "//agency/shared/auth",
         "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jvm",
+        # The wire OBJECT is parsed with a vetted JSON library (hand-rolling a parser for hostile
+        # relay input would be the liability); the id-preimage in NostrEvent.kt stays hand-rolled.
+        # This is the first runtime JSON edge in this module — adopter-visible, like the secp256k1
+        # edge above.
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
 )
 
@@ -107,5 +115,38 @@ java_test(
         # The natives load reflectively from the classpath — runtime-only, like the sign/verify
         # test above and the sqlite JDBC driver in agency/shared/journal.
         "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm",
+    ],
+)
+
+# The wire codec, native-free: serialization, TOTAL parsing of hostile relay JSON, and the
+# relay-message envelopes. Like event_id_test it needs only the JSON library and no crypto native —
+# parsing structures bytes and makes no signature check.
+kt_jvm_test(
+    name = "nostr_wire_test",
+    size = "small",
+    srcs = ["NostrWireTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.NostrWireTest",
+    deps = [
+        ":nostr",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# The wire codec over the real BIP-340 primitive: the NIP-42 auth event, a signed event surviving
+# the round-trip with its signature intact, and the full client AUTH path (frame -> unwrap ->
+# verify). Needs the native runtime-only, like the sign/verify test; it also reads JSON directly
+# (kotlinx) to unwrap the ["AUTH", <event>] envelope it frames — parseRelayMessage handles only the
+# inbound ["AUTH", <challenge>] shape — so it carries the JSON dep like nostr_wire_test does.
+kt_jvm_test(
+    name = "nostr_wire_sign_test",
+    size = "small",
+    srcs = ["NostrWireSignTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.NostrWireSignTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":nostr",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
 )
