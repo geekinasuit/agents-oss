@@ -7,6 +7,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.BeforeClass
 import org.junit.Test
 
 /**
@@ -27,6 +28,27 @@ class RelayConnectionAuthTest {
 
   private fun clientEventId(authFrame: String): String =
     Json.parseToJsonElement(authFrame).jsonArray[1].jsonObject["id"]!!.jsonPrimitive.content
+
+  companion object {
+    // Force the secp256k1 native load ONCE, outside any deadline, before the timed cells run. The
+    // first sign in a fresh JVM can take seconds under CPU contention, and authenticate() charges
+    // that cold sign against its own deadline (it signs between computing the deadline and awaiting
+    // the OK). A cold sign inside a timed cell would either redden the Authenticated/Refused cells,
+    // or — worse — let the wrong-id cell pass without ever polling the OK slot. Signing here warms the
+    // JVM so each cell's own sign is fast and its deadline meaningful. No try/catch: a warm-up failure
+    // must fail the class loudly, not silently reintroduce the vacuity.
+    @JvmStatic
+    @BeforeClass
+    fun warmUpNativeSigning() {
+      buildAuthEvent(
+        secretKeyHex = "0000000000000000000000000000000000000000000000000000000000000003",
+        relayUrl = "ws://warmup.invalid",
+        challenge = "warmup",
+        createdAt = 0L,
+        auxRandHex = "00".repeat(32),
+      )
+    }
+  }
 
   @Test
   fun `authenticate succeeds when the relay accepts the signed auth event`() {

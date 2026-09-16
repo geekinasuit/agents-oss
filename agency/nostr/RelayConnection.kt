@@ -11,7 +11,9 @@ import java.net.http.WebSocketHandshakeException
 import java.security.SecureRandom
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.BlockingQueue
 import java.util.concurrent.CompletionStage
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -133,10 +135,24 @@ sealed interface AuthResult {
   data class Failed(val detail: String) : AuthResult
 }
 
+/** The outcome of [RelayConnection.publish]. Only [Accepted] means the relay took the event;
+ * everything else is fail-closed and MUST NOT be read as "it landed". Never thrown. */
+sealed interface PublishResult {
+  /** The relay accepted the event (`OK ... true`). */
+  object Accepted : PublishResult
+
+  /** The relay explicitly rejected the event (`OK ... false`). [message] is the relay's reason. */
+  data class Rejected(val message: String) : PublishResult
+
+  /** No verdict: the event could not be sent, no matching OK arrived within the deadline, or the
+   * socket dropped. Fail-closed — never assume the event was stored. */
+  data class Failed(val detail: String) : PublishResult
+}
+
 /**
- * One connection to one relay. Construct it, [connect], [authenticate], then [receive] messages
- * (publish and subscribe arrive in 3b-2), and [close] when done. Single inbound consumer: one
- * caller drains [receive] (the auth handshake here; a subscription loop in 3b-2).
+ * One connection to one relay. Construct it, [connect], [authenticate], [publish], then [receive]
+ * messages (subscribe arrives in 3b-2), and [close] when done. Single inbound consumer: one caller
+ * drains [receive] (the auth handshake here; a subscription loop in 3b-2).
  *
  * Built on the JDK's [WebSocket]: no new dependency, matching the [HttpClient] the harness already
  * uses. The receive path is a callback [Listener] on the JDK's own executor thread; it hands typed
@@ -160,6 +176,17 @@ class RelayConnection(
   // Complete, parsed messages awaiting the caller. Bounded (see COUNT bound above); offered to,
   // never put to — a blocking put on the listener thread would wedge the serialized callback.
   private val inbound = LinkedBlockingQueue<RelayMessage>(MAX_QUEUED_MESSAGES)
+
+  // OK-ack routing. An OK relay-message acknowledges one event we sent (the auth event, or a
+  // published event), matched by event id — it is NOT subscription data and must not reach the
+  // single inbound consumer. Each in-flight publish/authenticate registers a one-slot queue keyed by
+  // its event id BEFORE sending (so an OK racing back ahead of the await still lands) and removes it
+  // in a finally, so this map holds only genuinely in-flight acks — it does not grow with traffic.
+  // CROSS-THREAD BY CONSTRUCTION, unlike the listener's lock-free `assembling` StringBuilder: the
+  // listener thread offers an OK into a slot while caller threads register/await/remove theirs, so it
+  // is a ConcurrentHashMap of thread-safe queues. Keyed by event id, unique per NIP-01 (sha256 of
+  // the event), so two live awaits never share a key.
+  private val okWaiters = ConcurrentHashMap<String, BlockingQueue<RelayMessage.Ok>>()
 
   // Set once, by whichever of onError / onClose / a bounds breach fires first. A non-null value
   // means the socket is dead; every wait checks it so a caller never blocks past the connection's
@@ -269,23 +296,64 @@ class RelayConnection(
         return AuthResult.Failed("could not sign auth event: ${e.javaClass.simpleName}")
       }
 
+    // Register the ack sink BEFORE sending, so an OK that races back ahead of the await still lands
+    // in our slot rather than being dropped. Removed in the finally whether we get it or time out.
+    val slot = registerOkWaiter(authEvent.id)
     try {
-      ws.sendText(authMessage(authEvent), true).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
-    } catch (e: Exception) {
-      return AuthResult.Failed("could not send auth event: ${e.javaClass.simpleName}: ${e.message}")
+      try {
+        ws.sendText(authMessage(authEvent), true).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+      } catch (e: Exception) {
+        return AuthResult.Failed("could not send auth event: ${e.javaClass.simpleName}: ${e.message}")
+      }
+      val ok =
+        pollUntilDeadline(slot, deadline)
+          ?: return AuthResult.Failed(failedDetail("no OK for our auth event within deadline"))
+      return if (ok.accepted) AuthResult.Authenticated else AuthResult.Refused(ok.message)
+    } finally {
+      unregisterOkWaiter(authEvent.id, slot)
     }
+  }
 
-    val ok =
-      awaitMessage(deadline) { msg -> (msg as? RelayMessage.Ok)?.takeIf { it.eventId == authEvent.id } }
-        ?: return AuthResult.Failed(failedDetail("no OK for our auth event within deadline"))
-
-    return if (ok.accepted) AuthResult.Authenticated else AuthResult.Refused(ok.message)
+  /**
+   * Publish [event] to the relay and await its verdict. Frames the event as `["EVENT", <event>]`,
+   * sends it, and awaits the relay's `["OK", <event-id>, <accepted>, <message>]` for THIS event's
+   * id. [timeout] bounds the send and the wait.
+   *
+   * Fail-closed: a send fault, no OK within the deadline, an OK for a DIFFERENT event id (a relay
+   * cannot ack our event by acknowledging another), or a dropped socket all yield
+   * [PublishResult.Failed], never a hopeful assumption the event landed. Never throws.
+   *
+   * MECHANISM, not policy: the caller builds and signs [event] — WHAT to publish is coach-side
+   * (§REPO_SEAM); this only carries it and reports the relay's answer, making no authorization
+   * decision. It does not require [authenticate] first: whether a relay demands NIP-42 before it
+   * accepts an event is the relay's policy, surfaced here as a [PublishResult.Rejected] if so.
+   */
+  fun publish(event: NostrEvent, timeout: Duration): PublishResult {
+    val ws = webSocket ?: return PublishResult.Failed("not connected")
+    failure.get()?.let { return PublishResult.Failed("connection failed: $it") }
+    val deadline = Instant.now().plus(timeout)
+    val slot = registerOkWaiter(event.id)
+    try {
+      try {
+        ws.sendText(eventMessage(event), true).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+      } catch (e: Exception) {
+        return PublishResult.Failed("could not send event: ${e.javaClass.simpleName}: ${e.message}")
+      }
+      val ok =
+        pollUntilDeadline(slot, deadline)
+          ?: return PublishResult.Failed(failedDetail("no OK for published event within deadline"))
+      return if (ok.accepted) PublishResult.Accepted else PublishResult.Rejected(ok.message)
+    } finally {
+      unregisterOkWaiter(event.id, slot)
+    }
   }
 
   /**
    * Take the next relay message, or null if none arrives before [timeout] or the connection has
-   * failed. Single-consumer. Never throws. (Publish/subscribe that produce messages to receive are
-   * 3b-2; this exists now so the auth handshake and tests can drain the feed.)
+   * failed. Single-consumer. Never throws. Never returns a [RelayMessage.Ok]: an OK acks an event we
+   * sent and is routed to that sender by event id in deliver(), not queued here — a subscription
+   * draining this sees only EVENT/EOSE/CLOSED/NOTICE/AUTH. Subscribe (which produces messages to
+   * receive) arrives in 3b-2; today the auth handshake and tests drain the feed.
    */
   fun receive(timeout: Duration): RelayMessage? {
     // Drain already-queued messages FIRST, even after the connection has ended: they were validly
@@ -324,11 +392,23 @@ class RelayConnection(
     }
   }
 
-  // Poll the inbound queue until [match] returns non-null, the deadline passes, or the connection
-  // fails. Polls in slices so a fault recorded mid-wait is noticed promptly rather than only at the
-  // deadline. A non-matching message (e.g. a NOTICE before the challenge) is discarded, not an
-  // error: the caller is waiting for one specific message in a stream that may carry others.
+  // Await the first inbound message [match] accepts, discarding others: the caller waits for one
+  // specific message in a stream that may carry others (e.g. a NOTICE before the AUTH challenge).
   private fun <T : Any> awaitMessage(deadline: Instant, match: (RelayMessage) -> T?): T? {
+    while (true) {
+      val msg = pollUntilDeadline(inbound, deadline) ?: return null
+      match(msg)?.let { return it }
+    }
+  }
+
+  // Poll [queue] in slices until it yields a message, the deadline passes, or the connection fails.
+  // Slices so a fault recorded mid-wait (by the listener thread) is seen within POLL_SLICE_MILLIS
+  // rather than only at the deadline. Shared by the challenge await (the inbound queue) and the OK
+  // await (a per-event ack slot). A fault checked before the poll ends the wait even if an ack is
+  // already buffered in the slot: fail-closed is the only safe posture for authenticate() (which
+  // shares this and needs a live socket), and for publish a false Failed costs only an idempotent
+  // republish, never a false Accepted. Returns null on deadline, failure, or interrupt.
+  private fun <M : RelayMessage> pollUntilDeadline(queue: BlockingQueue<M>, deadline: Instant): M? {
     while (true) {
       if (failure.get() != null) return null
       val remaining = Duration.between(Instant.now(), deadline)
@@ -336,13 +416,40 @@ class RelayConnection(
       val sliceMillis = minOf(remaining.toMillis(), POLL_SLICE_MILLIS)
       val msg =
         try {
-          inbound.poll(sliceMillis, TimeUnit.MILLISECONDS)
+          queue.poll(sliceMillis, TimeUnit.MILLISECONDS)
         } catch (e: InterruptedException) {
           Thread.currentThread().interrupt()
           return null
-        } ?: continue
-      match(msg)?.let { return it }
+        }
+      if (msg != null) return msg
     }
+  }
+
+  // Register a one-slot ack sink for [eventId] BEFORE the event is sent. A relay's OK is CAUSED by
+  // the event we send, so it cannot precede the send; registering first therefore guarantees the slot
+  // exists before any solicited OK can arrive — even one that comes back before the await starts
+  // polling, which the slot then buffers. Registering AFTER the send would open a window where a fast
+  // OK finds no slot, is dropped, and spuriously times the call out. The test
+  // `publish Accepted through a synchronous relay double pins register-before-send` pins this order:
+  // a WebSocket double whose sendText delivers the OK to the listener synchronously — the earliest an
+  // OK can arrive — returns Accepted only while registration precedes the send. The same ordering
+  // guards the landed NIP-42 authenticate() path, which awaits its OK the same way. (An UNSOLICITED
+  // OK, for an id with no registered waiter, is dropped in deliver() and never reaches a slot — a
+  // different case, covered there.) Capacity 1 admits exactly one OK to the awaiter: a second arriving
+  // before the first is taken is rejected by the full slot; one arriving after is dropped when the
+  // finally unregisters the slot, or — in the narrow window before that — is offered into the emptied
+  // slot that no one polls again.
+  private fun registerOkWaiter(eventId: String): BlockingQueue<RelayMessage.Ok> {
+    val slot = LinkedBlockingQueue<RelayMessage.Ok>(1)
+    okWaiters[eventId] = slot
+    return slot
+  }
+
+  // Remove our own slot — conditionally, so a slot a later awaiter registered under the same id is
+  // never yanked (id reuse does not occur for unique NIP-01 ids; the conditional keeps the map
+  // correct regardless).
+  private fun unregisterOkWaiter(eventId: String, slot: BlockingQueue<RelayMessage.Ok>) {
+    okWaiters.remove(eventId, slot)
   }
 
   private fun failedDetail(default: String): String =
@@ -453,6 +560,14 @@ class RelayConnection(
       // a clean fail-closed for an attempted recovery that cannot reliably complete. So there is no
       // catch; correctness rests on the guard, which the ceiling-depth cell re-checks every build.
       val message = parseRelayMessage(text) ?: return
+      // An OK relay-message is a publish/auth ACK, routed to the waiter that sent the matching event
+      // id — NOT subscription data. Divert it here so the single inbound consumer (receive()) sees
+      // only EVENT/EOSE/CLOSED/NOTICE/AUTH; an OK for an id no one is awaiting (unsolicited, late, or
+      // a duplicate) finds no slot and is dropped, never queued. See [okWaiters].
+      if (message is RelayMessage.Ok) {
+        okWaiters[message.eventId]?.offer(message)
+        return
+      }
       // offer, not put: a full queue must not block this serialized listener thread. A relay
       // flooding complete messages past the COUNT bound is treated as the abuse it is.
       if (!inbound.offer(message)) {
