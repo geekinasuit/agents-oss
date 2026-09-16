@@ -1,7 +1,11 @@
 package com.geekinasuit.agency.nostr
 
 import java.net.ServerSocket
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.WebSocket
 import java.time.Duration
+import java.util.concurrent.CompletableFuture
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -377,4 +381,276 @@ class RelayConnectionTest {
       conn.close()
     }
   }
+
+  // A structurally-valid event with a caller-chosen id, built WITHOUT signing (like the wide-event
+  // cell above). publish() frames and sends an event and matches the relay's OK by id; it never
+  // verifies the signature — the relay would — so these native-free cells need no real one.
+  private fun testEvent(id: String) =
+    NostrEvent(
+      id = id,
+      pubkey = "00".repeat(32),
+      createdAt = 1_700_000_000L,
+      kind = 1,
+      tags = emptyList(),
+      content = "hello",
+      sig = "00".repeat(64),
+    )
+
+  @Test
+  fun `publish is Accepted when the relay OKs the event`() {
+    FakeRelay().use { relay ->
+      val id = "11".repeat(32)
+      relay.serve { session ->
+        val frame = session.nextClientText(3_000) ?: error("no EVENT frame from client")
+        // publish() must frame the event as ["EVENT", <event>] carrying the event id.
+        assertTrue("expected an EVENT frame, got $frame", frame.startsWith("[\"EVENT\","))
+        assertTrue("the frame must carry the event id", frame.contains(id))
+        session.sendText("[\"OK\",\"$id\",true,\"\"]")
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      assertEquals(PublishResult.Accepted, conn.publish(testEvent(id), Duration.ofSeconds(3)))
+      relay.assertScriptClean()
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `publish is Rejected with the relay's reason when the event is refused`() {
+    FakeRelay().use { relay ->
+      val id = "22".repeat(32)
+      relay.serve { session ->
+        session.nextClientText(3_000) ?: error("no EVENT frame from client")
+        session.sendText("[\"OK\",\"$id\",false,\"blocked: spam\"]")
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      val result = conn.publish(testEvent(id), Duration.ofSeconds(3))
+      assertTrue("expected Rejected, got $result", result is PublishResult.Rejected)
+      assertEquals("blocked: spam", (result as PublishResult.Rejected).message)
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `publish ignores an OK for a different event id and fails closed`() {
+    FakeRelay().use { relay ->
+      val id = "33".repeat(32)
+      relay.serve { session ->
+        session.nextClientText(3_000) ?: error("no EVENT frame from client")
+        // An OK (even accepted=true) for an id that is NOT our event's: a relay must not make us
+        // believe a DIFFERENT event landed. We keep waiting, then time out — fail-closed.
+        session.sendText("[\"OK\",\"${"d".repeat(64)}\",true,\"\"]")
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      val result = conn.publish(testEvent(id), Duration.ofMillis(600))
+      assertTrue("expected Failed, got $result", result is PublishResult.Failed)
+      assertTrue((result as PublishResult.Failed).detail.contains("no OK"))
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `publish fails closed when the relay never OKs the event`() {
+    FakeRelay().use { relay ->
+      val id = "44".repeat(32)
+      relay.serve { session ->
+        session.nextClientText(3_000) ?: error("no EVENT frame from client")
+        Thread.sleep(2_000) // read the event, then stay silent: no OK ever
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      val result = conn.publish(testEvent(id), Duration.ofMillis(500))
+      assertTrue("expected Failed, got $result", result is PublishResult.Failed)
+      assertTrue((result as PublishResult.Failed).detail.contains("no OK"))
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `an OK routes to the publisher without consuming a subscription's messages`() {
+    FakeRelay().use { relay ->
+      // The heart of OK-routing: an OK is a publish ACK, not subscription data. While publish()
+      // awaits its OK, an EVENT the relay pushes must still reach receive() — the OK must not be
+      // mistaken for the subscription's message, nor the EVENT for the ack. The relay sends the
+      // subscription EVENT first, then the OK; publish() can only return once the OK is processed,
+      // which is after the EVENT was queued, so receive() deterministically finds the EVENT.
+      val id = "55".repeat(32)
+      val subEvent = testEvent("66".repeat(32))
+      relay.serve { session ->
+        session.nextClientText(3_000) ?: error("no EVENT frame from client")
+        session.sendText("[\"EVENT\",\"sub-1\"," + subEvent.serialize() + "]")
+        session.sendText("[\"OK\",\"$id\",true,\"\"]")
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      assertEquals(PublishResult.Accepted, conn.publish(testEvent(id), Duration.ofSeconds(3)))
+      val subMsg = conn.receive(Duration.ofSeconds(2))
+      assertTrue("the subscription EVENT must still arrive, got $subMsg", subMsg is RelayMessage.Event)
+      assertEquals("sub-1", (subMsg as RelayMessage.Event).subscriptionId)
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `a duplicate OK for the same event is dropped, not surfaced`() {
+    FakeRelay().use { relay ->
+      // A relay that sends the OK twice (a replay, or an over-eager relay) must ack the publish
+      // exactly once and never leak the duplicate onto the receive() feed. The second OK finds the
+      // one-slot ack sink already emptied-and-removed and is dropped.
+      val id = "77".repeat(32)
+      relay.serve { session ->
+        session.nextClientText(3_000) ?: error("no EVENT frame from client")
+        session.sendText("[\"OK\",\"$id\",true,\"\"]")
+        session.sendText("[\"OK\",\"$id\",true,\"\"]")
+        Thread.sleep(1_000) // hold the socket open so a null receive() means "nothing queued", not closed
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      assertEquals(PublishResult.Accepted, conn.publish(testEvent(id), Duration.ofSeconds(3)))
+      assertTrue("the duplicate OK must not reach receive()", conn.receive(Duration.ofMillis(400)) == null)
+      assertTrue("a duplicate OK is not a breach", !conn.hasFailed())
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `an unsolicited OK with no publish in flight is dropped, not queued`() {
+    FakeRelay().use { relay ->
+      // An OK for an id no one is awaiting (a confused or hostile relay) must be dropped — never
+      // queued to the single consumer, never treated as a fault. Nothing is published here.
+      relay.serve { session ->
+        session.sendText("[\"OK\",\"${"ab".repeat(32)}\",true,\"\"]")
+        Thread.sleep(1_000) // hold the socket open so a null receive() means "nothing queued", not closed
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      assertTrue("an unsolicited OK must not reach receive()", conn.receive(Duration.ofMillis(500)) == null)
+      assertTrue("an unsolicited OK must not breach the connection", !conn.hasFailed())
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `publish Accepted through a synchronous relay double pins register-before-send`() {
+    // A WebSocket-level double, reached through the injectable httpClient seam, whose sendText
+    // delivers the relay's OK to the listener SYNCHRONOUSLY — before its send future completes, the
+    // earliest instant an OK can arrive. publish() registers its ack slot BEFORE sending, so the slot
+    // is already there when this earliest-possible OK routes, and publish returns Accepted. Move the
+    // registration AFTER the send and this same OK would find no slot, be dropped, and time the
+    // publish out to Failed — so this cell pins register-before-send, the ordering that also guards
+    // the landed NIP-42 authenticate() path. A socket-level double (FakeRelay) cannot hit this window
+    // deterministically; a WebSocket-level one can.
+    val id = "88".repeat(32)
+    val conn = RelayConnection(config("ws://127.0.0.1:1"), syncOkClient(okId = id, accepted = true))
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+    assertEquals(PublishResult.Accepted, conn.publish(testEvent(id), Duration.ofSeconds(3)))
+    conn.close()
+  }
+
+  @Test
+  fun `publish through the synchronous double fails closed when the OK is for another id`() {
+    // The same synchronous double, but acking a DIFFERENT id than the published event's. The
+    // published event's slot is never filled, so publish fails closed — proving the double routes the
+    // OK by id and does not rubber-stamp: the positive cell's Accepted is earned (the id matched AND
+    // the slot was present), not an artifact of the double always completing the call.
+    val id = "99".repeat(32)
+    val conn =
+      RelayConnection(config("ws://127.0.0.1:1"), syncOkClient(okId = "ee".repeat(32), accepted = true))
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+    val result = conn.publish(testEvent(id), Duration.ofMillis(400))
+    assertTrue("expected Failed for a mismatched-id OK, got $result", result is PublishResult.Failed)
+    conn.close()
+  }
+}
+
+// A WebSocket-level test double reached through RelayConnection's injectable httpClient seam
+// (constructor arg). Its sendText delivers ["OK", <okId>, <accepted>, ""] to the captured listener
+// SYNCHRONOUSLY, on the caller's thread, before returning a completed future — the earliest an OK can
+// arrive. That is what makes register-before-send observable deterministically: the invariant is the
+// ORDERING of two statements (register the slot, then send), and this double forces the OK to route
+// at the instant of the send. It models nothing else — no relay, handshake, or demand model — because
+// the ordering is all the cells that use it assert.
+private fun syncOkClient(okId: String, accepted: Boolean): HttpClient =
+  SyncOkHttpClient(okId, accepted)
+
+private fun notUsed(): Nothing =
+  throw UnsupportedOperationException("test double: only newWebSocketBuilder() is exercised")
+
+private class SyncOkHttpClient(
+  private val okId: String,
+  private val accepted: Boolean,
+) : HttpClient() {
+  override fun newWebSocketBuilder(): WebSocket.Builder = SyncOkWebSocketBuilder(okId, accepted)
+
+  // connect() only ever calls newWebSocketBuilder(); the rest of HttpClient is never reached.
+  override fun cookieHandler(): java.util.Optional<java.net.CookieHandler> = notUsed()
+  override fun connectTimeout(): java.util.Optional<Duration> = notUsed()
+  override fun followRedirects(): HttpClient.Redirect = notUsed()
+  override fun proxy(): java.util.Optional<java.net.ProxySelector> = notUsed()
+  override fun sslContext(): javax.net.ssl.SSLContext = notUsed()
+  override fun sslParameters(): javax.net.ssl.SSLParameters = notUsed()
+  override fun authenticator(): java.util.Optional<java.net.Authenticator> = notUsed()
+  override fun version(): HttpClient.Version = notUsed()
+  override fun executor(): java.util.Optional<java.util.concurrent.Executor> = notUsed()
+
+  override fun <T> send(
+    request: java.net.http.HttpRequest,
+    responseBodyHandler: java.net.http.HttpResponse.BodyHandler<T>,
+  ): java.net.http.HttpResponse<T> = notUsed()
+
+  override fun <T> sendAsync(
+    request: java.net.http.HttpRequest,
+    responseBodyHandler: java.net.http.HttpResponse.BodyHandler<T>,
+  ): CompletableFuture<java.net.http.HttpResponse<T>> = notUsed()
+
+  override fun <T> sendAsync(
+    request: java.net.http.HttpRequest,
+    responseBodyHandler: java.net.http.HttpResponse.BodyHandler<T>,
+    pushPromiseHandler: java.net.http.HttpResponse.PushPromiseHandler<T>,
+  ): CompletableFuture<java.net.http.HttpResponse<T>> = notUsed()
+}
+
+private class SyncOkWebSocketBuilder(private val okId: String, private val accepted: Boolean) :
+  WebSocket.Builder {
+  override fun header(name: String, value: String): WebSocket.Builder = this
+  override fun connectTimeout(timeout: Duration): WebSocket.Builder = this
+
+  override fun subprotocols(
+    mostPreferred: String,
+    vararg lesserPreferred: String,
+  ): WebSocket.Builder = this
+
+  override fun buildAsync(uri: URI, listener: WebSocket.Listener): CompletableFuture<WebSocket> =
+    CompletableFuture.completedFuture<WebSocket>(SyncOkWebSocket(okId, accepted, listener))
+}
+
+private class SyncOkWebSocket(
+  private val okId: String,
+  private val accepted: Boolean,
+  private val listener: WebSocket.Listener,
+) : WebSocket {
+  // The whole point: hand the listener the solicited OK synchronously, then complete the send. The
+  // event frame we "send" is ignored — the double's job is to make the OK arrive at the earliest
+  // instant, on the caller's thread, so a missing slot would be observable as a dropped OK.
+  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> {
+    val flag = if (accepted) "true" else "false"
+    listener.onText(this, "[\"OK\",\"$okId\",$flag,\"\"]", true)
+    return CompletableFuture.completedFuture<WebSocket>(this)
+  }
+
+  // close() calls sendClose then abort on failure; a completed future means no abort. request() is
+  // called by the listener on delivery. Nothing else is reached on the publish/close path.
+  override fun sendClose(statusCode: Int, reason: String): CompletableFuture<WebSocket> =
+    CompletableFuture.completedFuture<WebSocket>(this)
+  override fun request(n: Long) {}
+  override fun abort() {}
+  override fun sendBinary(data: java.nio.ByteBuffer, last: Boolean): CompletableFuture<WebSocket> =
+    notUsed()
+  override fun sendPing(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
+  override fun sendPong(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
+  override fun getSubprotocol(): String = ""
+  override fun isOutputClosed(): Boolean = false
+  override fun isInputClosed(): Boolean = false
 }
