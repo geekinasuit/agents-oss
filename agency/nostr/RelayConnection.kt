@@ -330,10 +330,8 @@ class RelayConnection(
     // in our slot rather than being dropped. Removed in the finally whether we get it or time out.
     val slot = registerOkWaiter(authEvent.id)
     try {
-      try {
-        ws.sendText(authMessage(authEvent), true).get(remaining.toMillis(), TimeUnit.MILLISECONDS)
-      } catch (e: Exception) {
-        return AuthResult.Failed("could not send auth event: ${e.javaClass.simpleName}: ${e.message}")
+      sendFrameOrBreach(ws, authMessage(authEvent), remaining)?.let {
+        return AuthResult.Failed("could not send auth event: $it")
       }
       val ok =
         pollUntilDeadline(slot, deadline)
@@ -364,10 +362,8 @@ class RelayConnection(
     val deadline = Instant.now().plus(timeout)
     val slot = registerOkWaiter(event.id)
     try {
-      try {
-        ws.sendText(eventMessage(event), true).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
-      } catch (e: Exception) {
-        return PublishResult.Failed("could not send event: ${e.javaClass.simpleName}: ${e.message}")
+      sendFrameOrBreach(ws, eventMessage(event), timeout)?.let {
+        return PublishResult.Failed("could not send event: $it")
       }
       val ok =
         pollUntilDeadline(slot, deadline)
@@ -451,12 +447,13 @@ class RelayConnection(
     }
   }
 
-  /** Whether the connection has recorded a terminal fault (error, relay close, or a bounds breach).
-   * Once true it stays true. */
+  /** Whether the connection has recorded a terminal fault (error, relay close, a bounds breach, or a
+   * stalled send). Once true it stays true. */
   fun hasFailed(): Boolean = failure.get() != null
 
   /** The first terminal fault's classified reason, or null if the connection has not failed. The
-   * substrate's words for what went wrong (a transport error, a relay close, or which bound). */
+   * substrate's words for what went wrong (a transport error, a relay close, which bound, or a send
+   * that stalled past its deadline). */
   fun failureReason(): String? = failure.get()
 
   /** Close the socket. Idempotent and bounded: a graceful close that does not complete in time is
@@ -538,12 +535,10 @@ class RelayConnection(
   private fun sendControlFrame(frame: String, timeout: Duration, what: String): SubscribeResult {
     val ws = webSocket ?: return SubscribeResult.Failed("not connected")
     failure.get()?.let { return SubscribeResult.Failed("connection failed: $it") }
-    return try {
-      ws.sendText(frame, true).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
-      SubscribeResult.Sent
-    } catch (e: Exception) {
-      SubscribeResult.Failed("could not send $what: ${e.javaClass.simpleName}: ${e.message}")
+    sendFrameOrBreach(ws, frame, timeout)?.let {
+      return SubscribeResult.Failed("could not send $what: $it")
     }
+    return SubscribeResult.Sent
   }
 
   // A caller-supplied subscription id must be non-empty and within NIP-01's 64-char cap. A bad id is
@@ -565,10 +560,39 @@ class RelayConnection(
     return bytes.joinToString("") { "%02x".format(it) }
   }
 
+  // Send [frame] and wait up to [budget] for the JDK to hand it to the socket. Returns null once the
+  // frame is on the wire, or a classified reason if the send faulted — the caller maps that reason
+  // into its own Failed type. A TIMEOUT or an INTERRUPT leaves the send OUTSTANDING: the JDK
+  // WebSocket permits one outstanding send, so the NEXT sendText on this socket would throw
+  // IllegalStateException — a poisoned connection a caller cannot tell from a live one. So on those
+  // two we breach: abort the socket (tearing down the stuck send) and record the failure, which makes
+  // every later send short-circuit at its failure.get() entry guard instead of hitting the poisoned
+  // socket. Any OTHER fault classifies WITHOUT a breach, as before: an ExecutionException means the
+  // future COMPLETED (the send itself failed, nothing outstanding), and a synchronous throw is not a
+  // pending send either — so the broad catch keeps this method's "never throws for a send fault"
+  // contract while breaching only the two cases that actually leave a send in flight.
+  private fun sendFrameOrBreach(ws: WebSocket, frame: String, budget: Duration): String? =
+    try {
+      ws.sendText(frame, true).get(budget.toMillis(), TimeUnit.MILLISECONDS)
+      null
+    } catch (e: TimeoutException) {
+      val reason = "send did not complete within ${budget.toMillis()}ms"
+      breach(ws, reason)
+      reason
+    } catch (e: InterruptedException) {
+      Thread.currentThread().interrupt()
+      val reason = "send interrupted"
+      breach(ws, reason)
+      reason
+    } catch (e: Exception) {
+      "${e.javaClass.simpleName}: ${e.message}"
+    }
+
   private fun breach(ws: WebSocket, reason: String) {
     // Record the cause (first one wins) and drop the socket immediately. abort(), not sendClose():
-    // a bounds breach is protocol abuse from a hostile relay, not a courteous shutdown to
-    // handshake through.
+    // the reasons breach() fires — an ingress-bounds breach (protocol abuse from a hostile relay) or
+    // a send stuck outstanding past its deadline — both leave the socket unusable, not in a state to
+    // handshake a courteous close through.
     failure.compareAndSet(null, reason)
     ws.abort()
   }

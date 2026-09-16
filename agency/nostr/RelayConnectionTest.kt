@@ -603,6 +603,45 @@ class RelayConnectionTest {
     assertTrue("expected Failed for a mismatched-id OK, got $result", result is PublishResult.Failed)
     conn.close()
   }
+
+  // #53 — the pending-send hazard. A send whose future never completes leaves the send OUTSTANDING
+  // when .get(budget) times out. Returning a plain Failed would let the caller reuse a socket whose
+  // NEXT send throws IllegalStateException (the JDK's one-outstanding-send contract). The fix breaches
+  // instead: it aborts the socket (tearing down the stuck send) and records the failure, so a later
+  // send is refused at the entry guard and never re-enters sendText. RED before the fix: no abort, and
+  // a reused connection re-enters the poisoned socket.
+  @Test
+  fun `a publish whose send stalls aborts the socket so the connection is not left reusable`() {
+    val ws = StalledSendWebSocket()
+    val conn = RelayConnection(config("ws://127.0.0.1:1"), webSocketClient { ws })
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+
+    val first = conn.publish(testEvent("aa".repeat(32)), Duration.ofMillis(50))
+    assertTrue("a stalled send must fail closed, got $first", first is PublishResult.Failed)
+    assertEquals("a stalled send must abort the stuck socket", 1, ws.abortCount)
+
+    // The connection is breached now: a second publish must be refused at the failure guard WITHOUT
+    // re-entering the poisoned socket — so sendText is never called a second time and the JDK's
+    // one-outstanding-send IllegalStateException never fires.
+    val second = conn.publish(testEvent("bb".repeat(32)), Duration.ofMillis(50))
+    assertTrue("a breached connection must refuse further sends, got $second", second is PublishResult.Failed)
+    assertEquals("a breached connection must not re-enter sendText", 1, ws.sendTextCount)
+  }
+
+  // The control-frame send path (REQ / CLOSE) has a different shape from publish/authenticate — a bare
+  // `return try { …; Sent }` rather than a guarded `?.let { return Failed }` — so it is the site where
+  // a uniform fix is most likely to drop the fail path and fall through to Sent. This pins that a
+  // stalled REQ send breaches and fails closed, not Sent. RED before the fix: no abort.
+  @Test
+  fun `a subscribe whose control-frame send stalls aborts the socket and fails closed`() {
+    val ws = StalledSendWebSocket()
+    val conn = RelayConnection(config("ws://127.0.0.1:1"), webSocketClient { ws })
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+
+    val result = conn.subscribe("sub-1", listOf(NostrFilter(kinds = listOf(1))), Duration.ofMillis(50))
+    assertTrue("a stalled REQ send must fail closed, not Sent, got $result", result is SubscribeResult.Failed)
+    assertEquals("a stalled control-frame send must abort the stuck socket", 1, ws.abortCount)
+  }
 }
 
 // A WebSocket-level test double reached through RelayConnection's injectable httpClient seam
@@ -613,16 +652,23 @@ class RelayConnectionTest {
 // at the instant of the send. It models nothing else — no relay, handshake, or demand model — because
 // the ordering is all the cells that use it assert.
 private fun syncOkClient(okId: String, accepted: Boolean): HttpClient =
-  SyncOkHttpClient(okId, accepted)
+  webSocketClient { listener -> SyncOkWebSocket(okId, accepted, listener) }
+
+// Reaches RelayConnection's injectable httpClient seam. connect() only ever calls
+// newWebSocketBuilder(), and buildAsync hands the captured listener to [makeSocket] and returns the
+// socket in an already-completed future — so connect() resolves with no live handshake, and every
+// other HttpClient/Builder method is unreachable on the paths these cells drive. Parameterizing on
+// [makeSocket] is what lets one scaffold serve both the OK-delivering double and the stalled-send
+// double below, rather than a second copy of all this boilerplate per double.
+private fun webSocketClient(makeSocket: (WebSocket.Listener) -> WebSocket): HttpClient =
+  DoubleHttpClient(makeSocket)
 
 private fun notUsed(): Nothing =
   throw UnsupportedOperationException("test double: only newWebSocketBuilder() is exercised")
 
-private class SyncOkHttpClient(
-  private val okId: String,
-  private val accepted: Boolean,
-) : HttpClient() {
-  override fun newWebSocketBuilder(): WebSocket.Builder = SyncOkWebSocketBuilder(okId, accepted)
+private class DoubleHttpClient(private val makeSocket: (WebSocket.Listener) -> WebSocket) :
+  HttpClient() {
+  override fun newWebSocketBuilder(): WebSocket.Builder = DoubleWebSocketBuilder(makeSocket)
 
   // connect() only ever calls newWebSocketBuilder(); the rest of HttpClient is never reached.
   override fun cookieHandler(): java.util.Optional<java.net.CookieHandler> = notUsed()
@@ -652,7 +698,7 @@ private class SyncOkHttpClient(
   ): CompletableFuture<java.net.http.HttpResponse<T>> = notUsed()
 }
 
-private class SyncOkWebSocketBuilder(private val okId: String, private val accepted: Boolean) :
+private class DoubleWebSocketBuilder(private val makeSocket: (WebSocket.Listener) -> WebSocket) :
   WebSocket.Builder {
   override fun header(name: String, value: String): WebSocket.Builder = this
   override fun connectTimeout(timeout: Duration): WebSocket.Builder = this
@@ -663,7 +709,7 @@ private class SyncOkWebSocketBuilder(private val okId: String, private val accep
   ): WebSocket.Builder = this
 
   override fun buildAsync(uri: URI, listener: WebSocket.Listener): CompletableFuture<WebSocket> =
-    CompletableFuture.completedFuture<WebSocket>(SyncOkWebSocket(okId, accepted, listener))
+    CompletableFuture.completedFuture<WebSocket>(makeSocket(listener))
 }
 
 private class SyncOkWebSocket(
@@ -686,6 +732,47 @@ private class SyncOkWebSocket(
     CompletableFuture.completedFuture<WebSocket>(this)
   override fun request(n: Long) {}
   override fun abort() {}
+  override fun sendBinary(data: java.nio.ByteBuffer, last: Boolean): CompletableFuture<WebSocket> =
+    notUsed()
+  override fun sendPing(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
+  override fun sendPong(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
+  override fun getSubprotocol(): String = ""
+  override fun isOutputClosed(): Boolean = false
+  override fun isInputClosed(): Boolean = false
+}
+
+// A WebSocket double whose sendText NEVER completes: it returns a CompletableFuture that is never
+// completed, so a RelayConnection send waiting on .get(budget) always hits its timeout. It also
+// enforces the JDK's one-outstanding-send contract — a second sendText while the first is still
+// outstanding throws IllegalStateException, exactly as java.net.http.WebSocket does. That contract is
+// what makes the pending-send hazard REAL: a send left outstanding by a timed-out .get() poisons the
+// socket, so the next send throws. [abort] clears the outstanding flag (and counts the call), which
+// is how the fix makes the connection safe — after a breach the failure guard refuses the next send
+// before it reaches sendText at all.
+private class StalledSendWebSocket : WebSocket {
+  private var sendOutstanding = false
+  var sendTextCount = 0
+    private set
+  var abortCount = 0
+    private set
+
+  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> {
+    check(!sendOutstanding) { "the JDK permits one outstanding send; a second was attempted" }
+    sendOutstanding = true
+    sendTextCount++
+    return CompletableFuture() // never completed → the caller's get(budget) times out
+  }
+
+  override fun abort() {
+    abortCount++
+    sendOutstanding = false
+  }
+
+  // close() calls sendClose then aborts only on failure; a completed future keeps close() off the
+  // abort path, so abortCount reflects breaches alone.
+  override fun sendClose(statusCode: Int, reason: String): CompletableFuture<WebSocket> =
+    CompletableFuture.completedFuture<WebSocket>(this)
+  override fun request(n: Long) {}
   override fun sendBinary(data: java.nio.ByteBuffer, last: Boolean): CompletableFuture<WebSocket> =
     notUsed()
   override fun sendPing(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
