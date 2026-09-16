@@ -156,7 +156,7 @@ class RelayConnectionTest {
         waitUntil(5_000) { conn.hasFailed() },
       )
       // "characters", not "exceeded": all three bound breaches say "exceeded", so only the char unit
-      // distinguishes the SIZE bound from the DEPTH ("openers") and COUNT ("unconsumed") breaches.
+      // distinguishes the SIZE bound from the DEPTH ("depth") and COUNT ("unconsumed") breaches.
       assertTrue(conn.failureReason()!!.contains("characters"))
       conn.close()
     }
@@ -165,12 +165,12 @@ class RelayConnectionTest {
   @Test
   fun `the DEPTH bound closes the connection on excessive JSON nesting`() {
     FakeRelay().use { relay ->
-      // One opener past MAX_JSON_OPENERS, but tiny in bytes: the size cap cannot catch this, so the
-      // opener-count guard is what rejects it — before the parser runs, and independent of whether
-      // the parser could itself have handled a frame this shallow (at MAX+1 it could; the guard fires
-      // regardless). The separate, load-bearing fact — that MAX_JSON_OPENERS itself parses safely —
-      // is what the ceiling-depth test below proves.
-      val deep = "[".repeat(RelayConnection.MAX_JSON_OPENERS + 1) + "]".repeat(RelayConnection.MAX_JSON_OPENERS + 1)
+      // One level past MAX_JSON_DEPTH, but tiny in bytes: the size cap cannot catch this, so the
+      // depth guard is what rejects it — before the parser runs. The frame is genuinely over-deep
+      // (its nesting is MAX_JSON_DEPTH + 1), which is exactly the threat the guard exists for; the
+      // separate, load-bearing fact — that a frame AT MAX_JSON_DEPTH parses safely — is what the
+      // ceiling-depth test below proves.
+      val deep = "[".repeat(RelayConnection.MAX_JSON_DEPTH + 1) + "]".repeat(RelayConnection.MAX_JSON_DEPTH + 1)
       relay.serve { session ->
         try {
           session.sendText(deep)
@@ -182,17 +182,17 @@ class RelayConnectionTest {
         "connection should have failed on the depth bound",
         waitUntil(5_000) { conn.hasFailed() },
       )
-      assertTrue(conn.failureReason()!!.contains("openers"))
+      assertTrue(conn.failureReason()!!.contains("depth"))
       conn.close()
     }
   }
 
   @Test
-  fun `a message nested to the opener ceiling is parsed safely on the listener thread`() {
+  fun `a message nested to the depth ceiling is parsed safely on the listener thread`() {
     FakeRelay().use { relay ->
-      // The load-bearing proof that MAX_JSON_OPENERS sits BELOW the parser's StackOverflow floor on
+      // The load-bearing proof that MAX_JSON_DEPTH sits BELOW the parser's StackOverflow floor on
       // the actual listener thread — not a standalone measurement that can rot, but a property CI
-      // re-checks every run. A frame with EXACTLY MAX_JSON_OPENERS openers passes the guard (which
+      // re-checks every run. A frame nested EXACTLY MAX_JSON_DEPTH deep passes the guard (which
       // breaches only ABOVE the ceiling) and reaches kotlinx's recursive parser on the JDK
       // WebSocket's own executor thread — the very thread the guard protects. If that parse
       // overflowed, the JDK routes the Error to onError, the connection fails, and the trailing
@@ -200,7 +200,7 @@ class RelayConnectionTest {
       // survived on that thread. (The deep frame itself parses to a nested array whose first element
       // is not a string tag, so parseRelayMessage returns null and it is dropped — no breach.)
       val atCeiling =
-        "[".repeat(RelayConnection.MAX_JSON_OPENERS) + "]".repeat(RelayConnection.MAX_JSON_OPENERS)
+        "[".repeat(RelayConnection.MAX_JSON_DEPTH) + "]".repeat(RelayConnection.MAX_JSON_DEPTH)
       relay.serve { session ->
         session.sendText(atCeiling)
         session.sendText("[\"NOTICE\",\"alive\"]")
@@ -209,6 +209,144 @@ class RelayConnectionTest {
       assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
       assertEquals(RelayMessage.Notice("alive"), conn.receive(Duration.ofSeconds(3)))
       assertTrue("connection must survive a ceiling-depth parse on the listener thread", !conn.hasFailed())
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `an object nested to the depth ceiling is parsed safely on the listener thread`() {
+    FakeRelay().use { relay ->
+      // Companion to the array-ceiling cell above: the guard counts `{` and `[` identically, so it
+      // also admits a frame nested EXACTLY MAX_JSON_DEPTH deep in OBJECTS. An object frame can cost
+      // more stack per kotlinx recursion frame than an array, so the ceiling's safety must hold for
+      // this shape too, on the real listener thread — the array cell alone does not prove it. A
+      // MAX_JSON_DEPTH-deep object passes the guard (which breaches only ABOVE the ceiling) and
+      // reaches the recursive parser on the JDK WebSocket's own executor thread; if that parse
+      // overflowed, the JDK routes the Error to onError and the trailing NOTICE never arrives. (The
+      // deep object parses to a JsonObject, not the JSON array a relay message is, so
+      // parseRelayMessage returns null and it is dropped — no breach.)
+      val atCeiling =
+        "{\"a\":".repeat(RelayConnection.MAX_JSON_DEPTH) + "0" + "}".repeat(RelayConnection.MAX_JSON_DEPTH)
+      relay.serve { session ->
+        session.sendText(atCeiling)
+        session.sendText("[\"NOTICE\",\"alive\"]")
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      assertEquals(RelayMessage.Notice("alive"), conn.receive(Duration.ofSeconds(3)))
+      assertTrue("connection must survive a ceiling-depth object parse on the listener thread", !conn.hasFailed())
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `a wide but shallow event is delivered, not rejected as over-deep`() {
+    FakeRelay().use { relay ->
+      // agents-oss #41: the guard measures nesting DEPTH, not a total opener COUNT, so a legitimate
+      // wide-but-shallow event is DELIVERED where a count guard would have aborted the connection. A
+      // kind-3 contact list carries one ["p", <hex>] tag per follow; an account following far more
+      // than the ceiling produces an event with thousands of sibling openers at depth ~4. That is
+      // normal traffic. Pushed as an ["EVENT", <sub>, <event>] straight onto the feed — no REQ, the
+      // transport delivers what the relay sends — it must arrive via receive() with the connection
+      // intact. The tags alone put the opener count well past the ceiling, so under a total-opener
+      // guard this same frame breaches; the delivery here is what distinguishes depth from breadth.
+      val followCount = RelayConnection.MAX_JSON_DEPTH + 100
+      val hex32 = "00".repeat(32)
+      val wideEvent =
+        NostrEvent(
+          id = hex32,
+          pubkey = hex32,
+          createdAt = 1_700_000_000L,
+          kind = 3,
+          tags = List(followCount) { listOf("p", hex32) },
+          content = "",
+          sig = "00".repeat(64),
+        )
+      val frame = "[\"EVENT\",\"sub-wide\"," + wideEvent.serialize() + "]"
+      relay.serve { it.sendText(frame) }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      val message = conn.receive(Duration.ofSeconds(3))
+      assertTrue("expected the wide event to be delivered, got $message", message is RelayMessage.Event)
+      assertEquals(followCount, (message as RelayMessage.Event).event.tags.size)
+      assertTrue("connection must survive a wide-but-shallow event", !conn.hasFailed())
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `brackets inside a string literal do not count toward nesting depth`() {
+    FakeRelay().use { relay ->
+      // The depth scan is STRING-AWARE (agents-oss #41): a `[` or `{` inside a JSON string is content,
+      // not nesting, so it must not count toward the depth. A NOTICE whose message text is thousands of
+      // `[` characters is structurally shallow (depth 2: the array, then a string) and must be
+      // DELIVERED — a string-oblivious depth counter would see thousands of openers and wrongly abort.
+      val bracketText = "[".repeat(RelayConnection.MAX_JSON_DEPTH * 2)
+      val frame = "[\"NOTICE\",\"" + bracketText + "\"]"
+      relay.serve { it.sendText(frame) }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      assertEquals(RelayMessage.Notice(bracketText), conn.receive(Duration.ofSeconds(3)))
+      assertTrue("a string full of brackets is shallow, not deep", !conn.hasFailed())
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `a deep frame is rejected even when in-string brackets could mask the nesting`() {
+    FakeRelay().use { relay ->
+      // The security direction of string-awareness (agents-oss #41): a hostile relay cannot hide real
+      // nesting from the guard by planting `]` inside strings. Each unit `["]` opens one real array
+      // level and carries a string whose content is a lone `]`; the scanner counts one opener per unit
+      // (the in-string `]` ignored), so MAX_JSON_DEPTH + 1 units breach the ceiling and MUST be
+      // rejected. A string-oblivious counter that decremented on the in-string `]` would net zero per
+      // unit, under-count to ~depth 1, and wave such a frame past the guard. This decoy is minimal, not
+      // itself a valid deep structure the parser would recurse on — the cell isolates the SCANNER's
+      // counting; a well-formed frame built this way is what an under-count would let reach the parser.
+      val masked = "[\"]\"".repeat(RelayConnection.MAX_JSON_DEPTH + 1)
+      relay.serve { session ->
+        try {
+          session.sendText(masked)
+        } catch (_: Exception) {}
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      assertTrue(
+        "an over-deep frame masked by in-string brackets must still breach",
+        waitUntil(5_000) { conn.hasFailed() },
+      )
+      assertTrue(conn.failureReason()!!.contains("depth"))
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `a deep frame is rejected even when a unicode-escaped quote precedes the nesting`() {
+    FakeRelay().use { relay ->
+      // A `\uXXXX` escape must not desync the scanner from the parser. In particular `\u0022` (an
+      // escaped ") is string CONTENT, not a terminator: both the scanner and kotlinx stay in-string
+      // through it and exit only on a LITERAL `"`. Here a complete string "\u0022" is followed by
+      // genuinely over-deep REAL nesting; the scanner exits the string on the literal closing `"`, then
+      // counts the MAX_JSON_DEPTH + 1 structural openers and breaches. Were the escape mishandled so the
+      // scanner stayed in-string, it would ignore those openers, under-count, admit the frame, and the
+      // recursive parser would overflow — so this breaching is the evidence the escape does not desync.
+      val deep =
+        "[\"\\u0022\"," +
+          "[".repeat(RelayConnection.MAX_JSON_DEPTH + 1) +
+          "]".repeat(RelayConnection.MAX_JSON_DEPTH + 1) +
+          "]"
+      relay.serve { session ->
+        try {
+          session.sendText(deep)
+        } catch (_: Exception) {}
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      assertTrue(
+        "an over-deep frame after a unicode-escaped quote must still breach",
+        waitUntil(5_000) { conn.hasFailed() },
+      )
+      assertTrue(conn.failureReason()!!.contains("depth"))
       conn.close()
     }
   }

@@ -152,7 +152,7 @@ sealed interface AuthResult {
 class RelayConnection(
   private val config: RelayConfig,
   // Injectable for tests; production uses the JDK default. The DEPTH guard's headroom (that
-  // MAX_JSON_OPENERS parses below the parser's overflow depth, re-checked by the ceiling-depth test)
+  // MAX_JSON_DEPTH parses below the parser's overflow depth, re-checked by the ceiling-depth test)
   // is scoped to the default executor's thread-stack size. A caller passing its own HttpClient backed
   // by a custom executor with smaller-stack threads lowers that overflow depth and owns that margin.
   private val httpClient: HttpClient = HttpClient.newHttpClient(),
@@ -403,22 +403,38 @@ class RelayConnection(
     }
 
     private fun deliver(webSocket: WebSocket, text: String) {
-      // DEPTH bound, applied BEFORE the parser: count JSON structural openers. The count is a
-      // provable upper bound on nesting depth (each level opens at least one `[` or `{`), so
-      // count <= LIMIT guarantees depth <= LIMIT. It bounds TOTAL openers, not depth exactly, so a
-      // wide-shallow message (many sibling brackets) trips it too — accepted: no legitimate auth/gate
-      // message is that wide, and a total-opener count is the cheap, string-oblivious measure that
-      // still caps the depth the parser actually chokes on. It needs no string/escape awareness and
-      // never decrements, so it cannot be fooled into UNDER-counting the way a depth-tracker can be by
-      // a `]` inside a string literal; brackets inside strings only inflate it, which is the safe
-      // direction. Iterative, so the guard itself cannot overflow the stack it protects.
-      var openers = 0
+      // DEPTH bound, applied BEFORE the parser: scan the JSON nesting depth and breach the moment it
+      // exceeds MAX_JSON_DEPTH. kotlinx's parser recurses once per structural container (`[` / `{`)
+      // and StackOverflows on deep enough nesting, so a too-deep frame must be rejected before the
+      // parse. The scan is STRING-AWARE: a bracket inside a JSON string literal is content the parser
+      // scans without recursing, not nesting, so it tracks string state — with escape handling — and
+      // counts only STRUCTURAL brackets. That string awareness is what lets it bound DEPTH rather than
+      // a total-opener COUNT: a wide-but-shallow message (a kind-3 with thousands of sibling `p` tags)
+      // nests only a few deep and is DELIVERED, where a total-opener count would have aborted the
+      // connection on the sibling count alone (agents-oss #41). A `]` inside a string cannot make it
+      // UNDER-count real nesting: the parser does not recurse on in-string brackets either, and a
+      // malformed frame that desyncs the two can only make the scan OVER-count (the safe direction —
+      // reject a frame the parser might have survived, never admit one it cannot). Iterative, so the
+      // guard itself cannot overflow the stack it protects.
+      var depth = 0
+      var inString = false
+      var escaped = false
       for (c in text) {
-        if (c == '[' || c == '{') {
-          if (++openers > MAX_JSON_OPENERS) {
-            breach(webSocket, "inbound message exceeded $MAX_JSON_OPENERS JSON openers (nesting guard)")
-            return
+        when {
+          escaped -> escaped = false
+          inString ->
+            when (c) {
+              '\\' -> escaped = true
+              '"' -> inString = false
+            }
+          c == '"' -> inString = true
+          c == '[' || c == '{' -> {
+            if (++depth > MAX_JSON_DEPTH) {
+              breach(webSocket, "inbound message exceeded $MAX_JSON_DEPTH JSON nesting depth")
+              return
+            }
           }
+          c == ']' || c == '}' -> if (depth > 0) depth--
         }
       }
       // TOTAL parse: null on any malformed input. Junk from a relay is noise the fold never trusts,
@@ -426,8 +442,8 @@ class RelayConnection(
       // The opener guard above is PREVENTION, and it is deliberately the ONLY protection against a
       // parser overflow here: kotlinx's recursive parser throws a StackOverflowError on deep enough
       // nesting (an Error the codec lets propagate). No catch wraps this parse, for two reasons.
-      // First, it is unreachable at MAX_JSON_OPENERS: the ceiling-depth test parses a
-      // MAX_JSON_OPENERS-deep frame on the real listener thread every CI run, so the guard keeps
+      // First, it is unreachable at MAX_JSON_DEPTH: the ceiling-depth test parses a
+      // MAX_JSON_DEPTH-deep frame on the real listener thread every CI run, so the guard keeps
       // depth below what the parser chokes on — a margin the ceiling cell re-checks each build, not
       // one proven once. Second, a catch would be the wrong tool even if
       // it were reachable: were a too-deep frame ever to reach the parser, the JDK WebSocket catches
@@ -462,15 +478,17 @@ class RelayConnection(
      * so its chars ≈ its bytes). */
     const val MAX_MESSAGE_CHARS: Long = 1L shl 20
 
-    /** DEPTH bound (#38): the ceiling on JSON structural openers in one message — a total-opener
-     * count that provably upper-bounds nesting depth (see deliver()). Far above any auth/gate message
-     * (tens of brackets) and below the depth at which the kotlinx parser StackOverflows on this
-     * listener's thread. That it sits below that depth is not trusted to any single measured number
-     * (the overflow depth is not a constant — it shifts run to run, and with the thread's stack size): instead the
-     * ceiling-depth test parses a MAX_JSON_OPENERS-deep frame on the real listener thread every CI run,
-     * so a parser or stack change that lowered the overflow depth under this ceiling would fail the
-     * build. */
-    const val MAX_JSON_OPENERS: Int = 1024
+    /** DEPTH bound (#38): the ceiling on JSON structural nesting depth in one message. A string-aware
+     * scan (see deliver()) measures how deep the structural `[` / `{` nest — ignoring brackets inside
+     * string literals — and breaches ABOVE this ceiling, so a wide-but-shallow message is delivered
+     * while a genuinely over-deep one is rejected before the kotlinx parser (agents-oss #41). Far above
+     * any auth/gate message (a handful of levels) and below the depth at which that parser
+     * StackOverflows on this listener's thread. That it sits below the overflow depth is not trusted to
+     * any single measured number (the overflow depth is not a constant — it shifts run to run, and with
+     * the thread's stack size): instead the ceiling-depth test parses a MAX_JSON_DEPTH-deep frame on the
+     * real listener thread every CI run, so a parser or stack change that lowered the overflow depth
+     * under this ceiling would fail the build. */
+    const val MAX_JSON_DEPTH: Int = 1024
 
     /** COUNT bound: complete-but-unconsumed messages the queue holds before a flood is treated as
      * abuse. Generous — the auth handshake drains within a handful. */
