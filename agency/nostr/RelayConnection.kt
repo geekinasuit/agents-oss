@@ -280,11 +280,15 @@ class RelayConnection(
   /**
    * Answer the relay's NIP-42 challenge with a kind-22242 event signed by the lead key. Awaits the
    * `["AUTH", <challenge>]`, signs and sends `["AUTH", <event>]`, then awaits the relay's
-   * `["OK", <our-event-id>, <accepted>, ...]`. [timeout] bounds each await.
+   * `["OK", <our-event-id>, <accepted>, ...]`. [timeout] is the whole handshake's budget: the
+   * challenge-await, the send, and the OK-await all draw from it.
    *
    * Fail-closed: a missing challenge, a missing OK, an OK for a DIFFERENT event id (a relay cannot
-   * authenticate us by acknowledging someone else's event), a signing fault, or a dropped socket
-   * all return a non-[Authenticated] result. Never throws.
+   * authenticate us by acknowledging someone else's event), a signing fault, or a dropped socket all
+   * return a non-[Authenticated] result. And if signing overruns the budget — a cold native load on
+   * the first call, or a slow entropy draw on a low-entropy host — that is reported distinctly from
+   * the relay staying silent, never a false "no OK" that blames the relay for a slow local sign.
+   * Never throws.
    */
   fun authenticate(timeout: Duration): AuthResult {
     val ws = webSocket ?: return AuthResult.Failed("not connected")
@@ -311,12 +315,23 @@ class RelayConnection(
         return AuthResult.Failed("could not sign auth event: ${e.javaClass.simpleName}")
       }
 
+    // Awaiting the challenge and signing above both draw from [deadline]. Signing is bounded work but
+    // not free — the first sign in a fresh JVM loads the secp256k1 native (seconds under contention),
+    // and every sign draws fresh aux randomness, which can block on a low-entropy host. If preparing
+    // the event spent the whole budget, report THAT: a blown deadline makes pollUntilDeadline below
+    // return null before it ever polls the slot, which reads as "the relay never answered", when the
+    // truth is the client never finished preparing the frame. `remaining` also bounds the send, so a
+    // slow sign cannot then spend a second full [timeout] on sendText.
+    val remaining =
+      preparationBudget(Instant.now(), deadline)
+        ?: return AuthResult.Failed(failedDetail("deadline elapsed while preparing the auth event"))
+
     // Register the ack sink BEFORE sending, so an OK that races back ahead of the await still lands
     // in our slot rather than being dropped. Removed in the finally whether we get it or time out.
     val slot = registerOkWaiter(authEvent.id)
     try {
       try {
-        ws.sendText(authMessage(authEvent), true).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+        ws.sendText(authMessage(authEvent), true).get(remaining.toMillis(), TimeUnit.MILLISECONDS)
       } catch (e: Exception) {
         return AuthResult.Failed("could not send auth event: ${e.javaClass.simpleName}: ${e.message}")
       }
@@ -710,4 +725,20 @@ class RelayConnection(
     // How far to unwrap a connect failure's cause chain before giving up on classifying it.
     private const val CAUSE_CHAIN_LIMIT: Int = 5
   }
+}
+
+// The budget left for the send + OK-await after the challenge has been awaited and the event signed,
+// or null if less than a millisecond remains before [deadline]. Pure in ([now], [deadline]) so the
+// "signing overran the budget → distinct fail-closed result, not a false 'no OK'" contract is
+// unit-testable directly: the daemon signs in-process with no injectable signer to slow, so an
+// integration test cannot reproduce a slow sign on demand. Sub-millisecond counts as elapsed: the
+// caller bounds the send with remaining.toMillis(), and a zero-millisecond get() on an as-yet-
+// incomplete future throws immediately rather than waiting — a third failure classification in the
+// exact boundary this exists to disambiguate. pollUntilDeadline absorbs the same sub-ms remainder
+// gracefully (a zero-length poll returns empty, not a throw); returning null here makes the send path
+// agree — too little time left to send is "deadline elapsed while preparing", never a stray
+// TimeoutException that reads like the relay never answered.
+internal fun preparationBudget(now: Instant, deadline: Instant): Duration? {
+  val remaining = Duration.between(now, deadline)
+  return if (remaining.toMillis() <= 0L) null else remaining
 }

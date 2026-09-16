@@ -194,10 +194,14 @@ kt_jvm_test(
     size = "small",
     srcs = ["RelayConnectionTest.kt"],
     test_class = "com.geekinasuit.agency.nostr.RelayConnectionTest",
+    # associates (not deps) on :relay so these native-free cells can reach preparationBudget, the
+    # internal deadline-budget helper authenticate() uses — a friend of the module, still native-free
+    # (the helper is pure Duration math and these cells never sign). Same friend-access idiom as
+    # nip44_test_lib above, here for a top-level internal function rather than a codec's seams.
+    associates = [":relay"],
     deps = [
         ":fake_relay",
         ":nostr",
-        ":relay",
         "@maven//:junit_junit",
     ],
 )

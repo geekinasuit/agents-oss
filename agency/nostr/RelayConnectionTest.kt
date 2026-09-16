@@ -5,8 +5,10 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.WebSocket
 import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.CompletableFuture
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -32,6 +34,44 @@ class RelayConnectionTest {
       Thread.sleep(20)
     }
     return cond()
+  }
+
+  // preparationBudget is the pure deadline-budget arithmetic authenticate() uses after signing to
+  // tell "the client ran out of time preparing the frame" from "the relay never answered". Native-
+  // free (Duration math), so its boundary is unit-testable here rather than by trying to reproduce a
+  // slow sign against a live deadline.
+  @Test
+  fun `preparationBudget returns the time left before the deadline`() {
+    val now = Instant.parse("2026-01-01T00:00:00Z")
+    assertEquals(Duration.ofMillis(500), preparationBudget(now, now.plusMillis(500)))
+  }
+
+  @Test
+  fun `preparationBudget is null at the deadline`() {
+    val now = Instant.parse("2026-01-01T00:00:00Z")
+    assertNull(preparationBudget(now, now))
+  }
+
+  @Test
+  fun `preparationBudget is null once the deadline has passed`() {
+    val now = Instant.parse("2026-01-01T00:00:00Z")
+    assertNull(preparationBudget(now, now.minusMillis(1)))
+  }
+
+  @Test
+  fun `preparationBudget is null when under a millisecond remains`() {
+    val now = Instant.parse("2026-01-01T00:00:00Z")
+    // The send bounds itself with remaining.toMillis(); a positive sub-ms budget rounds that to a
+    // zero-ms get() that throws instead of waiting, so it fails closed here as "no budget" too.
+    assertNull(preparationBudget(now, now.plusNanos(500_000)))
+  }
+
+  @Test
+  fun `preparationBudget admits a one-millisecond budget`() {
+    val now = Instant.parse("2026-01-01T00:00:00Z")
+    // The smallest budget the send can use: toMillis() rounds a whole millisecond to 1, so the guard
+    // must NOT reject it — an off-by-one to `<= 1L` would pass every reject cell above but break this.
+    assertEquals(Duration.ofMillis(1), preparationBudget(now, now.plusMillis(1)))
   }
 
   @Test
