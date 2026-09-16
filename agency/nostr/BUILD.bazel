@@ -195,6 +195,24 @@ kt_jvm_test(
     ],
 )
 
+# The subscription transport (step 3b-2): subscribe()/closeSubscription() framing and round-trip, and
+# the A4-3 hostile-relay matrix (withheld, reordered, delayed, replayed) proving the transport is a
+# faithful pipe. Native-free like relay_connection_test — the events it delivers are structural
+# literals the transport never verifies, so it needs no crypto native and no JSON dep of its own (it
+# frames server messages with :nostr's serialize()).
+kt_jvm_test(
+    name = "relay_connection_subscribe_test",
+    size = "small",
+    srcs = ["RelayConnectionSubscribeTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.RelayConnectionSubscribeTest",
+    deps = [
+        ":fake_relay",
+        ":nostr",
+        ":relay",
+        "@maven//:junit_junit",
+    ],
+)
+
 # The NIP-42 auth handshake over the real BIP-340 primitive: the client signs a kind-22242 event and
 # the relay verdicts on it. Needs the native runtime-only, like nostr_wire_sign_test, because it
 # signs; and reads JSON directly (kotlinx) to pull the client event's id out of the ["AUTH", <event>]

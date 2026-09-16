@@ -149,10 +149,25 @@ sealed interface PublishResult {
   data class Failed(val detail: String) : PublishResult
 }
 
+/** The outcome of [RelayConnection.subscribe] or [RelayConnection.closeSubscription]. NIP-01 gives
+ * a REQ/CLOSE no relay ACK (unlike a publish's OK), so the only outcomes are that the control frame
+ * was SENT or that it could not be. [Sent] means exactly that the frame went onto the wire — NOT
+ * that the relay accepted the subscription: a relay may still refuse it with a `CLOSED`, which
+ * arrives through [RelayConnection.receive] like any other message. Never thrown for a send fault. */
+sealed interface SubscribeResult {
+  /** The REQ (or CLOSE) frame was sent. */
+  object Sent : SubscribeResult
+
+  /** The frame could not be sent: not connected, the socket dropped, or the send timed out.
+   * Fail-closed — the subscription is not established. */
+  data class Failed(val detail: String) : SubscribeResult
+}
+
 /**
- * One connection to one relay. Construct it, [connect], [authenticate], [publish], then [receive]
- * messages (subscribe arrives in 3b-2), and [close] when done. Single inbound consumer: one caller
- * drains [receive] (the auth handshake here; a subscription loop in 3b-2).
+ * One connection to one relay. Construct it, [connect], [authenticate], [publish] or [subscribe],
+ * [receive] messages, [closeSubscription] when done with a subscription, and [close] when done with
+ * the connection. Single inbound consumer: one caller drains [receive] (the auth handshake, and the
+ * EVENT/EOSE/CLOSED that a [subscribe] produces).
  *
  * Built on the JDK's [WebSocket]: no new dependency, matching the [HttpClient] the harness already
  * uses. The receive path is a callback [Listener] on the JDK's own executor thread; it hands typed
@@ -349,11 +364,60 @@ class RelayConnection(
   }
 
   /**
+   * Open a subscription: send `["REQ", <subscriptionId>, <filter>, ...]`. The matching events arrive
+   * through [receive] as [RelayMessage.Event]s carrying this [subscriptionId], followed by an
+   * [RelayMessage.Eose] once the relay's stored events are exhausted; end it with [closeSubscription].
+   *
+   * SEND-ONLY: NIP-01 gives a REQ no acknowledgement, so this returns as soon as the frame is sent
+   * ([SubscribeResult.Sent]) and does NOT wait for events or EOSE. Waiting for EOSE would invent a
+   * handshake NIP-01 lacks and hand a hostile relay a way to stall the caller by simply never sending
+   * one; the caller drains [receive] on its own schedule. [timeout] bounds only the send.
+   *
+   * A relay may REFUSE the subscription with `["CLOSED", <subscriptionId>, ...]` — DATA the caller
+   * sees through [receive] (a [RelayMessage.Closed]), not a transport fault; the substrate decides
+   * what to do about a refusal (A4-3: the relay is a door, not an authority). Likewise the transport
+   * delivers whatever the relay DOES send — withheld, reordered, delayed, or replayed — FAITHFULLY,
+   * adding no dedup or ordering of its own: a replay is rejected by the single-use nonce in the
+   * mechanical layer, not papered over here.
+   *
+   * MECHANISM, not policy (§REPO_SEAM): WHICH events to ask for — the [filters]' kinds and tag
+   * references — is coach-side; this only carries the request. Fail-closed: not connected, a send
+   * fault, or a dropped socket all yield [SubscribeResult.Failed]. Never throws for a remote fault; a
+   * malformed [subscriptionId] or an empty [filters] is a caller error and throws.
+   */
+  fun subscribe(
+    subscriptionId: String,
+    filters: List<NostrFilter>,
+    timeout: Duration,
+  ): SubscribeResult {
+    requireValidSubscriptionId(subscriptionId)
+    require(filters.isNotEmpty()) { "a REQ must carry at least one filter (NIP-01)" }
+    return sendControlFrame(reqMessage(subscriptionId, filters), timeout, "REQ")
+  }
+
+  /**
+   * End a subscription: send `["CLOSE", <subscriptionId>]`, asking the relay to stop sending that
+   * subscription's events. It is a request, not a guarantee — a faithful relay stops, but a hostile
+   * one may keep sending, and those events still surface through [receive] for the caller to ignore
+   * (the relay is a door, not an authority). Send-only and fail-closed exactly like [subscribe]: a
+   * send fault yields [SubscribeResult.Failed] and it never throws for a remote fault. [timeout]
+   * bounds the send. A malformed [subscriptionId] throws, exactly as [subscribe] does — it is caller
+   * input, checked as a precondition; that is unlike [close], which tears down an already-established
+   * socket best-effort and has no caller input to validate.
+   */
+  fun closeSubscription(subscriptionId: String, timeout: Duration): SubscribeResult {
+    requireValidSubscriptionId(subscriptionId)
+    return sendControlFrame(closeMessage(subscriptionId), timeout, "CLOSE")
+  }
+
+  /**
    * Take the next relay message, or null if none arrives before [timeout] or the connection has
    * failed. Single-consumer. Never throws. Never returns a [RelayMessage.Ok]: an OK acks an event we
    * sent and is routed to that sender by event id in deliver(), not queued here — a subscription
-   * draining this sees only EVENT/EOSE/CLOSED/NOTICE/AUTH. Subscribe (which produces messages to
-   * receive) arrives in 3b-2; today the auth handshake and tests drain the feed.
+   * draining this sees only EVENT/EOSE/CLOSED/NOTICE/AUTH. [subscribe] opens a subscription whose
+   * EVENT/EOSE/CLOSED surface here; this feed is NOT filtered by subscription id — every message the
+   * relay sends arrives, and the caller matches each to its subscription by the id the message carries
+   * (a hostile relay may send an id you never opened). The auth handshake drains this feed too.
    */
   fun receive(timeout: Duration): RelayMessage? {
     // Drain already-queued messages FIRST, even after the connection has ended: they were validly
@@ -450,6 +514,31 @@ class RelayConnection(
   // correct regardless).
   private fun unregisterOkWaiter(eventId: String, slot: BlockingQueue<RelayMessage.Ok>) {
     okWaiters.remove(eventId, slot)
+  }
+
+  // Send one subscription-control frame (REQ or CLOSE) and report only whether it went onto the
+  // wire. Unlike publish()/authenticate() there is no relay ACK to await — NIP-01 answers neither a
+  // REQ nor a CLOSE — so this bounds the send with the same get(timeout) and classifies a send fault
+  // the same way, and that is the whole outcome. [what] names the frame for the failure detail.
+  private fun sendControlFrame(frame: String, timeout: Duration, what: String): SubscribeResult {
+    val ws = webSocket ?: return SubscribeResult.Failed("not connected")
+    failure.get()?.let { return SubscribeResult.Failed("connection failed: $it") }
+    return try {
+      ws.sendText(frame, true).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+      SubscribeResult.Sent
+    } catch (e: Exception) {
+      SubscribeResult.Failed("could not send $what: ${e.javaClass.simpleName}: ${e.message}")
+    }
+  }
+
+  // A caller-supplied subscription id must be non-empty and within NIP-01's 64-char cap. A bad id is
+  // a caller bug, not a remote fault, so it throws (like RelayConfig's structural checks) rather than
+  // returning a fail-closed result.
+  private fun requireValidSubscriptionId(subscriptionId: String) {
+    require(subscriptionId.isNotEmpty()) { "subscription id must not be empty" }
+    require(subscriptionId.length <= 64) {
+      "subscription id must be at most 64 characters (NIP-01), was ${subscriptionId.length}"
+    }
   }
 
   private fun failedDetail(default: String): String =
