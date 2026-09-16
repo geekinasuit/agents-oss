@@ -272,6 +272,30 @@ class RelayConnectionSubscribeTest {
       conn.close()
     }
   }
+
+  @Test
+  fun `subscribe delivers an event tagged for a subscription id the client never opened`() {
+    FakeRelay().use { relay ->
+      // A4-3: receive() is a faithful pipe, NOT filtered by subscription id. A hostile relay can tag an
+      // EVENT with an id the client never opened; the transport surfaces it verbatim — id and all — for
+      // the caller (the fold) to match or reject, never swallowing it here. Dropping an unopened-id event
+      // at the transport would hide relay misbehaviour the layer above is the one entitled to judge.
+      val ev = testEvent("aa".repeat(32))
+      relay.serve { session ->
+        session.nextClientText(3_000) ?: error("no REQ from client")
+        session.sendText(eventFrame("other-sub", ev)) // an id the client never opened
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      assertEquals(SubscribeResult.Sent, conn.subscribe("s", oneFilter, Duration.ofSeconds(3)))
+      val msg = conn.receive(Duration.ofSeconds(3))
+      assertTrue("expected an EVENT, got $msg", msg is RelayMessage.Event)
+      assertEquals("other-sub", (msg as RelayMessage.Event).subscriptionId)
+      assertEquals(ev, msg.event)
+      relay.assertScriptClean()
+      conn.close()
+    }
+  }
 }
 
 // Server-to-client frame builders for the relay side of these tests. They live HERE, not on
