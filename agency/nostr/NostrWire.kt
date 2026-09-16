@@ -37,11 +37,11 @@ import kotlinx.serialization.json.putJsonArray
 // the signature, and the authorization decision stays in the fold, which never sees a type from
 // this file. created_at is carried, never read as a clock (see NostrEvent).
 //
-// NOT HERE (step 3b, with the socket that gives them a consumer): the REQ/CLOSE subscription
-// envelopes and the filter object they carry — specifying a filter with no subscription to
-// constrain it would be shape without a caller. This file frames the envelopes that carry an EVENT
-// (publish + the inbound feed) and the AUTH envelope, which is all the wire format the transport
-// needs to stand up first.
+// The subscription-control envelopes are HERE now: REQ, CLOSE, and the [NostrFilter] a REQ carries.
+// They earned their place when their consumer landed — the transport's subscribe() /
+// closeSubscription() in step 3b-2 (before that, a filter with no subscription to constrain it would
+// have been shape without a caller). A filter is SERIALIZE-ONLY: the client sends it and never parses
+// one back, so there is a builder and no parser, exactly like the EVENT and AUTH framers below.
 //
 // DoS: total-over-hostile-input means Exceptions fold to null; it does NOT mean an Error is caught.
 // Pathologically nested JSON can exhaust the stack as the parser recurses, and that Error
@@ -73,7 +73,8 @@ fun parseEvent(text: String): NostrEvent? {
 }
 
 /** A relay-to-client message (NIP-01, plus the NIP-42 AUTH challenge). The client-to-relay side is
- * built by [eventMessage] / [authMessage]; the REQ/CLOSE subscription control is step 3b. */
+ * built by [eventMessage] / [authMessage] and the subscription control by [reqMessage] /
+ * [closeMessage]. */
 sealed interface RelayMessage {
   /** `["EVENT", <subscription-id>, <event>]` — an event delivered on a subscription. */
   data class Event(val subscriptionId: String, val event: NostrEvent) : RelayMessage
@@ -159,6 +160,74 @@ fun authMessage(event: NostrEvent): String =
     .toString()
 
 /**
+ * A NIP-01 subscription filter: the selectors a REQ carries to tell the relay which events to
+ * return. SERIALIZE-ONLY — the client sends a filter and the relay applies it; the client never
+ * parses one back, so there is a builder ([reqMessage]) and no parser.
+ *
+ * MECHANISM, not policy (§REPO_SEAM): this is the general filter TYPE. WHICH kind, and WHICH event a
+ * `#e` tag references, are values coach supplies when it builds the approval subscription — never
+ * hardcoded here.
+ *
+ * The field set is the COHERENCE-MINIMAL selector of an approval-collection subscription — the WHAT
+ * and the WHICH-GATE, and nothing else:
+ *  - [kinds]: the approval-event kind(s) the daemon subscribes for.
+ *  - [tags]: single-letter tag filters, e.g. `#e` referencing the gate-open notice. NIP-01
+ *    restricts a tag-filter key to one letter (a-zA-Z) and every key must carry at least one value;
+ *    [init] enforces BOTH HERE — where the map is built — so a malformed tag fails fast rather than
+ *    as an opaque relay CLOSED, or (for an empty value list) a silently-widened subscription.
+ *
+ * `authors`, `since`, `until`, `ids`, and `limit` are DELIBERATELY OMITTED under one uniform YAGNI
+ * rule, no per-field special-casing: none has a caller in 2a.4, and each is a PURE ADDITION when one
+ * appears. An `authors` allow-list narrowing is an OPTIONAL efficiency, not a correctness selector —
+ * the fold re-verifies every approval's own signature against the allow-list regardless (A4-3:
+ * listening never authorizes), so a relay-side author filter changes no outcome — and it lands when
+ * the allow-list wiring does (step 5). A `since`/`until` window belongs to approval-validity expiry,
+ * out of scope for this phase. Correctness never rests on any of them: the relay is a hint, not a
+ * boundary, so what it filters is only ever an optimization.
+ *
+ * An empty filter serializes to `{}` — the NIP-01 "match everything" filter. An empty [kinds] is
+ * OMITTED, never emitted as `[]`: in NIP-01 an ABSENT condition matches all while `"kinds":[]`
+ * matches NONE, so emitting an empty array would silently invert the caller's intent. A tag with no
+ * values would invert the same way — dropping the `#e` gate selector to match-all — so [init]
+ * rejects it outright rather than letting [toJsonObject] omit it.
+ */
+data class NostrFilter(
+  val kinds: List<Int> = emptyList(),
+  val tags: Map<Char, List<String>> = emptyMap(),
+) {
+  init {
+    for ((key, values) in tags) {
+      require(key in 'a'..'z' || key in 'A'..'Z') {
+        "a NIP-01 tag filter key must be a single ASCII letter (a-zA-Z), was '$key'"
+      }
+      require(values.isNotEmpty()) {
+        "a NIP-01 tag filter must carry at least one value; #$key had none"
+      }
+    }
+  }
+}
+
+/** The client-to-relay subscription request: `["REQ", <subscription-id>, <filter>, ...]`. A pure
+ * framer like [eventMessage]: it trusts its inputs — the transport's `subscribe()` validates the
+ * subscription id and that at least one filter is present before it frames a REQ here. */
+fun reqMessage(subscriptionId: String, filters: List<NostrFilter>): String =
+  buildJsonArray {
+    add("REQ")
+    add(subscriptionId)
+    for (filter in filters) add(filter.toJsonObject())
+  }
+    .toString()
+
+/** The client-to-relay subscription close: `["CLOSE", <subscription-id>]`. A pure framer, like
+ * [reqMessage]. */
+fun closeMessage(subscriptionId: String): String =
+  buildJsonArray {
+    add("CLOSE")
+    add(subscriptionId)
+  }
+    .toString()
+
+/**
  * Build a NIP-42 auth event (kind 22242) answering a relay's [challenge] for [relayUrl]. The
  * [relayUrl] is a parameter, not a constant — this module is mechanism, and which relay is
  * configuration that lives outside oss (§REPO_SEAM). `content` is empty by NIP-42 convention; the
@@ -197,6 +266,18 @@ private fun NostrEvent.toJsonObject(): JsonObject =
     }
     put("content", content)
     put("sig", sig)
+  }
+
+/** The filter as a NIP-01 JSON object, in a fixed key order (kinds, then tag filters by letter) so
+ * the output is deterministic. An empty [kinds] is OMITTED, never emitted as `[]` — an absent
+ * condition matches all, an empty one matches none; tag values are non-empty by construction
+ * ([NostrFilter] `init`), so every tag emits. */
+private fun NostrFilter.toJsonObject(): JsonObject =
+  buildJsonObject {
+    if (kinds.isNotEmpty()) putJsonArray("kinds") { for (k in kinds) add(k) }
+    for ((letter, values) in tags.toSortedMap()) {
+      putJsonArray("#$letter") { for (v in values) add(v) }
+    }
   }
 
 /** Structure a parsed JSON element into a [NostrEvent], or `null` if it is not a conformant event

@@ -5,6 +5,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -236,5 +237,87 @@ class NostrWireTest {
     assertEquals(2, arr.size)
     assertEquals("AUTH", arr[0].jsonPrimitive.content)
     assertEquals(event, parseEvent(arr[1].toString()))
+  }
+
+  // ---- outbound subscription control: REQ / CLOSE / NostrFilter ----
+
+  @Test
+  fun `reqMessage frames a REQ with the subscription id and a filter`() {
+    assertEquals(
+      """["REQ","sub-1",{"kinds":[30078]}]""",
+      reqMessage("sub-1", listOf(NostrFilter(kinds = listOf(30078)))),
+    )
+  }
+
+  @Test
+  fun `reqMessage carries multiple filters in order`() {
+    assertEquals(
+      """["REQ","s",{"kinds":[1]},{"#e":["evid"]}]""",
+      reqMessage(
+        "s",
+        listOf(NostrFilter(kinds = listOf(1)), NostrFilter(tags = mapOf('e' to listOf("evid")))),
+      ),
+    )
+  }
+
+  @Test
+  fun `closeMessage frames a CLOSE with the subscription id`() {
+    assertEquals("""["CLOSE","sub-1"]""", closeMessage("sub-1"))
+  }
+
+  @Test
+  fun `NostrFilter serializes kinds and single-letter tag filters in a fixed order`() {
+    // #e and #p together pin the tag-key ordering (sorted by letter): #p is here to prove multi-key
+    // determinism, NOT because a caller filters on it — the only tag with a caller in 2a.4 is #e.
+    val filter =
+      NostrFilter(
+        kinds = listOf(1, 30078),
+        tags = mapOf('e' to listOf("evid"), 'p' to listOf("pk")),
+      )
+    assertEquals(
+      """["REQ","s",{"kinds":[1,30078],"#e":["evid"],"#p":["pk"]}]""",
+      reqMessage("s", listOf(filter)),
+    )
+  }
+
+  @Test
+  fun `an empty NostrFilter serializes to the match-all object`() {
+    assertEquals("""["REQ","s",{}]""", reqMessage("s", listOf(NostrFilter())))
+  }
+
+  @Test
+  fun `a NostrFilter omits an empty dimension rather than emitting match-none`() {
+    // "kinds":[] means match NO kind in NIP-01 — the opposite of absent (match all). An empty
+    // dimension must be omitted, so this filter carries only its #e tag.
+    assertEquals(
+      """["REQ","s",{"#e":["evid"]}]""",
+      reqMessage("s", listOf(NostrFilter(kinds = emptyList(), tags = mapOf('e' to listOf("evid"))))),
+    )
+  }
+
+  @Test
+  fun `NostrFilter rejects a tag filter key that is not a single ASCII letter`() {
+    // NIP-01 tag filters are #<single-letter>. A digit, punctuation, whitespace, or non-ASCII key
+    // would serialize to a filter a relay CLOSEs with an opaque error; fail fast at construction.
+    for (bad in listOf('1', '#', ' ', 'é')) {
+      try {
+        NostrFilter(tags = mapOf(bad to listOf("x")))
+        throw AssertionError("expected IllegalArgumentException for tag key '$bad'")
+      } catch (e: IllegalArgumentException) {
+        assertTrue(e.message!!.contains("single ASCII letter"))
+      }
+    }
+  }
+
+  @Test
+  fun `NostrFilter rejects a tag filter with no values`() {
+    // A tag key with an empty value list would be OMITTED by the serializer and silently widen the
+    // subscription to match-all (dropping the #e gate selector) — a fail-open. Reject at construction.
+    try {
+      NostrFilter(tags = mapOf('e' to emptyList()))
+      throw AssertionError("expected IllegalArgumentException for an empty tag value list")
+    } catch (e: IllegalArgumentException) {
+      assertTrue(e.message!!.contains("at least one value"))
+    }
   }
 }
