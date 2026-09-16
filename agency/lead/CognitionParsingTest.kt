@@ -210,4 +210,40 @@ class CognitionParsingTest {
     assertTrue(rendered.contains("please review"))
     assertTrue(rendered.contains("MailArrived"))
   }
+
+  @Test
+  fun renderContextShowsEpochPreciseApprovalNotBareGateMembership() {
+    // AGENCY #28, the model-facing consumer: the openGates line the model reads must show a
+    // gate re-opened past its approval as NOT approved. releasedGates still holds the gate
+    // (released at all this ticket), so the pre-fix epoch-blind render read approved-true on a
+    // fresh, unapproved digest — telling the model a plan was approved when d1's release does
+    // not cover the re-open onto d2. Same re-open state GuardsTest drives decide() with,
+    // rendered here to pin the projection the model actually sees.
+    val ticket = "t1"
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, ticket)
+    val reOpenedPastApproval =
+      LeadState(
+        currentTicket = ticket,
+        planArtifactSha = "d1",
+        openGates = mapOf(planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, "d2", 9L)),
+        releasedGates = setOf(planGateId), // epoch-blind: released at all this ticket
+        releasedDigests = mapOf(planGateId to setOf("d1")), // but only ON d1, not the open d2
+      )
+    fun render(lead: LeadState) =
+      CognitionProtocol.renderContext(
+        WakeContext(WakeReason.Adopted, lead, JournalState(), emptyList())
+      )
+
+    assertTrue(
+      "a plan re-opened onto d2 renders as unapproved on d2",
+      render(reOpenedPastApproval).contains("digest=d2, approvedOnDigest=false"),
+    )
+    // Positive control: approve the CURRENT digest too and the same line reads approved — so
+    // the render tracks the open digest's approval, not some unrelated always-false branch.
+    assertTrue(
+      "with d2 approved, the line reads approved",
+      render(reOpenedPastApproval.copy(releasedDigests = mapOf(planGateId to setOf("d1", "d2"))))
+        .contains("digest=d2, approvedOnDigest=true"),
+    )
+  }
 }

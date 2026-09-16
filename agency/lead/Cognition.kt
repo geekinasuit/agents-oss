@@ -125,7 +125,7 @@ class ScriptedCognition : CognitionStrategy {
 
     val planGate = lead.openGates[gateIdFor(GateKinds.PLAN_APPROVAL, ticket)]
     val commitGate = lead.openGates[gateIdFor(GateKinds.COMMIT_APPROVAL, ticket)]
-    val planApproved = planGate != null && planGate.gateId in lead.releasedGates
+    val planApproved = lead.approvedOnCurrentDigest(gateIdFor(GateKinds.PLAN_APPROVAL, ticket))
     fun activePodFor(taskRef: String) = lead.activePods.any { it.taskRef == taskRef }
 
     return when {
