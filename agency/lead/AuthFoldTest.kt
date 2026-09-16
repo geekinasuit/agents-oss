@@ -479,6 +479,39 @@ class AuthFoldTest {
     assertEquals(listOf(revisitSeq to "g1"), st.staleReleases)
   }
 
+  @Test
+  fun approvedOnCurrentDigestTracksTheOpenDigestNotBareGateMembership() {
+    // #28: the read-side mirror of the single-release guard, and the question every release
+    // CONSUMER must ask. A gate released on d1 then re-opened on d2 (no d2 release) still sits
+    // in releasedGates (epoch-blind: "released at all this ticket") but is NOT approved on its
+    // CURRENT digest. Approving d2 in turn flips it back true — the helper admits a legitimate
+    // re-approval exactly as foldRelease admits the legitimate re-release.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    s.approvalFor("g1", "operator", "n1", "d1")
+    s.release("g1", "d1", nonce = "n1") // approved on d1
+    assertTrue("released at all this ticket", "g1" in s.lead().releasedGates)
+    assertTrue("approved on the open digest d1", s.lead().approvedOnCurrentDigest("g1"))
+
+    s.gateOpened("g1", "d2") // re-opened on a new digest, not yet approved
+    assertTrue("still in releasedGates (epoch-blind)", "g1" in s.lead().releasedGates)
+    assertFalse("NOT approved on the current digest d2", s.lead().approvedOnCurrentDigest("g1"))
+
+    s.nonceIssued("n2", "g1", "d2")
+    s.approvalFor("g1", "operator", "n2", "d2")
+    s.release("g1", "d2", nonce = "n2") // approved on d2
+    assertTrue("approved again once d2 is released", s.lead().approvedOnCurrentDigest("g1"))
+  }
+
+  @Test
+  fun approvedOnCurrentDigestIsFalseForAGateThatIsNotOpen() {
+    // Fail-closed: no open gate is not approved — the null-guard branch that makes the
+    // execute-spawn guard's `!approvedOnCurrentDigest(...)` refuse rather than fall through.
+    val s = open(newStoreDir())
+    assertFalse(s.lead().approvedOnCurrentDigest("never-opened"))
+  }
+
   // -- nonce bookkeeping anomalies ----------------------------------------------------------
 
   @Test

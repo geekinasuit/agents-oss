@@ -57,7 +57,7 @@ object CognitionProtocol {
     sb.appendLine(
       "openGates: " +
         lead.openGates.values.joinToString(", ") {
-          "${it.gateId}(digest=${it.payloadDigest}, released=${it.gateId in lead.releasedGates})"
+          "${it.gateId}(digest=${it.payloadDigest}, approvedOnDigest=${lead.approvedOnCurrentDigest(it.gateId)})"
         }
           .ifEmpty { "none" }
     )

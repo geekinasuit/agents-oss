@@ -343,6 +343,21 @@ data class LeadState(
 
   fun gate(gateKind: String): OpenGate? = openGates.values.firstOrNull { it.gateKind == gateKind }
 
+  /** Whether [gateId] is approved ON THE DIGEST IT IS CURRENTLY OPEN ON — the epoch-precise
+   * approval question every release CONSUMER must ask. [releasedGates] answers only "released
+   * at all this ticket?" (gate-keyed, epoch-blind), which a gate re-opened on a NEW digest — a
+   * distinct authorization surface — answers stale-true; deciding whether to ACT on an approval
+   * (advance the pipeline, launch the executor, drive the commit effect) must instead confirm
+   * the digest the gate is open on NOW was the one released. The read-side mirror of
+   * [foldRelease]'s single-release guard — both test `payloadDigest in releasedDigests[gateId]`.
+   * Fail-closed: a gate not open is not approved. [pendingGates] deliberately keeps the
+   * epoch-blind [releasedGates] read; "do not re-surface a gate released at all this ticket" is
+   * a different question. */
+  fun approvedOnCurrentDigest(gateId: String): Boolean {
+    val gate = openGates[gateId] ?: return false
+    return gate.payloadDigest in releasedDigests[gateId].orEmpty()
+  }
+
   /** The gate's currently-usable nonce: issued for THIS gate, bound to the digest the
    * gate is CURRENTLY open on, and not consumed — the same clauses [foldRelease] honors,
    * so a nonce returned here is releasable as it stands (the digest filter matches

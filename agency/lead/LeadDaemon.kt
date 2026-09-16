@@ -741,9 +741,9 @@ class LeadDaemon(
     }
 
     // Propose the commit from a finished execute pod's manifest — same bound-copy rule.
-    val planGateReleased =
-      gateIdFor(GateKinds.PLAN_APPROVAL, ticket) in lead.releasedGates
-    if (planGateReleased && lead.commitManifestDigest == null) {
+    val planApproved =
+      lead.approvedOnCurrentDigest(gateIdFor(GateKinds.PLAN_APPROVAL, ticket))
+    if (planApproved && lead.commitManifestDigest == null) {
       val executor = lead.podFor("execute:$ticket")
       if (executor?.resultDigest != null) {
         val verified = verifiedBoundArtifact(executor) ?: return true // pod abandoned
@@ -764,11 +764,11 @@ class LeadDaemon(
     // ticket. Gate membership alone is NOT the precondition: the approved evidence must
     // exist — plan approved and manifest recorded — so a release for a gate that
     // somehow opened out of order can never fire an effect on absent evidence.
-    val commitReleased =
-      gateIdFor(GateKinds.COMMIT_APPROVAL, ticket) in lead.releasedGates &&
-        planGateReleased &&
+    val commitApproved =
+      lead.approvedOnCurrentDigest(gateIdFor(GateKinds.COMMIT_APPROVAL, ticket)) &&
+        planApproved &&
         lead.commitManifestDigest != null
-    if (commitReleased) {
+    if (commitApproved) {
       val effectKey = "apply-commit:$ticket"
       if (effectKey !in shared.intents) {
         store.append(
@@ -1018,17 +1018,20 @@ class LeadDaemon(
           }
           // Pipeline ordering has teeth: an execute pod
           // is real work ON the plan, so it may launch only AFTER the plan-approval gate is
-          // released. The mechanical pass already refuses to PROPOSE a commit before plan
-          // approval; without this, cognition — by bug or prompt injection — could still get
-          // the substrate to LAUNCH the execute session on an unapproved (or unrecorded) plan,
-          // and the human's plan gate would gate nothing. Escalated, never spawned.
+          // approved on the digest it is CURRENTLY open on. The mechanical pass already refuses
+          // to PROPOSE a commit before plan approval; without this, cognition — by bug or prompt
+          // injection — could still get the substrate to LAUNCH the execute session on an
+          // unapproved (or unrecorded) plan, and the human's plan gate would gate nothing.
+          // Epoch-precise, not a bare `in releasedGates`: a plan re-opened on a new digest is a
+          // fresh, unapproved surface. Escalated, never spawned.
           if (
             p.taskRef == "execute:$ticket" &&
-              gateIdFor(GateKinds.PLAN_APPROVAL, ticket) !in leadAtDecision.releasedGates
+              !leadAtDecision.approvedOnCurrentDigest(gateIdFor(GateKinds.PLAN_APPROVAL, ticket))
           ) {
             escalate(
               "pod-spawn rejected: execute pod for '$ticket' proposed before the plan-approval " +
-                "gate is released — the plan must be approved before execution runs"
+                "gate is approved on its current digest — the plan must be approved before " +
+                "execution runs"
             )
             continue
           }

@@ -9,10 +9,13 @@ import com.geekinasuit.agency.pod.PodTransport
 import com.geekinasuit.agency.pod.sha256Hex
 import com.geekinasuit.agency.pod.sha256HexBytes
 import com.geekinasuit.agency.shared.journal.EffectReceiver
+import com.geekinasuit.agency.shared.journal.JournalState
 import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -239,6 +242,105 @@ class GuardsTest {
     val f3 = hostile.driveUntilQuiescent()
     assertTrue("nothing launched", hostileRunner.spawnedTaskRefs.isEmpty())
     assertTrue(f3.lead.escalations.any { it.contains("already recorded") })
+    store.close()
+  }
+
+  @Test
+  fun scriptedCognitionDoesNotExecuteOnAPlanReOpenedPastItsApproval() {
+    // AGENCY #28: the scripted playbook must ask "is the digest the plan gate is open on
+    // NOW approved?", not the epoch-blind "was this gate released at all this ticket?". A
+    // gate released on d1 and then re-opened on a NEW digest d2 is a fresh authorization
+    // surface that d1's release does not cover, so cognition must NOT treat the plan as
+    // approved and spawn the executor. Pure decide() cell: this state is exactly what
+    // leadFold yields for GATE_OPENED(d1) -> release(d1) -> GATE_OPENED(d2) (proven in
+    // AuthFoldTest), built directly here to isolate the consumer decision.
+    val ticket = "t1"
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, ticket)
+    val reOpenedPastApproval =
+      LeadState(
+        currentTicket = ticket,
+        planArtifactSha = "d1",
+        openGates = mapOf(planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, "d2", 9L)),
+        releasedGates = setOf(planGateId), // epoch-blind: released at all this ticket
+        releasedDigests = mapOf(planGateId to setOf("d1")), // but only ON d1, not the open d2
+      )
+    fun executeProposed(lead: LeadState): Boolean =
+      ScriptedCognition()
+        .decide(WakeContext(WakeReason.Adopted, lead, JournalState(), emptyList()))
+        .proposals
+        .any { it is Proposal.ProposePodSpawn && it.taskRef == "execute:$ticket" }
+
+    assertFalse(
+      "no executor on a plan re-opened past its approval",
+      executeProposed(reOpenedPastApproval),
+    )
+    // Positive control: approve the CURRENT digest too and the executor IS spawned — so the
+    // refusal above is about the epoch, not some unrelated branch, and the fix has not simply
+    // wedged the pipeline shut.
+    assertTrue(
+      "with the current digest approved, the executor is spawned",
+      executeProposed(
+        reOpenedPastApproval.copy(releasedDigests = mapOf(planGateId to setOf("d1", "d2")))
+      ),
+    )
+  }
+
+  @Test
+  fun executeSpawnIsRefusedWhenThePlanGateWasReOpenedPastItsApproval() {
+    val dir = tmp.newFolder()
+    // AGENCY #28 end to end at the highest-severity consumer: the execute-ordering guard
+    // must refuse to LAUNCH the executor when the plan gate is open on an unapproved digest,
+    // even when a buggy/prompt-injected cognition forces the spawn. Drive the honest pipeline
+    // to a plan gate open on d1, release it nonce-less on d1, then re-open the SAME gate on a
+    // new digest d2 — a journal-level surface the daemon's own seen-gate guard will not
+    // produce (LeadState.foldRelease KDoc), injected here as the raw event a future re-open
+    // path would emit.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    fun daemon(cognition: CognitionStrategy, runner: PodRunner) =
+      LeadDaemon(
+        store = store,
+        cognition = cognition,
+        podRunner = runner,
+        podSpec = PodSpec.fixture(),
+        ticketSource = FileTicketSource(File(dir, "ticket.txt")),
+        workdir = dir,
+        effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL, // guard mechanics; releases are nonce-less
+      )
+    val honest = daemon(ScriptedCognition(), FakePodRunner())
+    val f1 = honest.driveUntilQuiescent() // planner ran, plan gate open on d1
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    honest.injectAuthRelease(planGateId, f1.lead.planArtifactSha!!) // append-only, no drive
+    store.append(
+      LeadKinds.GATE_OPENED,
+      buildJsonObject {
+        put("gateId", planGateId)
+        put("gateKind", GateKinds.PLAN_APPROVAL)
+        put("payloadDigest", "d2-reopen") // a new, unapproved authorization surface
+      },
+      ORIGIN_SUBSTRATE,
+    )
+
+    val hostileRunner = FakePodRunner()
+    val hostile =
+      daemon(
+        ProgrammedCognition(
+          mutableListOf(
+            CognitionOutput(
+              listOf(Proposal.ProposePodSpawn("execute:t1")),
+              "buggy/hostile: launch the executor on a plan re-opened past its approval",
+            )
+          )
+        ),
+        hostileRunner,
+      )
+    val f3 = hostile.driveUntilQuiescent()
+    assertTrue("no execute pod launched", hostileRunner.spawnedTaskRefs.isEmpty())
+    assertTrue(
+      "the execute-ordering guard escalated",
+      f3.lead.escalations.any { it.contains("execute") && it.contains("plan") },
+    )
     store.close()
   }
 
