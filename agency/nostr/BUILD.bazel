@@ -25,6 +25,7 @@ kt_jvm_library(
     srcs = [
         "Bip340.kt",
         "Bip340ApprovalVerifier.kt",
+        "GateOpenNotice.kt",
         "Nip44.kt",
         "NostrEvent.kt",
         "NostrWire.kt",
@@ -163,7 +164,13 @@ kt_jvm_test(
 # is a runtime dep of the CONSUMING test that signs, not of this library.
 kt_jvm_library(
     name = "relay",
-    srcs = ["RelayConnection.kt"],
+    srcs = [
+        "RelayConnection.kt",
+        # The gate-open notifier (step 4): fans the notice codec out over a recipient set and
+        # publishes each via RelayConnection. Lives here, with the target that dials, because it
+        # publishes; the codec itself is hermetic and stays in :nostr.
+        "RelayNotifier.kt",
+    ],
     visibility = ["//visibility:public"],
     deps = [":nostr"],
 )
@@ -229,5 +236,58 @@ kt_jvm_test(
         ":relay",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# Step 4 — the gate-open NOTICE codec (A4-6): encode a content-minimal notice as a lead-signed,
+# NIP-44-encrypted, regular-kind event addressed to one recipient. Signs and encrypts, so it needs
+# the native runtime-only, like the sign/verify test; it parses the decrypted plaintext with kotlinx
+# to assert the round-trip, so it carries the JSON dep as nostr_wire_test does.
+kt_jvm_test(
+    name = "gate_open_notice_test",
+    size = "small",
+    srcs = ["GateOpenNoticeTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.GateOpenNoticeTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":nostr",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# Step 4 — "listening never authorizes" (A4-6), made executable over the REAL verifier + allow-list +
+# quorum: a command-shaped event signed by an allow-listed key verifies as a transport carrier yet
+# releases nothing, because its transport signature is not an authorization over the committed
+# preimage. Depends on the auth module for the fold's pieces (AllowList, committedPreimage, the
+# quorum) and signs, so it carries the native runtime-only — the bip340_approval_verifier_test shape.
+kt_jvm_test(
+    name = "listening_never_authorizes_test",
+    size = "small",
+    srcs = ["ListeningNeverAuthorizesTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.ListeningNeverAuthorizesTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":nostr",
+        "//agency/shared/auth",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Step 4 — the relay-backed notifier's fan-out over a recipient SET: dedup of case-variant keys,
+# fail-closed on an empty set, per-recipient outcomes (partial delivery = liveness gap), the oversize
+# refusal surfaced as NotEncodable, and the crypto-before-deadline phase order (#45). Tests through a
+# fake EventPublisher — no socket — but signs in the crypto phase, so it needs the native
+# runtime-only.
+kt_jvm_test(
+    name = "relay_notifier_test",
+    size = "small",
+    srcs = ["RelayNotifierTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.RelayNotifierTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":nostr",
+        ":relay",
+        "@maven//:junit_junit",
     ],
 )

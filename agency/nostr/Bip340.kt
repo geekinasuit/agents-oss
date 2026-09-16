@@ -4,11 +4,13 @@ import fr.acinq.secp256k1.Secp256k1
 
 /**
  * The BIP-340 schnorr primitive, over the libsecp256k1 bindings the step-0 probe validated
- * against the spec's own vectors (agency/crypto). Two callers in this module: the nostr event
- * codec signs/verifies a 32-byte event id (NIP-01), and [Bip340ApprovalVerifier] verifies an
- * authorization signature over a 32-byte digest. Both are the fixed-32 path — `schnorrsig_sign32`
- * and its verify — which is the whole requirement here (nostr signs a 32-byte id, never a
- * variable-length message), so this wrapper deliberately exposes nothing else.
+ * against the spec's own vectors (agency/crypto). It exposes two kinds of operation, both minimal
+ * by intent. The fixed-32 SIGN/VERIFY path — `schnorrsig_sign32` and its verify — serves the two
+ * callers that need signatures: the nostr event codec (a 32-byte NIP-01 id) and
+ * [Bip340ApprovalVerifier] (a 32-byte authorization digest); nostr never signs a variable-length
+ * message, so no other signing surface exists. And two VALIDITY predicates, [isXonlyPubkey] and
+ * [isValidSecretKey], let a config boundary (`RecipientKey.of`, `RelayNotifier`'s init) refuse a
+ * malformed public or secret key up front rather than let it throw out of the crypto phase later.
  *
  * [verifyBytes] is TOTAL: a malformed key, signature, or message folds to `false`, never a
  * throw out of the native layer. Fail-closed is the only safe default for a verifier — a
@@ -45,6 +47,50 @@ object Bip340 {
   fun verifyBytes(sig: ByteArray, msg32: ByteArray, pubkeyXonly: ByteArray): Boolean =
     try {
       secp.verifySchnorr(sig, msg32, pubkeyXonly)
+    } catch (_: Exception) {
+      false
+    }
+
+  /** True iff [xonlyHex] is a valid secp256k1 x-only public key — 32 bytes naming a real point on
+   * the curve, not merely 64 hex characters. NIP-44 and the nostr codec lift an x-only key to its
+   * even-y point (`0x02 || x`); a hex value off the curve or beyond the field prime cannot be
+   * lifted, so every ECDH or verify against it fails. Total: any decode or native failure is
+   * `false`, so a caller can treat it as a pure validity predicate. */
+  fun isXonlyPubkey(xonlyHex: String): Boolean =
+    try {
+      val x = Hex.decode(xonlyHex)
+      if (x.size != 32) {
+        false
+      } else {
+        val compressed = ByteArray(33)
+        compressed[0] = 0x02
+        x.copyInto(compressed, destinationOffset = 1)
+        secp.pubkeyParse(compressed)
+        true
+      }
+    } catch (_: Exception) {
+      false
+    }
+
+  /** True iff [secretKeyHex] is a valid secp256k1 secret key — 32 bytes naming a scalar in
+   * [1, n-1], not merely 64 hex characters. That range is exactly what EVERY native consumer of a
+   * secret key on this surface requires: `pubkeyCreate` (an event's pubkey field, via
+   * [xonlyPubkeyHex]), `signSchnorr` (its signature, via [signHex]), and `pubKeyTweakMul` — the
+   * scalar in NIP-44's ECDH ([Nip44.sharedPointX]). All three accept a scalar iff it lies in
+   * [1, n-1] and reject it otherwise, so a key this predicate admits cannot throw out of any of
+   * them, and one it rejects would throw out of all of them. Checked with `pubkeyCreate` because
+   * that is libsecp256k1's canonical range gate; total — any decode or native failure is `false`,
+   * so a caller can treat it as a pure validity predicate, the mirror of [isXonlyPubkey] for a
+   * public key. */
+  fun isValidSecretKey(secretKeyHex: String): Boolean =
+    try {
+      val k = Hex.decode(secretKeyHex)
+      if (k.size != 32) {
+        false
+      } else {
+        secp.pubkeyCreate(k)
+        true
+      }
     } catch (_: Exception) {
       false
     }
