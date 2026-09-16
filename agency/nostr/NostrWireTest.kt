@@ -320,4 +320,22 @@ class NostrWireTest {
       assertTrue(e.message!!.contains("at least one value"))
     }
   }
+
+  @Test
+  fun `NostrFilter snapshots the caller's collections, immune to mutation after construction`() {
+    // init checks tag value lists are non-empty only at construction; a caller keeping its references
+    // could later clear one into a match-none "#e":[], empty kinds to match-all, or graft on a tag the
+    // filter never validated. So the filter snapshots its collections and cannot drift after it is built.
+    val eValues = mutableListOf("evid")
+    val tags = mutableMapOf('e' to eValues)
+    val kinds = mutableListOf(1)
+    val filter = NostrFilter(kinds = kinds, tags = tags)
+    eValues.clear() // would leave #e a match-none
+    tags['p'] = mutableListOf("pk") // would graft a #p the filter never validated
+    kinds.clear() // would drop kinds to match-all
+    assertEquals(
+      """["REQ","s",{"kinds":[1],"#e":["evid"]}]""",
+      reqMessage("s", listOf(filter)),
+    )
+  }
 }

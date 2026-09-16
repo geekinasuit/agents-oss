@@ -191,12 +191,19 @@ fun authMessage(event: NostrEvent): String =
  * values would invert the same way — dropping the `#e` gate selector to match-all — so [init]
  * rejects it outright rather than letting [toJsonObject] omit it.
  */
-data class NostrFilter(
-  val kinds: List<Int> = emptyList(),
-  val tags: Map<Char, List<String>> = emptyMap(),
+class NostrFilter(
+  kinds: List<Int> = emptyList(),
+  tags: Map<Char, List<String>> = emptyMap(),
 ) {
+  // Immutable snapshots taken at construction. A filter's invariant — every tag value list non-empty —
+  // must hold for its whole life, but the caller keeps its own references: without the copy, clearing a
+  // retained value list after construction would leave the filter serializing a match-none "#e":[] that
+  // init cannot catch after the fact.
+  val kinds: List<Int> = kinds.toList()
+  val tags: Map<Char, List<String>> = tags.mapValues { (_, values) -> values.toList() }
+
   init {
-    for ((key, values) in tags) {
+    for ((key, values) in this.tags) {
       require(key in 'a'..'z' || key in 'A'..'Z') {
         "a NIP-01 tag filter key must be a single ASCII letter (a-zA-Z), was '$key'"
       }
