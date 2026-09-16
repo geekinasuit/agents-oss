@@ -31,12 +31,13 @@ class RelayConnectionAuthTest {
 
   companion object {
     // Force the secp256k1 native load ONCE, outside any deadline, before the timed cells run. The
-    // first sign in a fresh JVM can take seconds under CPU contention, and authenticate() charges
-    // that cold sign against its own deadline (it signs between computing the deadline and awaiting
-    // the OK). A cold sign inside a timed cell would either redden the Authenticated/Refused cells,
-    // or — worse — let the wrong-id cell pass without ever polling the OK slot. Signing here warms the
-    // JVM so each cell's own sign is fast and its deadline meaningful. No try/catch: a warm-up failure
-    // must fail the class loudly, not silently reintroduce the vacuity.
+    // first sign in a fresh JVM can take seconds under CPU contention, and authenticate() signs
+    // between computing its deadline and awaiting the OK, so a cold sign inside a timed cell eats that
+    // deadline. Warming here keeps each cell's own sign fast and its deadline meaningful: without it
+    // the Authenticated/Refused cells could time out, and the wrong-id cell would get the distinct
+    // "deadline elapsed while preparing" detail (RelayConnection classifies a spent budget as that,
+    // not "no OK") instead of the "no OK" it asserts. No try/catch: a warm-up failure must fail the
+    // class loudly.
     @JvmStatic
     @BeforeClass
     fun warmUpNativeSigning() {
