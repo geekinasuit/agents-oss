@@ -54,10 +54,15 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * Which relay to speak to, and the lead key material to authenticate with.
  *
- * A value object rather than constructor arguments, so a second relay is data. Both fields are
- * REQUIRED and carry NO default: §REPO_SEAM keeps the relay URL and the keypair in coach, and a
- * default here is exactly how this mechanism would quietly acquire a relay or a key it was never
- * configured with. The key is taken CONCRETELY as secret-key hex, not behind an injectable signer
+ * Bundles the relay with the lead key that authenticates to it as one required unit, so reaching a
+ * second relay is another config, not another pair of constructor arguments threaded through the
+ * transport. SINGLE-CONNECTION-USE, not reusable data: constructing a [RelayConnection] hands it
+ * custody of the key, and [RelayConnection.close] zeroes it (#42) — the key does not outlive the
+ * connection it authenticated. A reconnect builds a fresh RelayConfig from fresh key material;
+ * handing a closed connection's config to a new [RelayConnection] decodes a zeroed key and fails
+ * closed at authenticate(). Both fields are REQUIRED and carry NO default: §REPO_SEAM keeps the
+ * relay URL and the keypair in coach, and a default here is exactly how this mechanism would quietly
+ * acquire a relay or a key it was never configured with. The key is taken CONCRETELY as secret-key hex, not behind an injectable signer
  * interface: A4-7 forbids a daemon-side remote-signer seam, so there is deliberately no place to
  * slot a NIP-46 remote signer into this transport.
  *
@@ -71,25 +76,26 @@ import java.util.concurrent.atomic.AtomicReference
  * confidentiality call (must this link be encrypted in transit?) belongs with the relay URL in
  * coach, which is where the scheme is chosen.
  */
-data class RelayConfig(
+class RelayConfig(
   val relayUrl: String,
-  val leadSecretKeyHex: String,
+  val leadSecretKey: SecretKeyHex,
 ) {
   init {
     require(relayUrl.startsWith("ws://") || relayUrl.startsWith("wss://")) {
       "relayUrl must be a ws:// or wss:// URL, was '$relayUrl'"
     }
-    // Structural validation only: 32 bytes of hex. That the key derives a valid pubkey is proven
-    // by the native at authenticate() time and classified there, so construction stays native-free.
-    require(leadSecretKeyHex.length == 64 && leadSecretKeyHex.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
-      "leadSecretKeyHex must be 64 hex characters (a 32-byte secret key)"
-    }
+    // The key's structural validation (64 hex characters) lives in SecretKeyHex.ofHex, so a
+    // RelayConfig cannot even be built around a malformed key. That the key derives a valid pubkey
+    // is still proven by the native at authenticate() time; construction stays native-free.
   }
 
-  // The secret key must never reach a log line or an exception string. A data class prints every
-  // property from its generated toString, so override to redact the key. equals/hashCode keep the
-  // generated behaviour (both fields); redaction is a printing concern only.
-  override fun toString(): String = "RelayConfig(relayUrl='$relayUrl', leadSecretKeyHex=<redacted>)"
+  // NOT a data class. The secret now lives in a SecretKeyHex backed by a mutable CharArray, and a
+  // data class would (1) compare that array by identity in its generated equals/hashCode — a silent
+  // behaviour change — and (2) hand copy() a second reference to the SAME array, so one holder's
+  // clear() would zero another config's key. RelayConfig equality is unused, so a plain class is
+  // correct (the call NostrFilter made). toString still redacts: SecretKeyHex redacts itself, so
+  // the key cannot reach a log line or an exception string through the config.
+  override fun toString(): String = "RelayConfig(relayUrl='$relayUrl', leadSecretKey=$leadSecretKey)"
 }
 
 /** Why a [RelayConnection.connect] attempt did not establish a socket. Distinct causes because a
@@ -301,13 +307,18 @@ class RelayConnection(
 
     val authEvent =
       try {
-        buildAuthEvent(
-          secretKeyHex = config.leadSecretKeyHex,
-          relayUrl = config.relayUrl,
-          challenge = challenge,
-          createdAt = Instant.now().epochSecond,
-          auxRandHex = freshAuxRandHex(),
-        )
+        // Yield the key bytes only for the signing call — useKeyBytes zeroes the working ByteArray
+        // as soon as buildAuthEvent returns (or throws). The held key (config.leadSecretKey) stays
+        // intact so a relay re-challenge can re-sign; it is wiped in close(). (#42)
+        config.leadSecretKey.useKeyBytes { keyBytes ->
+          buildAuthEvent(
+            secretKey = keyBytes,
+            relayUrl = config.relayUrl,
+            challenge = challenge,
+            createdAt = Instant.now().epochSecond,
+            auxRandHex = freshAuxRandHex(),
+          )
+        }
       } catch (e: Exception) {
         // No e.message: signing is the one exception path that handles the secret key, and its
         // message could echo key-derived material into a result string. The exception class is enough
@@ -460,6 +471,10 @@ class RelayConnection(
    * dropped with an abort. Never throws. */
   fun close() {
     if (!closed.compareAndSet(false, true)) return
+    // Wipe the lead key first: the connection is finished with it, and the clearable holder exists
+    // precisely so the plaintext does not outlive the connection. Above the webSocket null-check so a
+    // connection that never dialled still clears its key. (#42)
+    config.leadSecretKey.clear()
     val ws = webSocket ?: return
     try {
       ws.sendClose(WebSocket.NORMAL_CLOSURE, "").get(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)

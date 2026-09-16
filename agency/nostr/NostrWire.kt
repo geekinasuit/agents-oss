@@ -248,8 +248,22 @@ fun buildAuthEvent(
   createdAt: Long,
   auxRandHex: String,
 ): NostrEvent =
+  buildAuthEvent(Hex.decode(secretKeyHex), relayUrl, challenge, createdAt, auxRandHex)
+
+/**
+ * [buildAuthEvent] over key bytes the caller already holds — the clearable-key path
+ * ([RelayConnection.authenticate] with a #42 [SecretKeyHex]). Identical event to the hex overload
+ * for the same key.
+ */
+fun buildAuthEvent(
+  secretKey: ByteArray,
+  relayUrl: String,
+  challenge: String,
+  createdAt: Long,
+  auxRandHex: String,
+): NostrEvent =
   signEvent(
-    secretKeyHex = secretKeyHex,
+    secretKey = secretKey,
     createdAt = createdAt,
     kind = 22242,
     tags = listOf(listOf("relay", relayUrl), listOf("challenge", challenge)),

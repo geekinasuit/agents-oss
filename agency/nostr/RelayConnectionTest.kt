@@ -25,7 +25,7 @@ import org.junit.Test
 class RelayConnectionTest {
   private val key = "0000000000000000000000000000000000000000000000000000000000000003"
 
-  private fun config(url: String) = RelayConfig(relayUrl = url, leadSecretKeyHex = key)
+  private fun config(url: String) = RelayConfig(relayUrl = url, leadSecretKey = SecretKeyHex.ofHexString(key))
 
   private fun waitUntil(timeoutMillis: Long, cond: () -> Boolean): Boolean {
     val deadline = System.currentTimeMillis() + timeoutMillis
@@ -77,21 +77,38 @@ class RelayConnectionTest {
   @Test
   fun `RelayConfig rejects a non-websocket URL`() {
     try {
-      RelayConfig("https://relay.example.com", key)
+      RelayConfig("https://relay.example.com", SecretKeyHex.ofHexString(key))
       throw AssertionError("expected an IllegalArgumentException for a non-ws URL")
     } catch (e: IllegalArgumentException) {
       assertTrue(e.message!!.contains("ws://"))
     }
   }
 
+  // A malformed key can no longer reach RelayConfig — it takes a SecretKeyHex, whose ofHex validates
+  // the 64-hex structure. That rejection is exercised in SecretKeyHexTest, so the old
+  // RelayConfig-level malformed-key cell moved there.
+
   @Test
-  fun `RelayConfig rejects a malformed secret key`() {
-    try {
-      RelayConfig("wss://relay.example.com", "abc")
-      throw AssertionError("expected an IllegalArgumentException for a short key")
-    } catch (e: IllegalArgumentException) {
-      assertTrue(e.message!!.contains("64 hex"))
-    }
+  fun `close wipes the lead secret key from the config`() {
+    // #42: the connection is done with the key once closed, and the clearable holder exists so the
+    // plaintext does not outlive the connection. Never connected here — close() must still wipe, so
+    // the wipe sits above close()'s webSocket null-check. hexChars is observable via associates.
+    val cfg = config("ws://relay.example.com")
+    RelayConnection(cfg).close()
+    assertTrue("close() must zero the held key", cfg.leadSecretKey.hexChars.all { it == Char(0) })
+  }
+
+  @Test
+  fun `RelayConfig toString redacts the lead secret key`() {
+    // #42, CRYPTO/SECRETS: RelayConfig.toString() interpolates the SecretKeyHex, so the config can
+    // never carry the key into a log line or an exception string. The key here is NON-zero (not the
+    // all-zero class key) on purpose: a leak would then actually contain the hex, so the
+    // absence-check can only pass by the key being redacted — not because there was nothing to find.
+    val keyHex = "deadbeef".repeat(8)
+    val rendered = RelayConfig("ws://relay.example.com", SecretKeyHex.ofHexString(keyHex)).toString()
+    assertTrue("toString must not reveal the key hex", !rendered.contains("deadbeef"))
+    assertTrue("toString must mark the key redacted", rendered.contains("redacted"))
+    assertTrue("toString must still show the relay URL", rendered.contains("ws://relay.example.com"))
   }
 
   @Test

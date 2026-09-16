@@ -29,7 +29,7 @@ import org.junit.Test
 class RelayConnectionSubscribeTest {
   private val key = "0000000000000000000000000000000000000000000000000000000000000003"
 
-  private fun config(url: String) = RelayConfig(relayUrl = url, leadSecretKeyHex = key)
+  private fun config(url: String) = RelayConfig(relayUrl = url, leadSecretKey = SecretKeyHex.ofHexString(key))
 
   // A structurally-valid event with a caller-chosen id and created_at, built WITHOUT signing (like
   // RelayConnectionTest's testEvent). The transport delivers events; it never verifies them.

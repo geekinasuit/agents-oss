@@ -22,8 +22,13 @@ object Bip340 {
 
   /** The x-only (32-byte) public key for a secret key, as lowercase hex. `pubkeyCreate` returns
    * a 65-byte uncompressed point; BIP-340 names a key by its 32-byte x coordinate alone. */
-  fun xonlyPubkeyHex(secretKeyHex: String): String {
-    val full = secp.pubkeyCreate(Hex.decode(secretKeyHex))
+  fun xonlyPubkeyHex(secretKeyHex: String): String = xonlyPubkeyFromKeyBytes(Hex.decode(secretKeyHex))
+
+  /** [xonlyPubkeyHex] over key bytes the caller already holds, so a clearable-key signer (the
+   * NIP-42 auth path with a #42 SecretKeyHex) never renders the secret to a hex String. Same native
+   * `pubkeyCreate`, only reachable by bytes. */
+  internal fun xonlyPubkeyFromKeyBytes(secretKey: ByteArray): String {
+    val full = secp.pubkeyCreate(secretKey)
     return Hex.encode(full.copyOfRange(1, 33))
   }
 
@@ -31,7 +36,14 @@ object Bip340 {
    * returning the 64-byte signature as lowercase hex. Callers pass the event id or a digest as
    * the message; supplying aux randomness is the caller's choice so tests can be deterministic. */
   fun signHex(msg32Hex: String, secretKeyHex: String, auxRandHex: String): String =
-    Hex.encode(secp.signSchnorr(Hex.decode(msg32Hex), Hex.decode(secretKeyHex), Hex.decode(auxRandHex)))
+    signWithKeyBytes(msg32Hex, Hex.decode(secretKeyHex), auxRandHex)
+
+  /** [signHex] over key bytes the caller already holds — same 32-byte message and aux hex, but the
+   * secret key stays bytes so a clearable-key signer (#42) never renders it to a hex String. The
+   * native `signSchnorr` and its spec vectors are unchanged; this only makes them reachable by
+   * bytes. */
+  internal fun signWithKeyBytes(msg32Hex: String, secretKey: ByteArray, auxRandHex: String): String =
+    Hex.encode(secp.signSchnorr(Hex.decode(msg32Hex), secretKey, Hex.decode(auxRandHex)))
 
   /** Verify a signature (hex) over a 32-byte message (hex) under an x-only public key (hex).
    * Total: any decode or native failure returns `false`. */
