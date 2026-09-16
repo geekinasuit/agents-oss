@@ -157,7 +157,7 @@ kt_jvm_test(
 
 # The relay TRANSPORT (step 3b): the socket that carries the wire format above. Kept out of :nostr
 # so the codec stays pure — this is the target that dials. It depends ONLY on :nostr's public
-# String-based API (it counts JSON openers on the raw text and hands the text to parseRelayMessage),
+# String-based API (it scans the raw text for JSON nesting depth and hands the text to parseRelayMessage),
 # so it carries NO JSON dependency of its own; and it is built on the JDK's java.net.http.WebSocket,
 # so it adds no @maven dependency at all. The lead key rides in as configuration — the -jni native
 # is a runtime dep of the CONSUMING test that signs, not of this library.
