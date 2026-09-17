@@ -84,19 +84,27 @@ sealed interface NotifyOutcome {
  * the timeout means exactly "how long to wait for the relay", the only thing a caller can sensibly
  * bound.
  *
- * The lead key is taken as [leadSecretKeyHex] — the same String-hex posture [signEvent] and
- * `RelayConfig` use — and VALIDATED at construction (see the init block): a malformed lead key is a
+ * The lead key is held as a clearable [SecretKeyHex] (#42), the same posture `RelayConfig` takes: the
+ * notifier OWNS the holder it is given and zeroes it on [close], and yields the decoded bytes only for
+ * the span of each signing call ([SecretKeyHex.useKeyBytes]), never as a long-lived String. Because
+ * the notifier clears the holder, the caller must give it a DEDICATED [SecretKeyHex] — mint a fresh
+ * one (its `ofHex` copies defensively), never share the instance handed to a `RelayConfig`, or one
+ * [close] would zero the other's key (the hazard `RelayConfig`'s "not a data class" note names).
+ *
+ * The key is also VALIDATED at construction (see the init block): a malformed lead key is a
  * deploy-time config error, refused loudly here rather than left to abort the fan-out's crypto phase
- * mid-flight and notify no custodian. That validity check is orthogonal to hardening the key to a
- * clearable type, which is #42's job (filed against the whole surface at once); this notifier does
- * not invent a second STORAGE posture for it.
+ * mid-flight and notify no custodian. This is a deliberate divergence from `RelayConfig`, which
+ * validates only structurally and lets the native reject a bad scalar at authenticate() time: the
+ * notifier's fan-out has a liveness stake a single authenticate lacks — a scalar that slipped through
+ * would throw from inside the eager per-recipient crypto phase and sink delivery to EVERY custodian,
+ * not just fail one call.
  *
  * Publishes SEQUENTIALLY. For 2a.4's recipient sets (1-of-1, a few custodians at most) that is
  * simplest and correct; the crypto phase is already isolated, so concurrency, if ever wanted, is a
  * change to phase 2 alone.
  */
 class RelayNotifier(
-  private val leadSecretKeyHex: String,
+  private val leadSecretKey: SecretKeyHex,
   private val publisher: EventPublisher,
   private val now: () -> Long = { Instant.now().epochSecond },
   private val auxRandHex: () -> String = ::freshNotifierAuxRandHex,
@@ -106,9 +114,11 @@ class RelayNotifier(
     // eager per-recipient crypto phase (Nip44 ECDH, then signEvent) and throw from inside it,
     // aborting the whole fan-out so NO custodian is notified. Refusing at construction is what makes
     // notifyGateOpen's contract true: with the lead key known-good and every RecipientKey already a
-    // validated point, the only input notify can reject is an empty recipient set.
-    require(Bip340.isValidSecretKey(leadSecretKeyHex)) {
-      "leadSecretKeyHex must be a valid secp256k1 secret key (32 bytes naming a scalar in [1, n-1])"
+    // validated point, the only input notify can reject is an empty recipient set. useKeyBytes yields
+    // the decoded bytes for the check and zeroes them in its finally before this returns — a throw
+    // here (require failing) does not leave the decoded key resident.
+    require(leadSecretKey.useKeyBytes { Bip340.isValidSecretKeyBytes(it) }) {
+      "leadSecretKey must be a valid secp256k1 secret key (32 bytes naming a scalar in [1, n-1])"
     }
   }
 
@@ -122,10 +132,14 @@ class RelayNotifier(
     }
     // Phase 1 — crypto, off the deadline: encode EVERY recipient before any publish. associateWith
     // is eager, so all conversation keys, encryptions, and signatures complete here, in the set's
-    // iteration order, before phase 2 touches the wire.
+    // iteration order, before phase 2 touches the wire. The held key is decoded to bytes per recipient
+    // (useKeyBytes zeroes each transient copy on the way out) and the HELD holder survives the whole
+    // fan-out — it is cleared only by close(), never per notice, so recipient N+1 still signs after N.
     val encodings: Map<RecipientKey, NoticeEncoding> =
       recipients.associateWith { recipient ->
-        encodeGateOpenNotice(leadSecretKeyHex, recipient, notice, now(), auxRandHex())
+        leadSecretKey.useKeyBytes { keyBytes ->
+          encodeGateOpenNotice(keyBytes, recipient, notice, now(), auxRandHex())
+        }
       }
     // Phase 2 — I/O: publish each encoded event; [timeout] bounds only this socket step.
     val outcomes: Map<RecipientKey, NotifyOutcome> =
@@ -143,6 +157,20 @@ class RelayNotifier(
       }
     return NotifyReport(outcomes)
   }
+
+  /**
+   * Zero the held lead key. The clearable holder exists precisely so the plaintext key does not
+   * outlive the notifier; [SecretKeyHex.clear] is idempotent, so a repeated close is harmless — no
+   * `closed` flag is needed, there being no socket to close exactly once (unlike `RelayConnection`).
+   * A notify after close fails closed: [SecretKeyHex.useKeyBytes] decodes the zeroed hex and throws,
+   * rather than signing a zeroed key. A bare `close()` mirrors `RelayConnection`, which implements no
+   * `Closeable`/`AutoCloseable` either.
+   *
+   * Nothing forces this call: a `RelayNotifier` is not `AutoCloseable`, so whatever owns its lifecycle
+   * (coach's step-5 wiring) must invoke [close] at end-of-life. Until it does, the held key is retained,
+   * not zeroed — no worse than the prior String-typed field, but the hardening stays inert until wired.
+   */
+  fun close() = leadSecretKey.clear()
 }
 
 /** One CSPRNG for the notifier's aux-randomness. SecureRandom is thread-safe; one shared instance is
