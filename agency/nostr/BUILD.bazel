@@ -170,6 +170,10 @@ kt_jvm_library(
         # publishes each via RelayConnection. Lives here, with the target that dials, because it
         # publishes; the codec itself is hermetic and stays in :nostr.
         "RelayNotifier.kt",
+        # The clearable secret-key holder RelayConfig stores instead of a String (#42). Native-free
+        # (structural hex only); the transport-side concern of how the lead key is HELD, so it lives
+        # with the config that holds it, not in the hermetic codec.
+        "SecretKeyHex.kt",
     ],
     visibility = ["//visibility:public"],
     deps = [":nostr"],
@@ -183,6 +187,22 @@ kt_jvm_library(
     testonly = True,
     srcs = ["FakeRelay.kt"],
     visibility = ["//visibility:private"],
+)
+
+# The clearable secret-key holder (#42), native-free: structural hex validation, the defensive
+# copy, useKeyBytes zeroing its working ByteArray, and clear() zeroing the backing CharArray. It
+# neither signs nor parses, so it needs no crypto native. associates (not deps) on :relay so the
+# test observes the zeroed backing array directly — the friend-access idiom nip44_test_lib and
+# relay_connection_test already use for internal seams.
+kt_jvm_test(
+    name = "secret_key_hex_test",
+    size = "small",
+    srcs = ["SecretKeyHexTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.SecretKeyHexTest",
+    associates = [":relay"],
+    deps = [
+        "@maven//:junit_junit",
+    ],
 )
 
 # The transport's structural cells, native-free: connect-failure classification, fragment

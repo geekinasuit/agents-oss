@@ -31,6 +31,18 @@ class NostrWireSignTest {
   }
 
   @Test
+  fun `buildAuthEvent over key bytes produces the identical event to the hex overload`() {
+    // The #42 clearable-key auth path builds the event from key bytes; it must match the hex path.
+    // The hex key is secret scalar 3, so its bytes are 31 zeros then 0x03.
+    val secretKeyBytes = ByteArray(32).also { it[31] = 3 }
+    val relay = "wss://relay.example.com"
+    val challenge = "the-relay-challenge-string"
+    val fromHex = buildAuthEvent(secretKey, relay, challenge, 1700000000L, auxRand)
+    val fromBytes = buildAuthEvent(secretKeyBytes, relay, challenge, 1700000000L, auxRand)
+    assertEquals(fromHex, fromBytes)
+  }
+
+  @Test
   fun `a signed event survives the wire round-trip and still verifies`() {
     val ev =
       signEvent(secretKey, 1700000000L, 1, listOf(listOf("e", "x"), listOf("p", "y")), "hello", auxRand)

@@ -24,7 +24,7 @@ import org.junit.Test
 class RelayConnectionAuthTest {
   private val key = "0000000000000000000000000000000000000000000000000000000000000003"
 
-  private fun config(url: String) = RelayConfig(relayUrl = url, leadSecretKeyHex = key)
+  private fun config(url: String) = RelayConfig(relayUrl = url, leadSecretKey = SecretKeyHex.ofHexString(key))
 
   private fun clientEventId(authFrame: String): String =
     Json.parseToJsonElement(authFrame).jsonArray[1].jsonObject["id"]!!.jsonPrimitive.content

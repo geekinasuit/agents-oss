@@ -62,4 +62,15 @@ class NostrEventSignVerifyTest {
     assertFalse(Bip340.verify(ev.sig, "00".repeat(31), ev.pubkey))
     assertFalse(Bip340.verify("00".repeat(63), ev.id, ev.pubkey))
   }
+
+  @Test
+  fun `signEvent over key bytes produces the identical event to the hex overload`() {
+    // The #42 clearable-key path signs from bytes; it must produce the same event as the hex path,
+    // proving the byte cores are a behaviour-preserving extract. The hex key is secret scalar 3, so
+    // its bytes are 31 zeros then 0x03.
+    val secretKeyBytes = ByteArray(32).also { it[31] = 3 }
+    val fromHex = signEvent(secretKey, 1700000000L, 1, listOf(listOf("e", "x")), "hello", auxRand)
+    val fromBytes = signEvent(secretKeyBytes, 1700000000L, 1, listOf(listOf("e", "x")), "hello", auxRand)
+    assertEquals(fromHex, fromBytes)
+  }
 }

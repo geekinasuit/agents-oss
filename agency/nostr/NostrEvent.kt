@@ -117,10 +117,24 @@ fun signEvent(
   tags: List<List<String>>,
   content: String,
   auxRandHex: String,
+): NostrEvent = signEvent(Hex.decode(secretKeyHex), createdAt, kind, tags, content, auxRandHex)
+
+/**
+ * [signEvent] over key bytes the caller already holds — the clearable-key path (a #42 [SecretKeyHex]
+ * yields its bytes just for the signing call). Produces the identical event to the hex overload for
+ * the same key; only the secret key's representation differs.
+ */
+fun signEvent(
+  secretKey: ByteArray,
+  createdAt: Long,
+  kind: Int,
+  tags: List<List<String>>,
+  content: String,
+  auxRandHex: String,
 ): NostrEvent {
-  val pubkey = Bip340.xonlyPubkeyHex(secretKeyHex)
+  val pubkey = Bip340.xonlyPubkeyFromKeyBytes(secretKey)
   val id = Nip01.eventId(pubkey, createdAt, kind, tags, content)
-  val sig = Bip340.signHex(id, secretKeyHex, auxRandHex)
+  val sig = Bip340.signWithKeyBytes(id, secretKey, auxRandHex)
   return NostrEvent(id, pubkey, createdAt, kind, tags, content, sig)
 }
 
