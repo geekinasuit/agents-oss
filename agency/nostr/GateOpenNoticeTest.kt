@@ -25,7 +25,8 @@ class GateOpenNoticeTest {
 
   private fun encoded(notice: GateOpenNotice, recipientSecret: String = recipASecret): NostrEvent {
     val recipient = RecipientKey.of(Bip340.xonlyPubkeyHex(recipientSecret))
-    val encoding = encodeGateOpenNotice(leadSecret, recipient, notice, createdAt = 1000L, auxRandHex = aux)
+    val encoding =
+      encodeGateOpenNotice(hexToBytes(leadSecret), recipient, notice, createdAt = 1000L, auxRandHex = aux)
     assertTrue("expected an Encoded result", encoding is NoticeEncoding.Encoded)
     return (encoding as NoticeEncoding.Encoded).event
   }
@@ -57,7 +58,7 @@ class GateOpenNoticeTest {
     // > 65535 UTF-8 bytes in the artifact alone, before JSON overhead.
     val notice = GateOpenNotice("gate-1", "digest", "nonce", "x".repeat(70_000))
     val recipient = RecipientKey.of(Bip340.xonlyPubkeyHex(recipASecret))
-    val encoding = encodeGateOpenNotice(leadSecret, recipient, notice, 1000L, aux)
+    val encoding = encodeGateOpenNotice(hexToBytes(leadSecret), recipient, notice, 1000L, aux)
 
     assertTrue("an oversize notice is a typed refusal", encoding is NoticeEncoding.TooLarge)
     val tooLarge = encoding as NoticeEncoding.TooLarge

@@ -118,7 +118,7 @@ private const val NIP44_PLAINTEXT_CEILING_BYTES = 65535
 /**
  * Encode [notice] as a lead-signed, NIP-44-encrypted, regular-kind nostr event addressed to a
  * SINGLE [recipient] (A4-6: NIP-44 encrypts to exactly one recipient, so notification is pairwise —
- * [RelayNotifier] loops this over a recipient set). Mechanism, not policy: [leadSecretKeyHex] and
+ * [RelayNotifier] loops this over a recipient set). Mechanism, not policy: [leadKeyBytes] and
  * which recipients exist are coach-side (§REPO_SEAM); this function just builds the carrier.
  *
  * NO recipient tag is attached. A cleartext `#p` tag would tell the relay which custodians a gate
@@ -134,11 +134,18 @@ private const val NIP44_PLAINTEXT_CEILING_BYTES = 65535
  *
  * [createdAt] and [auxRandHex] are caller-supplied for the same reason [signEvent] takes them —
  * production draws them fresh per event, a test pins them for determinism. Per A4-3 [createdAt] is
- * carried, never read as a clock. A malformed [leadSecretKeyHex] is a deploy error and throws
- * loudly (as `RelayConfig` and [signEvent] treat their key), never a fold-closed null.
+ * carried, never read as a clock.
+ *
+ * [leadKeyBytes] is the lead secret key as raw bytes — the seam is bytes, not a #42 `SecretKeyHex`,
+ * because this codec is in `:nostr` and `SecretKeyHex` is in `:relay` (which depends on `:nostr`), so
+ * taking the holder here would cycle the build. The caller owns the array: encode reads it and neither
+ * retains nor zeroes it, so a clearable-key caller ([RelayNotifier]) passes `SecretKeyHex.useKeyBytes`
+ * bytes and lets that zero them. A malformed key is a deploy error and throws loudly out of the native
+ * (as [signEvent] treats its key), never a fold-closed null; [RelayNotifier] refuses one at
+ * construction, so it never reaches here mid-fan-out.
  */
 fun encodeGateOpenNotice(
-  leadSecretKeyHex: String,
+  leadKeyBytes: ByteArray,
   recipient: RecipientKey,
   notice: GateOpenNotice,
   createdAt: Long,
@@ -150,11 +157,11 @@ fun encodeGateOpenNotice(
     return NoticeEncoding.TooLarge(plaintextBytes, NIP44_PLAINTEXT_CEILING_BYTES)
   }
   val conversationKey =
-    Nip44.conversationKey(Hex.decode(leadSecretKeyHex), Hex.decode(recipient.hex))
+    Nip44.conversationKey(leadKeyBytes, Hex.decode(recipient.hex))
   val ciphertext = Nip44.encrypt(plaintext, conversationKey)
   val event =
     signEvent(
-      secretKeyHex = leadSecretKeyHex,
+      secretKey = leadKeyBytes,
       createdAt = createdAt,
       kind = GATE_OPEN_NOTICE_KIND,
       tags = emptyList(),

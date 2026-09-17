@@ -8,9 +8,12 @@ import fr.acinq.secp256k1.Secp256k1
  * by intent. The fixed-32 SIGN/VERIFY path — `schnorrsig_sign32` and its verify — serves the two
  * callers that need signatures: the nostr event codec (a 32-byte NIP-01 id) and
  * [Bip340ApprovalVerifier] (a 32-byte authorization digest); nostr never signs a variable-length
- * message, so no other signing surface exists. And two VALIDITY predicates, [isXonlyPubkey] and
- * [isValidSecretKey], let a config boundary (`RecipientKey.of`, `RelayNotifier`'s init) refuse a
- * malformed public or secret key up front rather than let it throw out of the crypto phase later.
+ * message, so no other signing surface exists. And two VALIDITY predicates let a config boundary
+ * refuse a malformed public or secret key up front rather than let it throw out of the crypto phase
+ * later: [isXonlyPubkey] for a recipient pubkey (which arrives as coach-config hex at
+ * `RecipientKey.of`) and [isValidSecretKeyBytes] for the lead secret key (which arrives as the bytes
+ * a #42 `SecretKeyHex` yields at `RelayNotifier`'s init). The two take different forms — hex vs.
+ * bytes — because their keys do: the lead key is deliberately no longer a String (#42).
  *
  * [verifyBytes] is TOTAL: a malformed key, signature, or message folds to `false`, never a
  * throw out of the native layer. Fail-closed is the only safe default for a verifier — a
@@ -84,27 +87,30 @@ object Bip340 {
       false
     }
 
-  /** True iff [secretKeyHex] is a valid secp256k1 secret key — 32 bytes naming a scalar in
-   * [1, n-1], not merely 64 hex characters. That range is exactly what EVERY native consumer of a
-   * secret key on this surface requires: `pubkeyCreate` (an event's pubkey field, via
-   * [xonlyPubkeyHex]), `signSchnorr` (its signature, via [signHex]), and `pubKeyTweakMul` — the
-   * scalar in NIP-44's ECDH ([Nip44.sharedPointX]). All three accept a scalar iff it lies in
-   * [1, n-1] and reject it otherwise, so a key this predicate admits cannot throw out of any of
-   * them, and one it rejects would throw out of all of them. Checked with `pubkeyCreate` because
-   * that is libsecp256k1's canonical range gate; total — any decode or native failure is `false`,
-   * so a caller can treat it as a pure validity predicate, the mirror of [isXonlyPubkey] for a
-   * public key. */
-  fun isValidSecretKey(secretKeyHex: String): Boolean =
-    try {
-      val k = Hex.decode(secretKeyHex)
-      if (k.size != 32) {
-        false
-      } else {
-        secp.pubkeyCreate(k)
-        true
-      }
-    } catch (_: Exception) {
+  /** True iff [secretKey] is a valid secp256k1 secret key — 32 bytes naming a scalar in [1, n-1], not
+   * merely the right length. That range is exactly what EVERY native consumer of a secret key on this
+   * surface requires: `pubkeyCreate` (an event's pubkey field, via [xonlyPubkeyFromKeyBytes]),
+   * `signSchnorr` (its signature, via [signWithKeyBytes]), and `pubKeyTweakMul` — the scalar in
+   * NIP-44's ECDH ([Nip44.sharedPointX]). All three accept a scalar iff it lies in [1, n-1] and reject
+   * it otherwise, so a key this predicate admits cannot throw out of any of them, and one it rejects
+   * would throw out of all of them. Checked with `pubkeyCreate` because that is libsecp256k1's
+   * canonical range gate; total — a wrong length or a native refusal is `false`, so a caller can treat
+   * it as a pure validity predicate, the mirror of [isXonlyPubkey] for a public key.
+   *
+   * Takes BYTES, not hex: the lead key reaches this predicate as the bytes a clearable [SecretKeyHex]
+   * (#42) yields for the span of a call, so validating it never renders the secret back to a String.
+   * The caller owns [secretKey] — this reads it and neither retains nor zeroes it; a [SecretKeyHex]
+   * caller passes `useKeyBytes` bytes and lets that zero them. */
+  fun isValidSecretKeyBytes(secretKey: ByteArray): Boolean =
+    if (secretKey.size != 32) {
       false
+    } else {
+      try {
+        secp.pubkeyCreate(secretKey)
+        true
+      } catch (_: Exception) {
+        false
+      }
     }
 }
 
