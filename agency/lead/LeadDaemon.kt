@@ -694,7 +694,7 @@ class LeadDaemon(
     for (gate in lead.openGates.values) {
       val nonce = lead.openNonceFor(gate) ?: continue
       if (nonce.nonce in lead.notifiedNonces) continue
-      announceAndMark(gate.gateId, nonce.payloadDigest, nonce.nonce)
+      announceAndMark(gate.gateId, gate.gateKind, nonce.payloadDigest, nonce.nonce, lead)
       return true
     }
 
@@ -841,13 +841,40 @@ class LeadDaemon(
    * the loop. The marker is written on EVERY outcome, a delivery failure included, so a nonce is
    * announced at most once — a recorded failure is a fail-closed liveness gap, never a per-pass
    * re-fire of the sink's per-recipient crypto.
+   *
+   * The artifact the operator reads is resolved from the gate's lead-owned bound copy first (a
+   * [payloadDigest] match verified). An UNRESOLVED artifact — the bound store disturbed after the
+   * gate opened — is a different failure from a sink fault: the gate is open and blocking and
+   * nothing reached the operator. It is escalated (so the stuck gate is visible, not a silent stall)
+   * and recorded failed WITHOUT calling the sink — a blank-artifact signal cannot build a notice —
+   * and the nonce is still marked, so the recovery arm does not re-read the bad file every pass.
    */
-  private fun announceAndMark(gateId: String, payloadDigest: String, nonce: String) {
-    val outcome =
-      try {
-        gateOpenSink.announce(GateOpenSignal(gateId, payloadDigest, nonce))
-      } catch (e: Exception) {
-        AnnounceOutcome.Failed("sink threw: ${e.message}")
+  private fun announceAndMark(
+    gateId: String,
+    gateKind: String,
+    payloadDigest: String,
+    nonce: String,
+    lead: LeadState,
+  ) {
+    val outcome: AnnounceOutcome =
+      when (val resolved = resolveGateArtifact(gateKind, payloadDigest, lead)) {
+        is ArtifactResolution.Unresolved -> {
+          escalate(
+            "gate-open notify unresolved for $gateId ($gateKind): ${resolved.reason} — " +
+              "gate is open and blocking, operator not notified"
+          )
+          AnnounceOutcome.Failed("artifact-unresolved:${resolved.reason}")
+        }
+        is ArtifactResolution.Resolved ->
+          try {
+            gateOpenSink.announce(GateOpenSignal(gateId, payloadDigest, nonce, resolved.content))
+          } catch (e: Exception) {
+            // A sink fault is a delivery failure the transport layer owns (retry and alerting are
+            // coach-side wiring, not the substrate's), so it is recorded, not escalated — a flapping
+            // relay must not become an escalation storm. Only the Unresolved arm escalates: an
+            // unreadable bound copy is a substrate-internal integrity fault nothing else surfaces.
+            AnnounceOutcome.Failed("sink threw: ${e.message}")
+          }
       }
     faults.at("after-gate-announced")
     store.append(
@@ -871,6 +898,56 @@ class LeadDaemon(
       AnnounceOutcome.NoSink -> "no-sink"
       is AnnounceOutcome.Failed -> "failed:${outcome.detail}"
     }
+
+  /** The outcome of reading a gate's inlined artifact: the verified [Resolved.content] to announce,
+   * or an [Unresolved.reason] naming why the lead-owned bound copy could not be read — the reason
+   * rides into the notify marker, which is the field an operator debugs a stuck gate from. */
+  private sealed interface ArtifactResolution {
+    data class Resolved(val content: String) : ArtifactResolution
+
+    data class Unresolved(val reason: String) : ArtifactResolution
+  }
+
+  /**
+   * Read the artifact a ceremony gate is open on from its lead-owned bound copy, for inlining into
+   * the gate-open notice. The path is the immutable bound copy the fold recorded (plan artifact or
+   * commit manifest), NOT the pod's own path — the swap window bind-once closes. Unlike
+   * [verifiedBoundArtifact] this has NO side effects (no abandon, no escalate): at announce time an
+   * unresolved artifact is a liveness matter [announceAndMark] handles, not a pod to abandon.
+   *
+   * The bytes must hash to [payloadDigest] — the correctness property that the operator reads
+   * EXACTLY what the nonce authorizes, not merely a check that the store is intact. A well-formed
+   * open gate always has a bound path (path and digest fold from one event), so a null path, a
+   * missing file, a read fault, a mismatch, or a blank artifact all mean the bound store was
+   * disturbed after the gate opened.
+   */
+  private fun resolveGateArtifact(
+    gateKind: String,
+    payloadDigest: String,
+    lead: LeadState,
+  ): ArtifactResolution {
+    val path =
+      when (gateKind) {
+        GateKinds.PLAN_APPROVAL -> lead.planArtifactPath
+        GateKinds.COMMIT_APPROVAL -> lead.commitManifestPath
+        else -> null
+      } ?: return ArtifactResolution.Unresolved("no-bound-path")
+    // The read runs on the single-writer loop thread: a read fault (bound copy replaced by a
+    // directory, a revoked permission, a hard I/O error) becomes an Unresolved value, never a throw
+    // that would escape and skip the marker — the never-throws contract the announce holds.
+    val bytes =
+      try {
+        val file = File(path)
+        if (!file.exists()) return ArtifactResolution.Unresolved("bound-artifact-missing")
+        file.readBytes()
+      } catch (e: Exception) {
+        return ArtifactResolution.Unresolved("read-fault:${e.message}")
+      }
+    if (sha256HexBytes(bytes) != payloadDigest) return ArtifactResolution.Unresolved("digest-mismatch")
+    val content = String(bytes, Charsets.UTF_8)
+    if (content.isBlank()) return ArtifactResolution.Unresolved("empty-artifact")
+    return ArtifactResolution.Resolved(content)
+  }
 
   /** A bound artifact that passed verification: the lead-owned path consumers use and the
    * digest gates bind to. */
@@ -1087,7 +1164,7 @@ class LeadDaemon(
             // pipeline now blocks on the gate, which an operator unblocks only once told, so the
             // announce cannot wait. The mechanical-pass arm re-announces on restart if a crash lands
             // between the mint and the notify marker.
-            announceAndMark(gateId, expected, nonce)
+            announceAndMark(gateId, p.gateKind, expected, nonce, leadAtDecision)
           }
         }
         is Proposal.ProposePodSpawn -> {

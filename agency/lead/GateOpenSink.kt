@@ -5,8 +5,8 @@ package com.geekinasuit.agency.lead
  * operator can be told what to authorize. TRANSPORT-NEUTRAL by construction: no relay, recipient,
  * or nostr type appears here, because the substrate does not depend on the transport — which
  * custodians and which relay a notice reaches are coach-side wiring (§REPO_SEAM). Coach adapts this
- * seam to the relay notifier, supplying the recipient set, the socket timeout, and the artifact
- * behind the digest.
+ * seam to the relay notifier, supplying the recipient set and the socket timeout; the artifact the
+ * operator reads is carried on the signal, read daemon-side from the gate's lead-owned bound copy.
  *
  * NEVER THROWS: [announce] runs on the single-writer loop thread, so a throw would sink the whole
  * drive. A delivery fault is a value ([AnnounceOutcome.Failed]) the daemon journals, not an
@@ -20,16 +20,23 @@ fun interface GateOpenSink {
 
 /**
  * What the daemon hands a [GateOpenSink] the moment a ceremony gate opens: the auth-layer facts an
- * operator authorizes against — the gate, the digest it is open on, and the substrate-issued nonce
- * an approval must commit to. The artifact behind [payloadDigest] — the readable thing a human
- * approves instead of a hash — is carried by the transport-side notice, read from the gate's
- * lead-owned bound copy at wiring time; this signal carries only what the daemon holds at gate-open.
+ * operator authorizes against — the gate, the digest it is open on, the substrate-issued nonce an
+ * approval must commit to — and [artifact], the readable thing a human approves instead of a hash.
+ * The daemon reads [artifact] from the gate's lead-owned bound copy and verifies its bytes hash to
+ * [payloadDigest] before constructing this signal, so the operator reads EXACTLY what the nonce
+ * authorizes: the hash match is a correctness property of the notice, not storage hygiene. [artifact]
+ * is never blank — a blank one cannot build a notice — enforced here so no sink is handed one.
  */
 data class GateOpenSignal(
   val gateId: String,
   val payloadDigest: String,
   val nonce: String,
-)
+  val artifact: String,
+) {
+  init {
+    require(artifact.isNotBlank()) { "GateOpenSignal.artifact must not be blank" }
+  }
+}
 
 /**
  * The lead-neutral result of [GateOpenSink.announce], recorded verbatim as the notify marker's
