@@ -4,6 +4,7 @@ import com.geekinasuit.agency.pod.PodCompletion
 import com.geekinasuit.agency.pod.PodEvent
 import com.geekinasuit.agency.pod.PodSpec
 import com.geekinasuit.agency.pod.sha256HexBytes
+import com.geekinasuit.agency.shared.auth.freshNonceHex
 import com.geekinasuit.agency.shared.journal.ArmedTimer
 import com.geekinasuit.agency.shared.journal.EffectReceiver
 import com.geekinasuit.agency.shared.journal.JournalState
@@ -1002,6 +1003,27 @@ class LeadDaemon(
             origin = ORIGIN_SUBSTRATE,
           )
           faults.at("after-gate-opened-${p.gateKind}")
+          // Under a ceremony auth every release is nonce-bound, so the gate-open a ceremony
+          // daemon journals is immediately followed by the nonce that authorizes THAT gate's
+          // release — bound to (gateId, digest) exactly as the fold reads it back
+          // (LeadState.openNonceFor). Guarded on hasApprovers: DENY_ALL has no approvers, and
+          // minting under it would brick the pipeline, since an empty allow-list leaves the
+          // quorum unsatisfiable and the gate could never release. Idempotent without a key:
+          // the seen-gate guard above opens a gate at most once, so this append rides that
+          // guarantee; a crash between the two appends leaves the gate nonce-less and, by that
+          // same guard, un-re-minted at adopt — the release fold then refuses a nonce-less
+          // release under a ceremony auth, so the orphan is stuck, never bypassable.
+          if (leadAuth.hasApprovers) {
+            store.append(
+              LeadKinds.NONCE_ISSUED,
+              buildJsonObject {
+                put("nonce", freshNonceHex())
+                put("gateId", gateId)
+                put("payloadDigest", expected)
+              },
+              origin = ORIGIN_SUBSTRATE,
+            )
+          }
         }
         is Proposal.ProposePodSpawn -> {
           if (ticket == null) continue
