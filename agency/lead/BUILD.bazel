@@ -32,6 +32,7 @@ kt_jvm_library(
         "CognitionProtocol.kt",
         "CognitionSelection.kt",
         "EnginePodRunner.kt",
+        "GateOpenSink.kt",
         "LeadDaemon.kt",
         "LeadState.kt",
         "OpenAiCompatCognition.kt",
@@ -153,6 +154,24 @@ kt_jvm_test(
         # Builds a ceremony LeadAuth (allow-list + verifier + quorum) to exercise the
         # hasApprovers-gated mint; the lead library depends on this target too, so the test's
         # use of it is direct, not a peek past the boundary.
+        "//agency/shared/auth",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+    ],
+)
+
+kt_jvm_test(
+    name = "notify_gate_open_test",
+    size = "small",
+    srcs = ["NotifyGateOpenTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.NotifyGateOpenTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":lead",
+        "//agency/pod",
+        # A ceremony LeadAuth (allow-list + verifier + quorum) makes hasApprovers hold, so a nonce
+        # mints and the notify arm fires; the lead library depends on this target too, so the use
+        # is direct, not a peek past the boundary.
         "//agency/shared/auth",
         "//agency/shared/journal",
         "@maven//:junit_junit",
