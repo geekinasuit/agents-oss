@@ -121,6 +121,12 @@ class AllowList(principals: List<Principal>) {
   fun principalFor(key: SchemeKey): Principal? = byKey[key]
 
   fun byId(principalId: String): Principal? = byId[principalId]
+
+  /** True when no principal is allow-listed. An empty allow-list cannot authorize any
+   * ceremony release — there is no one to bind a verified approval to — so a consumer can
+   * derive "not ceremony-enabled" from this capability rather than an identity check against
+   * a sentinel auth. */
+  fun isEmpty(): Boolean = byId.isEmpty()
 }
 
 /**

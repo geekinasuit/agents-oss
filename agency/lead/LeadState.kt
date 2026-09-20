@@ -241,14 +241,24 @@ data class VerifiedApproval(
  * [leadFold]'s recovery-contract note. [DENY_ALL] is the restrictive default: an empty
  * allow-list, the rejecting verifier, and a quorum naming a principal that cannot exist, so
  * nothing on the ceremony path can clear a gate. It is the honest spelling of "this daemon
- * cannot authorize a ceremony release yet" — a nonce-LESS pre-ceremony release still folds
- * as it always did (quorum gates only the nonce path; see [foldRelease]).
+ * cannot authorize a ceremony release yet": [hasApprovers] is false, and [foldRelease]
+ * refuses the nonce-LESS pre-ceremony path under any ceremony auth, so only a DENY_ALL fold
+ * still honors a nonce-less release.
  */
 class LeadAuth(
   val allowList: AllowList,
   val verifier: ApprovalVerifier,
   val quorum: QuorumNode,
 ) {
+  /** Whether this auth can authorize a ceremony release at all — true iff the [allowList]
+   * names at least one principal. It is the semantic complement of [DENY_ALL]'s empty
+   * allow-list, derived from the security object rather than an identity check against the
+   * sentinel, so a hand-built equivalent of DENY_ALL is classified the same. The substrate
+   * mints a nonce at gate-open iff this holds, and [foldRelease] refuses a nonce-less release
+   * iff this holds — one predicate, read at both the write and the fold. */
+  val hasApprovers: Boolean
+    get() = !allowList.isEmpty()
+
   companion object {
     val DENY_ALL: LeadAuth = LeadAuth(AllowList(emptyList()), RejectingVerifier, oneOfOne("__none__"))
   }
@@ -759,22 +769,28 @@ private fun accruedCost(p: kotlinx.serialization.json.JsonObject): Double =
  * consumed — and honoring it consumes it in the derived state, so a second release naming
  * the same nonce folds stale. Replay rejection therefore survives restart by
  * construction: it is a property of re-folding the journal, not of any in-memory table.
- * A release naming NO nonce is honored only while its gate has never had one issued — the
- * pre-ceremony stub path, kept so journals written before nonces existed keep their
- * meaning — and once a nonce exists for a gate, omitting the field is indiscipline, not
- * an exemption. That condition is per-gate LIVE STATE, not a journal epoch: a gate whose
- * mint step fails or is skipped stays on the pre-ceremony rule until a nonce exists for it.
+ * A release naming NO nonce is the pre-ceremony path, and it is scoped to the AUTHORIZATION
+ * in force at fold time. Under a ceremony auth ([LeadAuth.hasApprovers]) it is refused
+ * outright: every release must be nonce-bound and quorum-satisfied, so omitting the nonce is
+ * never an exemption there. Under [LeadAuth.DENY_ALL] (no approvers to bind) it is honored
+ * while its gate has never had a nonce issued — the pre-ceremony stub, kept so journals
+ * written before nonces existed keep their meaning.
  *
- * 2b GATES THE NONCE PATH ONLY, and deliberately LEAVES the nonce-less pre-ceremony path
- * open rather than refusing it outright. That is safe because the nonce-less path is not a
- * quorum bypass: the `s.issuedNonces.values.any { it.gateId == gateId }` clause below folds
- * a nonce-less release stale the instant its gate has ANY nonce issued, so a gate closes its
- * pre-ceremony escape hatch the moment it enters the ceremony — per gate, with no later step
- * required. `releaseOmittingTheNonceIsNotAnExemption` is the cell that holds this line, and
- * it must stay green. Refusing nonce-less releases outright is deferred to when a daemon
- * actually mints nonces (no step does yet — the fixture, scenario, and wake-loop releases
- * are all nonce-less), at which point a gate that reached the ceremony can never take this
- * path anyway. Nonce-less honors are marked in [LeadState.nonceLessReleases], keyed by gate to
+ * That auth-scoping is what lets the substrate mint nonces safely. The older per-gate clause
+ * — `s.issuedNonces.values.any { it.gateId == gateId }` folds a nonce-less release stale the
+ * instant its gate has ANY nonce issued — closed a gate's escape hatch only once that gate
+ * itself reached the ceremony, which left a gate whose mint step crashed after GATE_OPENED
+ * but before NONCE_ISSUED still on the pre-ceremony rule. The [LeadAuth.hasApprovers] refusal
+ * closes that window: a ceremony daemon refuses the nonce-less path for ALL its gates,
+ * reached-the-ceremony or not. The per-gate clause is kept: it reads the live folded nonce
+ * set — the nonces issued as of this release, rebuilt from the journal on every fold, never a
+ * marker frozen in at write — so under DENY_ALL it still fires, and it still guards a journal
+ * minted under a ceremony auth then re-folded under one since relaxed.
+ * `releaseOmittingTheNonceIsNotAnExemption` and `aNonceLessReleaseUnderACeremonyAuthFoldsStale`
+ * hold the ceremony-auth refusal; the per-gate clause's own stale-fold is exercised by
+ * `nullNonceFieldOnAReleaseReadsAsAbsent` under DENY_ALL.
+ *
+ * Nonce-less honors (reachable on a DENY_ALL fold only) are marked in [LeadState.nonceLessReleases], keyed by gate to
  * the FIRST honoring release's seq, so the disposition stays legible after the fact — the
  * honor is itself single-use per gate, mirroring the consumed-nonce rule: a second
  * nonce-less release of a marked gate folds stale rather than silently re-honoring and
@@ -814,6 +830,13 @@ private fun foldRelease(
   val consumed: Set<String>
   val nonceLess: Map<String, Long>
   if (nonce == null) {
+    // Under a ceremony auth (a non-empty allow-list) every release must be nonce-bound and
+    // quorum-satisfied; the pre-ceremony nonce-less path is refused outright. Placed first so
+    // a gate whose mint step crashed after GATE_OPENED but before NONCE_ISSUED cannot fall
+    // back to an un-quorumed release — its daemon's auth refuses the nonce-less path whether
+    // or not that particular gate reached the ceremony. Under DENY_ALL this is a no-op and
+    // the pre-ceremony rule below still governs.
+    if (auth.hasApprovers) return stale()
     if (s.issuedNonces.values.any { it.gateId == gateId }) return stale()
     // A nonce-less honor is itself single-use per gate, mirroring the consumed-nonce
     // rule: a replay folds stale, and the mark keeps the first honoring seq.

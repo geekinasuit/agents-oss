@@ -268,6 +268,12 @@ class AuthFoldTest {
 
   @Test
   fun releaseOmittingTheNonceIsNotAnExemption() {
+    // A gate that HAS a nonce, released without naming it, is still refused under a ceremony
+    // auth — omitting the nonce is not a way to dodge the ceremony. Under testAuth the refusal
+    // is the hasApprovers guard, which fires for any nonce-less release (gate-with-nonce or not;
+    // aNonceLessReleaseUnderACeremonyAuthFoldsStale is the companion no-nonce case). The per-gate
+    // issuedNonces.any clause's own stale-fold is covered under DENY_ALL by
+    // nullNonceFieldOnAReleaseReadsAsAbsent.
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1")
@@ -279,34 +285,17 @@ class AuthFoldTest {
 
   @Test
   fun preCeremonyGateStillReleasesWithoutNonce() {
-    // The stub path: a gate that never had a nonce issued keeps its pre-ceremony meaning,
-    // so journals written before nonces existed fold as they always did — and the
-    // disposition is marked, so derived state can tell this release from a nonced one.
+    // The stub path: under a no-approver (pre-ceremony) auth, a gate that never had a nonce
+    // issued keeps its pre-ceremony meaning, so journals written before nonces existed fold
+    // as they always did — and the disposition is marked, so derived state can tell this
+    // release from a nonced one. (Under a ceremony auth this same release folds stale — see
+    // aNonceLessReleaseUnderACeremonyAuthFoldsStale.)
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     val releaseSeq = s.release("g1", "d1").seq
-    val st = s.lead()
+    val st = s.leadWith(LeadAuth.DENY_ALL)
     assertTrue("g1" in st.releasedGates)
     assertEquals(releaseSeq, st.nonceLessReleases["g1"])
-  }
-
-  @Test
-  fun reReleaseUnderCeremonyIsDistinguishableFromTheNonceLessMark() {
-    // The marker is keyed to the seq of the release it describes: after a pre-ceremony
-    // honor, a re-open + ceremony release of the same gate must neither erase the mark
-    // nor let it read as covering the ceremony release.
-    val s = open(newStoreDir())
-    s.gateOpened("g1", "d1")
-    val preSeq = s.release("g1", "d1").seq // pre-ceremony honor
-    s.gateOpened("g1", "d2") // re-opened on a new digest
-    s.nonceIssued("n1", "g1", "d2")
-    s.approvalFor("g1", "operator", "n1", "d2")
-    val ceremonySeq = s.release("g1", "d2", nonce = "n1").seq
-    val st = s.lead()
-    assertTrue("g1" in st.releasedGates)
-    assertTrue("n1" in st.consumedNonces)
-    assertEquals(preSeq, st.nonceLessReleases["g1"])
-    assertTrue(ceremonySeq != preSeq)
   }
 
   @Test
@@ -318,10 +307,61 @@ class AuthFoldTest {
     s.gateOpened("g1", "d1")
     val firstSeq = s.release("g1", "d1").seq
     val replaySeq = s.release("g1", "d1").seq
-    val st = s.lead()
+    val st = s.leadWith(LeadAuth.DENY_ALL)
     assertTrue("g1" in st.releasedGates)
     assertEquals(firstSeq, st.nonceLessReleases["g1"])
     assertEquals(listOf(replaySeq to "g1"), st.staleReleases)
+  }
+
+  @Test
+  fun aReOpenedGateIsNotHonoredNonceLessASecondTimeUnderDenyAll() {
+    // The nonce-less honor's single-use survives a re-open, via a DIFFERENT clause than the
+    // same-digest replay (nonceLessReplayFoldsStaleAndTheMarkKeepsTheFirstSeq). A replay on d1
+    // is caught by the per-(gate, digest) single-release guard; a release on a freshly-opened
+    // d2 passes that guard — d2 is a new authorization surface — and is refused instead by the
+    // per-gate mark, the `gateId in nonceLessReleases` clause. The second release folds stale,
+    // visibly, and the mark keeps the first honoring seq. (Refused outright under a ceremony
+    // auth, so this single-use guard is a DENY_ALL rule.)
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    val firstSeq = s.release("g1", "d1").seq // pre-ceremony honor
+    s.gateOpened("g1", "d2") // re-opened on a new digest
+    val reSeq = s.release("g1", "d2").seq // nonce-less again, on the new digest
+    val st = s.leadWith(LeadAuth.DENY_ALL)
+    assertTrue("g1" in st.releasedGates)
+    assertEquals(firstSeq, st.nonceLessReleases["g1"])
+    assertEquals(listOf(reSeq to "g1"), st.staleReleases)
+  }
+
+  @Test
+  fun aNonceLessReleaseUnderACeremonyAuthFoldsStale() {
+    // Under a ceremony auth (a non-empty allow-list) every release must be nonce-bound and
+    // quorum-satisfied — the pre-ceremony nonce-less path is refused outright. This is the
+    // invariant that lets the substrate mint nonces safely: a crash between GATE_OPENED and
+    // NONCE_ISSUED leaves the gate stuck, never releasable off the un-quorumed nonce-less path.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.release("g1", "d1") // nonce-less, no nonce ever issued for this gate
+    val st = s.lead() // testAuth: non-empty allow-list
+    assertFalse("g1" in st.releasedGates)
+    assertEquals(1, st.staleReleases.size)
+    assertTrue("g1" !in st.nonceLessReleases)
+  }
+
+  @Test
+  fun aNonceLessHonorFoldsStaleWhenRefoldedUnderACeremonyAuth() {
+    // The recovery contract: folded state is a function of (journal, auth). A nonce-less
+    // release is the pre-ceremony path, legitimate only under a no-approver auth. The SAME
+    // journal, re-folded under a ceremony auth, folds that release stale — authorization is
+    // re-decided on the allow-list in force at recovery, not frozen in at write time.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.release("g1", "d1") // nonce-less
+    val preCeremony = s.leadWith(LeadAuth.DENY_ALL)
+    assertTrue("g1" in preCeremony.releasedGates)
+    val ceremony = s.leadWith(testAuth)
+    assertFalse("g1" in ceremony.releasedGates)
+    assertEquals(1, ceremony.staleReleases.size)
   }
 
   @Test
@@ -633,9 +673,11 @@ class AuthFoldTest {
   @Test
   fun nullNonceFieldOnAReleaseReadsAsAbsent() {
     // The nonce is OPTIONAL on a release, so JsonNull reads as the ordinary JSON spelling
-    // of absence. Under the ceremony that folds stale (a null can neither name a nonce
-    // "null" nor act as an exemption); on a pre-ceremony gate it is the omission it
-    // claims to be — honored and marked, exactly as if the field were left out.
+    // of absence — never as a nonce literally named "null". Folded under a no-approver auth,
+    // the two halves show it: on g1 (which HAS a nonce issued) the null-nonce release folds
+    // stale via the gate-has-a-nonce clause; on g2 (no nonce) it is the omission it claims to
+    // be — honored and marked, exactly as if the field were left out. (Under a ceremony auth
+    // BOTH would fold stale — the nonce-less path is refused there regardless of JsonNull.)
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1")
@@ -658,7 +700,7 @@ class AuthFoldTest {
       },
       ORIGIN_AUTH_LAYER,
     )
-    val st = s.lead()
+    val st = s.leadWith(LeadAuth.DENY_ALL)
     assertFalse("g1" in st.releasedGates)
     assertEquals(1, st.staleReleases.size)
     assertTrue("g2" in st.releasedGates)
@@ -763,18 +805,33 @@ class AuthFoldTest {
     s.nonceIssued("n1", "g1", "d1")
     s.approvalFor("g1", "operator", "n1", "d1")
     s.release("g1", "d1", nonce = "n1")
-    // The ceremony release actually HONORS here (verifying approval + met quorum), so the
-    // clear below is clearing real per-ticket state, not passing vacuously.
+    // The ceremony release actually HONORS here (verifying approval + met quorum), so
+    // issuedNonces, consumedNonces, and verifiedApprovals are populated and then non-vacuously
+    // cleared. unverifiedApprovals is not populated here — it rides the same one-shot TICKET_DONE
+    // reset. The nonce-less mark is cleared under DENY_ALL (a ceremony auth can never populate
+    // it) in ticketDoneClearsTheNonceLessMark.
     assertTrue("g1" in s.lead().releasedGates)
-    s.gateOpened("g2", "d2")
-    s.release("g2", "d2") // pre-ceremony path, so the clear below has a marker to clear
     s.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
     val st = s.lead()
     assertTrue(st.issuedNonces.isEmpty())
     assertTrue(st.consumedNonces.isEmpty())
     assertTrue(st.verifiedApprovals.isEmpty())
     assertTrue(st.unverifiedApprovals.isEmpty())
-    assertTrue(st.nonceLessReleases.isEmpty())
+  }
+
+  @Test
+  fun ticketDoneClearsTheNonceLessMark() {
+    // The nonce-less mark lands in nonceLessReleases only under a pre-ceremony (DENY_ALL) auth,
+    // so the TICKET_DONE clear of that map must be tested there — a ceremony fold can never put
+    // a mark in it for the clear to remove. Non-vacuous: the mark is present before TICKET_DONE
+    // and gone after, so dropping the nonceLessReleases line from the clear fails this.
+    val s = open(newStoreDir())
+    s.append(LeadKinds.TICKET_CLAIMED, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
+    s.gateOpened("g1", "d1")
+    s.release("g1", "d1") // pre-ceremony nonce-less honor → marked
+    assertTrue("g1" in s.leadWith(LeadAuth.DENY_ALL).nonceLessReleases)
+    s.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
+    assertTrue(s.leadWith(LeadAuth.DENY_ALL).nonceLessReleases.isEmpty())
   }
 
   // -- mechanical re-verification (2b) ------------------------------------------------------
