@@ -65,6 +65,7 @@ object LeadKinds {
   const val TICKET_DONE = "ticket-done"
   const val ESCALATED = "escalated"
   const val GATE_OPENED = "gate-opened"
+  const val GATE_OPEN_NOTIFIED = "gate-open-notified"
   const val POD_SPAWNED = "pod-spawned"
   const val POD_RESULT_RECORDED = "pod-result-recorded"
   const val POD_ABANDONED = "pod-abandoned"
@@ -318,6 +319,14 @@ data class LeadState(
    * marks them) so a re-issue of a spent value is detectable as the anomaly it is. */
   val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
   val consumedNonces: Set<String> = emptySet(),
+  /** Nonces whose gate-open has already been announced to the operator ([LeadKinds.GATE_OPEN_NOTIFIED]).
+   * Keyed by the NONCE, not the gate: a nonce is single-use and bound to one (gate, digest), so a
+   * gate re-opened on a new digest mints a NEW nonce and is announced afresh, while the announced one
+   * is never re-announced. The notify arm reads this to fire at most once per nonce; recording the
+   * marker on EVERY outcome (a delivery failure included) is what keeps a faulted announce a
+   * fail-closed liveness gap rather than a per-pass re-announce. Ticket-scoped: [LeadKinds.TICKET_DONE]
+   * clears it, as it does [issuedNonces]. */
+  val notifiedNonces: Set<String> = emptySet(),
   /** gateId → approvals that RE-VERIFIED at fold time (signature over preimage, key in the
    * allow-list, committed binding agreeing with the flat copies). The set a release's quorum
    * is evaluated over — an approval that did not verify never lands here, so the flat
@@ -418,14 +427,15 @@ data class LeadState(
  * these carry security-relevant tails (escalations, stale releases, mis-origined entries).
  *
  * The nonce/approval records ([LeadState.issuedNonces], [LeadState.consumedNonces],
- * [LeadState.verifiedApprovals]) sit DELIBERATELY outside this cap: they are
- * correctness-bearing records, not views. Evicting a consumed nonce re-enables the replay it
- * exists to reject; evicting an issued nonce or a verified approval silently voids a live
- * authorization. ([LeadState.unverifiedApprovals] IS capped by this tail — an approval that
- * did not verify contributes nothing a release depends on, so it is a view, not a record.)
- * [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
+ * [LeadState.verifiedApprovals], [LeadState.notifiedNonces]) sit DELIBERATELY outside this
+ * cap: they are correctness-bearing records, not views. Evicting a consumed nonce re-enables
+ * the replay it exists to reject; evicting an issued nonce or a verified approval silently
+ * voids a live authorization; evicting a notified nonce re-enables the duplicate gate-open
+ * announce its marker exists to suppress. ([LeadState.unverifiedApprovals] IS capped by this
+ * tail — an approval that did not verify contributes nothing a release depends on, so it is a
+ * view, not a record.) [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
  * an audit marker whose absence is itself a claim ("released under the ceremony"), so an
- * evicted entry would not lose the answer, it would invert it. All four share the same
+ * evicted entry would not lose the answer, it would invert it. All five share the same
  * bound: the ticket, not a tail — TICKET_DONE clears them — and their kinds are
  * origin-gated, so only the substrate and the authorization layer can grow them: a party
  * positioned to flood them could already write worse. */
@@ -450,6 +460,7 @@ private val SUBSTRATE_AUTHORED_KINDS =
     LeadKinds.TICKET_DONE,
     LeadKinds.ESCALATED,
     LeadKinds.GATE_OPENED,
+    LeadKinds.GATE_OPEN_NOTIFIED,
     LeadKinds.POD_SPAWNED,
     LeadKinds.POD_RESULT_RECORDED,
     LeadKinds.POD_ABANDONED,
@@ -563,6 +574,7 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
           staleReleases = emptyList(),
           issuedNonces = emptyMap(),
           consumedNonces = emptySet(),
+          notifiedNonces = emptySet(),
           verifiedApprovals = emptyMap(),
           unverifiedApprovals = emptyList(),
           pods = emptyMap(),
@@ -715,6 +727,12 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
           else -> s.copy(consumedNonces = s.consumedNonces + nonce)
         }
       }
+      LeadKinds.GATE_OPEN_NOTIFIED ->
+        // The gate-open for this nonce has been announced to the operator (the announce outcome
+        // rides in the payload for the record; the fold needs only the fact, so the notify arm
+        // fires at most once per nonce). The substrate is the sole writer and announces only a
+        // nonce it just resolved open, so no gate/issue cross-check is warranted here.
+        s.copy(notifiedNonces = s.notifiedNonces + p.str("nonce"))
       LeadKinds.APPROVAL_RECORDED -> foldApproval(s, e, p, auth)
       LeadKinds.COGNITION_PROPOSED ->
         s.copy(cognitionSpendUsd = s.cognitionSpendUsd + accruedCost(p))

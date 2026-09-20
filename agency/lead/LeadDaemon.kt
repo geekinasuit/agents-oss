@@ -75,6 +75,12 @@ class LeadDaemon(
   private val leadAuth: LeadAuth,
   private val timers: TimerService = TimerService.NOOP,
   private val faults: FaultInjector = FaultInjector.NONE,
+  /** Where a ceremony gate-open is announced so an operator can authorize it ([GateOpenSink]).
+   * Defaults to [NoOpGateOpenSink]: an un-wired daemon marks the gate announced (so the arm fires
+   * at most once) but reaches no operator — a real sink, and the recipients/relay it needs, are
+   * coach-side wiring (§REPO_SEAM). Under a non-ceremony auth no nonce is minted, so the notify arm
+   * never fires and this is never consulted, exactly as the mint is inert under [LeadAuth.DENY_ALL]. */
+  private val gateOpenSink: GateOpenSink = NoOpGateOpenSink,
   private val dedupEffects: Boolean = true,
   private val capabilityDesc: String = "scripted/none",
   private val leadVersion: String = "dev",
@@ -680,6 +686,18 @@ class LeadDaemon(
     val lead = folded.lead
     val shared = folded.shared
 
+    // Recovery path for the gate-open announce: re-announce any ceremony gate that is open with a
+    // nonce but not yet marked. The normal announce happens at gate-open in executeProposals; this
+    // catches a crash between the mint and its notify marker, because a restart's adopt runs this
+    // pass BEFORE cognition and so sees the already-open gate. openNonceFor yields a nonce only
+    // under a ceremony auth, so this is inert in deployment, exactly as the mint is.
+    for (gate in lead.openGates.values) {
+      val nonce = lead.openNonceFor(gate) ?: continue
+      if (nonce.nonce in lead.notifiedNonces) continue
+      announceAndMark(gate.gateId, nonce.payloadDigest, nonce.nonce)
+      return true
+    }
+
     // Claim an offered ticket when idle. The done-filter repeats here even though the
     // source receives the same set: the source is a seam an adopter implements, and a
     // completed ticket must stay completed regardless of what any implementation re-offers.
@@ -813,6 +831,46 @@ class LeadDaemon(
     }
     return false
   }
+
+  /**
+   * Announce a ceremony gate-open through [gateOpenSink] and mark the nonce
+   * ([LeadKinds.GATE_OPEN_NOTIFIED]). Called at the mint site (the normal announce, in the same
+   * drive the gate opens) and from the mechanical pass (the restart-recovery re-announce). The sink
+   * must not throw; an ordinary exception is contained as a failed outcome, so it cannot sink the
+   * single loop thread — a fatal [Error] is not caught, it propagates as one does anywhere else in
+   * the loop. The marker is written on EVERY outcome, a delivery failure included, so a nonce is
+   * announced at most once — a recorded failure is a fail-closed liveness gap, never a per-pass
+   * re-fire of the sink's per-recipient crypto.
+   */
+  private fun announceAndMark(gateId: String, payloadDigest: String, nonce: String) {
+    val outcome =
+      try {
+        gateOpenSink.announce(GateOpenSignal(gateId, payloadDigest, nonce))
+      } catch (e: Exception) {
+        AnnounceOutcome.Failed("sink threw: ${e.message}")
+      }
+    faults.at("after-gate-announced")
+    store.append(
+      LeadKinds.GATE_OPEN_NOTIFIED,
+      buildJsonObject {
+        put("gateId", gateId)
+        put("payloadDigest", payloadDigest)
+        put("nonce", nonce)
+        put("outcome", announceLabel(outcome).take(MAX_JOURNALED_STRING))
+      },
+      origin = ORIGIN_SUBSTRATE,
+    )
+  }
+
+  /** The journaled form of an [AnnounceOutcome] — the notify marker's `outcome` field. The success
+   * summary or the fault detail rides along, so the record shows what a wired sink reported, not
+   * merely that an announce happened. */
+  private fun announceLabel(outcome: AnnounceOutcome): String =
+    when (outcome) {
+      is AnnounceOutcome.Announced -> "announced:${outcome.summary}"
+      AnnounceOutcome.NoSink -> "no-sink"
+      is AnnounceOutcome.Failed -> "failed:${outcome.detail}"
+    }
 
   /** A bound artifact that passed verification: the lead-owned path consumers use and the
    * digest gates bind to. */
@@ -1014,15 +1072,22 @@ class LeadDaemon(
           // same guard, un-re-minted at adopt — the release fold then refuses a nonce-less
           // release under a ceremony auth, so the orphan is stuck, never bypassable.
           if (leadAuth.hasApprovers) {
+            val nonce = freshNonceHex()
             store.append(
               LeadKinds.NONCE_ISSUED,
               buildJsonObject {
-                put("nonce", freshNonceHex())
+                put("nonce", nonce)
                 put("gateId", gateId)
                 put("payloadDigest", expected)
               },
               origin = ORIGIN_SUBSTRATE,
             )
+            // Announce the gate-open in the same drive it opens. The mechanical pass runs BEFORE
+            // cognition, so a gate opened here is not seen by that pass until a later wake — but the
+            // pipeline now blocks on the gate, which an operator unblocks only once told, so the
+            // announce cannot wait. The mechanical-pass arm re-announces on restart if a crash lands
+            // between the mint and the notify marker.
+            announceAndMark(gateId, expected, nonce)
           }
         }
         is Proposal.ProposePodSpawn -> {
