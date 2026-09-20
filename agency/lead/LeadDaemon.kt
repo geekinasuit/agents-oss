@@ -69,7 +69,8 @@ class LeadDaemon(
    * silently-defaulted one would be exactly the footgun [leadFold] refuses at the fold. A
    * daemon not yet wired for the real ceremony passes [LeadAuth.DENY_ALL] explicitly — the
    * honest spelling of "this daemon cannot clear a ceremony gate yet"; its nonce-less
-   * pre-ceremony releases still fold as before (quorum gates only the nonce path). */
+   * pre-ceremony releases still fold as before, since the fold ([leadFold]) refuses the
+   * nonce-less path only under a ceremony auth ([LeadAuth.hasApprovers]), never under DENY_ALL. */
   private val leadAuth: LeadAuth,
   private val timers: TimerService = TimerService.NOOP,
   private val faults: FaultInjector = FaultInjector.NONE,
