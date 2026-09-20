@@ -141,6 +141,24 @@ kt_jvm_test(
     ],
 )
 
+kt_jvm_test(
+    name = "nonce_mint_test",
+    size = "small",
+    srcs = ["NonceMintTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.NonceMintTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":lead",
+        "//agency/pod",
+        # Builds a ceremony LeadAuth (allow-list + verifier + quorum) to exercise the
+        # hasApprovers-gated mint; the lead library depends on this target too, so the test's
+        # use of it is direct, not a peek past the boundary.
+        "//agency/shared/auth",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Runner-seam cells: transport dispatch + refusals, bind-once sink, AGENCY-028 health
 # drain (both counters). The exhaustion cell drives a real (garbage) subprocess through
 # the restart ladder and the bridge-drain cell a real fake-agent subprocess, so medium
