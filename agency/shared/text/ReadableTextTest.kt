@@ -72,7 +72,7 @@ class ReadableTextTest {
   }
 
   @Test
-  fun lettersAndSymbolsDrawnBlankHaveNothingToRead() {
+  fun blankAndPlaceholderLettersAndSymbolsHaveNothingToRead() {
     assertNothingToRead(
       mapOf(
         "the Hangul choseong filler" to text(0x115F),

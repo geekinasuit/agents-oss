@@ -3,7 +3,7 @@ package com.geekinasuit.agency.shared.text
 /**
  * Whether [text] has something for a person to read: at least one code point that is a letter,
  * number, punctuation mark, or symbol, other than the few that show nothing to read
- * ([DRAWN_BLANK]).
+ * ([NOTHING_TO_READ]).
  *
  * No other code point is text to read, alone or in any combination: separators and whitespace;
  * control and format characters, zero-width ones such as U+200B and U+FEFF among them; marks, which
@@ -18,7 +18,9 @@ package com.geekinasuit.agency.shared.text
  * surrogate chars, and neither is readable alone.
  */
 fun hasReadableText(text: String): Boolean =
-  text.codePoints().anyMatch { Character.getType(it) in READABLE_CATEGORIES && it !in DRAWN_BLANK }
+  text.codePoints().anyMatch {
+    Character.getType(it) in READABLE_CATEGORIES && it !in NOTHING_TO_READ
+  }
 
 /** The general categories of letters, numbers, punctuation marks, and symbols. */
 private val READABLE_CATEGORIES: Set<Int> =
@@ -57,5 +59,5 @@ private val READABLE_CATEGORIES: Set<Int> =
  * standard asks only for a placeholder for it, such as a dotted box, which is no more to read than
  * the box drawn for a private-use code point.
  */
-private val DRAWN_BLANK: Set<Int> =
+private val NOTHING_TO_READ: Set<Int> =
   setOf(0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x13441, 0x13442, 0x1D159)
