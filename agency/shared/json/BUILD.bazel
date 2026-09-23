@@ -24,6 +24,23 @@ kt_jvm_library(
     ],
 )
 
+# The premise every small-stack cell rests on: the unguarded parse of the shallowest nesting any of
+# them feeds overflows the small stack. -Xbatch compiles in the foreground, so the cell's warm-up
+# leaves the reader compiled — frames that nest deeper than interpreted ones before overflowing —
+# before the attempt runs, rather than whenever a background compile happens to finish.
+kt_jvm_test(
+    name = "small_stack_test",
+    size = "small",
+    srcs = ["SmallStackTest.kt"],
+    jvm_flags = ["-Xbatch"],
+    test_class = "com.geekinasuit.agency.shared.json.SmallStackTest",
+    deps = [
+        ":small_stack",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
 # The scan against the parser it guards: its structural rules by example, then property cells that
 # measure how deep kotlinx's reader actually nests, over random soup and random valid JSON. It parses
 # with kotlinx, so it carries the JSON dep the library does not.
