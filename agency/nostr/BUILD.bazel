@@ -254,6 +254,44 @@ kt_jvm_test(
     ],
 )
 
+# The DEPTH bound's margin: a frame nested exactly MAX_JSON_DEPTH deep, which the depth check admits,
+# parses on the listener thread without overflowing that thread's stack. How much stack the parser
+# needs per level depends on its JIT state, so one test class runs under two targets, each pinning a
+# state: interpreted, and compiled by C1 with profiling (tier 3), the two states in which the parser
+# was measured to need the most stack per level. Native-free, like relay_connection_test.
+kt_jvm_test(
+    name = "relay_ceiling_interpreted_test",
+    size = "small",
+    srcs = ["RelayCeilingTest.kt"],
+    jvm_flags = ["-Xint"],
+    test_class = "com.geekinasuit.agency.nostr.RelayCeilingTest",
+    deps = [
+        ":fake_relay",
+        ":nostr",
+        ":relay",
+        "@maven//:junit_junit",
+    ],
+)
+
+# TieredStopAtLevel=3 keeps compiled code at tier 3. -Xbatch finishes each compile before the call
+# that triggered it goes on, so the class's warm-ups leave the parser compiled before the first cell.
+kt_jvm_test(
+    name = "relay_ceiling_c1_test",
+    size = "small",
+    srcs = ["RelayCeilingTest.kt"],
+    jvm_flags = [
+        "-Xbatch",
+        "-XX:TieredStopAtLevel=3",
+    ],
+    test_class = "com.geekinasuit.agency.nostr.RelayCeilingTest",
+    deps = [
+        ":fake_relay",
+        ":nostr",
+        ":relay",
+        "@maven//:junit_junit",
+    ],
+)
+
 # The subscription transport (step 3b-2): subscribe()/closeSubscription() framing and round-trip, and
 # the A4-3 hostile-relay matrix (withheld, reordered, delayed, replayed) proving the transport is a
 # faithful pipe. Native-free like relay_connection_test — the events it delivers are structural

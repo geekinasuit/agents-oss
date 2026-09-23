@@ -229,8 +229,8 @@ class RelayConnectionTest {
       // One level past MAX_JSON_DEPTH, but tiny in bytes: the size cap cannot catch this, so the
       // depth guard is what rejects it — before the parser runs. The frame is genuinely over-deep
       // (its nesting is MAX_JSON_DEPTH + 1), which is exactly the threat the guard exists for; the
-      // separate, load-bearing fact — that a frame AT MAX_JSON_DEPTH parses safely — is what the
-      // ceiling-depth test below proves.
+      // separate, load-bearing fact — that a frame AT MAX_JSON_DEPTH parses safely — is what
+      // [RelayCeilingTest] checks.
       val deep = "[".repeat(RelayConnection.MAX_JSON_DEPTH + 1) + "]".repeat(RelayConnection.MAX_JSON_DEPTH + 1)
       relay.serve { session ->
         try {
@@ -244,60 +244,6 @@ class RelayConnectionTest {
         waitUntil(5_000) { conn.hasFailed() },
       )
       assertTrue(conn.failureReason()!!.contains("depth"))
-      conn.close()
-    }
-  }
-
-  @Test
-  fun `a message nested to the depth ceiling is parsed safely on the listener thread`() {
-    FakeRelay().use { relay ->
-      // Checks that MAX_JSON_DEPTH sits BELOW the parser's StackOverflow floor for ARRAY nesting on
-      // the actual listener thread, on every CI run rather than in a one-off measurement that can
-      // rot. It checks that only in the JIT state the parse happens to run in
-      // ([RelayConnection.MAX_JSON_DEPTH] says what the ceiling cells cover, and what they do not).
-      // A frame nested EXACTLY MAX_JSON_DEPTH deep passes the guard (which breaches only ABOVE the
-      // ceiling) and reaches kotlinx's recursive parser on the JDK WebSocket's own executor
-      // thread — the very thread the guard protects. If that parse overflowed, the JDK routes the
-      // Error to onError, the connection fails, and the trailing NOTICE never arrives; the NOTICE
-      // arriving is the evidence that the ceiling-depth parse survived on that thread. (The deep
-      // frame itself parses to a nested array whose first element is not a string tag, so
-      // parseRelayMessage returns null and it is dropped — no breach.)
-      val atCeiling =
-        "[".repeat(RelayConnection.MAX_JSON_DEPTH) + "]".repeat(RelayConnection.MAX_JSON_DEPTH)
-      relay.serve { session ->
-        session.sendText(atCeiling)
-        session.sendText("[\"NOTICE\",\"alive\"]")
-      }
-      val conn = RelayConnection(config(relay.url))
-      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
-      assertEquals(RelayMessage.Notice("alive"), conn.receive(Duration.ofSeconds(3)))
-      assertTrue("connection must survive a ceiling-depth parse on the listener thread", !conn.hasFailed())
-      conn.close()
-    }
-  }
-
-  @Test
-  fun `an object nested to the depth ceiling is parsed safely on the listener thread`() {
-    FakeRelay().use { relay ->
-      // Companion to the array-ceiling cell above: the guard counts `{` and `[` identically, so it
-      // also admits a frame nested EXACTLY MAX_JSON_DEPTH deep in OBJECTS. This cell checks that
-      // boundary: a guard that refused at the ceiling would breach, and the trailing NOTICE would
-      // never arrive. It is not a stack-margin check. kotlinx keeps only about the first 200 object
-      // levels on the call stack and reads deeper ones on the heap (the KDoc on
-      // jsonMayNestDeeperThan says which nesting stays on the stack), so this frame puts about 200
-      // levels on the listener thread's stack, not MAX_JSON_DEPTH. (The deep object parses to a
-      // JsonObject, not the JSON array a relay message is, so parseRelayMessage returns null and it
-      // is dropped — no breach.)
-      val atCeiling =
-        "{\"a\":".repeat(RelayConnection.MAX_JSON_DEPTH) + "0" + "}".repeat(RelayConnection.MAX_JSON_DEPTH)
-      relay.serve { session ->
-        session.sendText(atCeiling)
-        session.sendText("[\"NOTICE\",\"alive\"]")
-      }
-      val conn = RelayConnection(config(relay.url))
-      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
-      assertEquals(RelayMessage.Notice("alive"), conn.receive(Duration.ofSeconds(3)))
-      assertTrue("connection must survive a ceiling-depth object parse on the listener thread", !conn.hasFailed())
       conn.close()
     }
   }
