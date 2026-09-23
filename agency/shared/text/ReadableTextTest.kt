@@ -30,6 +30,7 @@ class ReadableTextTest {
         "a no-break space" to text(0x00A0),
         "an ideographic space" to text(0x3000),
         "a line separator" to text(0x2028),
+        "a paragraph separator" to text(0x2029),
       )
     )
   }
@@ -65,6 +66,7 @@ class ReadableTextTest {
         "variation selector 17, outside the Basic Multilingual Plane" to text(0xE0100),
         "a combining grapheme joiner" to text(0x034F),
         "a combining enclosing circle" to text(0x20DD),
+        "a spacing combining mark, a Devanagari vowel sign" to text(0x093E),
       )
     )
   }
