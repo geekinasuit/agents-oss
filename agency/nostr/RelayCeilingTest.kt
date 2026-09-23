@@ -9,22 +9,26 @@ import org.junit.Test
 /**
  * The DEPTH bound's margin: a frame nested exactly [RelayConnection.MAX_JSON_DEPTH] deep, which the
  * depth check admits, parses on the listener thread without overflowing that thread's stack. The
- * JDK invokes the listener on a thread of its choosing, one of the client's executor threads or a
- * worker of the common ForkJoinPool, and with the default client both get the JVM's default thread
- * stack. Each cell sends such a frame and then a NOTICE on one connection. A parse that overflowed
- * would reach the listener's onError and fail the connection, and the NOTICE would never arrive, so
- * the NOTICE arriving is the evidence that the ceiling-depth parse survived on that thread. None of
- * these frames is a relay message, so each parses to null and is dropped, with no breach.
+ * JDK invokes the listener on a thread of its choosing: one of the client's executor threads, or a
+ * thread of `CompletableFuture`'s default executor, which is a worker of the common ForkJoinPool,
+ * or a new thread per task when that pool's parallelism is below 2. With the default client, all
+ * of them get the JVM's default thread stack. Each cell sends such a frame and then a NOTICE on one
+ * connection. A parse that overflowed would reach the listener's onError and fail the connection,
+ * and the NOTICE would never arrive, so the NOTICE arriving is the evidence that the ceiling-depth
+ * parse survived on that thread. None of these frames is a relay message, so each parses to null
+ * and is dropped, with no breach.
  *
  * How much stack the parser needs per level depends on the JIT state it runs in, so the build runs
- * this class under two targets, each pinning one state: interpreted, and compiled by C1 with
- * profiling (tier 3). Those are the two states in which the parser was measured to need the most
- * stack per level. [warmUp] parses every frame the cells send before any cell runs, so that under
- * the compiled target the listener's parses run compiled, rather than whenever the compiler catches
- * up.
+ * this class under three targets, each pinning one state: interpreted, the parser's state until
+ * the JIT compiles it; compiled by C1 with profiling (tier 3); and tier 3 with kotlinx's
+ * `JsonTreeReader.readArray` left interpreted, so that each array level calls between compiled and
+ * interpreted code. Of the states measured, all on aarch64, the last two need the most stack per
+ * level. [warmUp] parses each of the three nested frames before any cell runs, so that under the
+ * compiled targets the listener's parses of them run compiled, rather than whenever the compiler
+ * catches up.
  *
  * So the cells fail once a change lowers the parser's overflow depth below the ceiling on the
- * default thread stack of the platform the build runs on, in either state.
+ * default thread stack of the platform the build runs on, in any of these states.
  */
 class RelayCeilingTest {
   private val key = "0000000000000000000000000000000000000000000000000000000000000003"
@@ -93,11 +97,12 @@ class RelayCeilingTest {
     private fun objects(n: Int, value: String): String = "{\"a\":".repeat(n) + value + "}".repeat(n)
 
     /**
-     * Parses each frame the cells send [WARM_UPS] times, through the parse the listener runs, on a
-     * stack roomy enough that none can overflow. Under the compiled target this compiles the
-     * parser, and -Xbatch finishes each compile before the parse that triggered it goes on. Under
-     * the interpreted target it changes nothing. A warm-up that threw would rethrow here and fail
-     * the class before any cell runs.
+     * Parses each of the three nested frames [WARM_UPS] times, through the parse the listener runs,
+     * on a stack roomy enough that none can overflow. Under the compiled targets this compiles the
+     * methods the parser recurses through (all but `readArray` under the target that leaves that
+     * method interpreted), and -Xbatch finishes each compile before the parse that triggered it
+     * goes on. Under the interpreted target it changes nothing. A warm-up that threw would rethrow
+     * here and fail the class before any cell runs.
      */
     @BeforeClass
     @JvmStatic
