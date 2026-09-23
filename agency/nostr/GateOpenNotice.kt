@@ -147,9 +147,9 @@ const val GATE_OPEN_NOTICE_RUMOR_KIND = 14
  *
  * A reader can check the content against [GateOpenNotice.payloadDigest]: the lead's digest is the
  * SHA-256 of the artifact's bytes in lowercase hex, so hashing the content's UTF-8 bytes reproduces
- * it, but only when those are the bytes that were hashed. Text decoded from bytes that were not
- * valid UTF-8 does not encode back to them, so for such an artifact the check fails: it refuses an
- * honest gate, rather than passing a different artifact.
+ * it. That holds because the lead announces only an artifact whose bytes are valid UTF-8, which
+ * decodes to text that encodes back to exactly those bytes; it escalates any other artifact
+ * instead of announcing it.
  *
  * THE WRAP is what the relay stores and serves: kind [Nip59.GIFT_WRAP_KIND], signed by a single-use
  * key, with the one tag `["p", <recipient>]`. So the relay learns which key each notice is for (see
