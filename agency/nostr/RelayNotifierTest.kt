@@ -12,7 +12,9 @@ import org.junit.Test
  * recipients dedup to one publish, an empty set is refused fail-closed, a malformed lead key is
  * refused at construction, each recipient gets its own outcome (partial delivery is a liveness gap),
  * an oversize notice is NotEncodable for every recipient without publishing, all crypto completes
- * before any publish (the #45 phase separation), and a closed notifier fails its next notify closed.
+ * before any publish (the #45 phase separation), the gift-wrap timestamps (one notice time for the
+ * whole fan-out, each seal backdated by its own draw, within two days by default), and a closed
+ * notifier fails its next notify closed.
  */
 class RelayNotifierTest {
   private val leadSecret = "0000000000000000000000000000000000000000000000000000000000000001"
@@ -21,6 +23,7 @@ class RelayNotifierTest {
   private val recipCSecret = "0000000000000000000000000000000000000000000000000000000000000004"
   private val timeout = Duration.ofSeconds(3)
   private val notice = GateOpenNotice("gate-1", "digest", "nonce", "artifact")
+  private val noticeTime = 1_700_000_000L
 
   private fun key(secret: String) = RecipientKey.of(Bip340.xonlyPubkeyHex(secret))
 
@@ -119,20 +122,22 @@ class RelayNotifierTest {
   @Test
   fun surfaces_an_oversize_notice_as_not_encodable_for_every_recipient_without_publishing() {
     val recipients = linkedSetOf(key(recipASecret), key(recipBSecret), key(recipCSecret))
-    val huge = GateOpenNotice("gate-1", "digest", "nonce", "x".repeat(70_000))
+    // 50,000 bytes: within what one NIP-44 layer carries (65,535), over what a gift wrap carries.
+    val huge = GateOpenNotice("gate-1", "digest", "nonce", "x".repeat(50_000))
     val fake = FakePublisher()
 
     val report =
       RelayNotifier(SecretKeyHex.ofHexString(leadSecret), fake)
         .notifyGateOpen(huge, recipients, timeout)
 
-    // The size test is on the notice plaintext, identical for every recipient, so oversize is a
-    // notice-global outcome: all recipients NotEncodable, or none. A single recipient could not show
-    // this — the property is precisely that the outcome does not vary across the set.
+    // The size test is on the serialized rumor, which differs between recipients only in the key its
+    // `p` tag carries — always 64 hex characters — so oversize is a notice-global outcome: all
+    // recipients NotEncodable, or none. A single recipient could not show this — the property is
+    // precisely that the outcome does not vary across the set.
     assertEquals("every recipient has an outcome", 3, report.outcomes.size)
     for ((who, outcome) in report.outcomes) {
       assertTrue("$who is NotEncodable", outcome is NotifyOutcome.NotEncodable)
-      assertEquals(65535, (outcome as NotifyOutcome.NotEncodable).ceilingBytes)
+      assertEquals(Nip59.RUMOR_CEILING_BYTES, (outcome as NotifyOutcome.NotEncodable).ceilingBytes)
     }
     assertEquals("an unencodable notice is never published for anyone", 0, fake.published.size)
   }
@@ -155,12 +160,97 @@ class RelayNotifierTest {
       log.add("aux")
       "%064x".format(java.math.BigInteger.valueOf((++n).toLong()))
     }
+    val backdate = {
+      log.add("backdate")
+      60L
+    }
 
-    RelayNotifier(SecretKeyHex.ofHexString(leadSecret), fake, auxRandHex = auxRand)
+    RelayNotifier(
+        SecretKeyHex.ofHexString(leadSecret),
+        fake,
+        auxRandHex = auxRand,
+        sealBackdateSeconds = backdate,
+      )
       .notifyGateOpen(notice, linkedSetOf(a, b, c), timeout)
 
-    // All crypto (aux draws) precede all I/O (publishes): the timeout never charges signing (#45).
-    assertEquals(listOf("aux", "aux", "aux", "publish", "publish", "publish"), log)
+    // Each recipient draws two aux values (the seal's and the wrap's signatures) and one seal
+    // backdate, and every draw precedes all I/O: the timeout never charges signing (#45).
+    assertEquals("two aux draws per recipient", 6, log.count { it == "aux" })
+    assertEquals("one seal backdate per recipient", 3, log.count { it == "backdate" })
+    assertEquals("one publish per recipient", 3, log.count { it == "publish" })
+    assertTrue(
+      "every draw precedes the first publish: $log",
+      log.indexOfLast { it != "publish" } < log.indexOfFirst { it == "publish" },
+    )
     assertTrue("the timeout is passed straight to each publish", timeouts.all { it == timeout })
   }
+
+  @Test
+  fun dates_every_rumor_and_wrap_at_one_notice_time_and_backdates_each_seal_by_its_own_draw() {
+    val fake = FakePublisher()
+    var clockReads = 0
+    val clock = {
+      clockReads++
+      noticeTime
+    }
+    val backdates = ArrayDeque(listOf(10L, 20L))
+
+    RelayNotifier(
+        SecretKeyHex.ofHexString(leadSecret),
+        fake,
+        now = clock,
+        sealBackdateSeconds = { backdates.removeFirst() },
+      )
+      .notifyGateOpen(notice, linkedSetOf(key(recipASecret), key(recipBSecret)), timeout)
+
+    assertEquals("one notice time for the whole fan-out", 1, clockReads)
+    assertEquals(2, fake.published.size)
+    val (wrapA, wrapB) = fake.published
+    for ((wrap, secret) in listOf(wrapA to recipASecret, wrapB to recipBSecret)) {
+      assertEquals("the wrap carries the notice time", noticeTime, wrap.createdAt)
+      val rumor = Nip59.unwrap(hexToBytes(secret), wrap)
+      assertEquals("the rumor carries the notice time", noticeTime, rumor!!.createdAt)
+    }
+    val sealA = sealOf(wrapA, recipASecret)
+    val sealB = sealOf(wrapB, recipBSecret)
+    assertEquals("A's seal is backdated by the first draw", noticeTime - 10L, sealA.createdAt)
+    assertEquals("B's seal is backdated by the second draw", noticeTime - 20L, sealB.createdAt)
+  }
+
+  @Test
+  fun backdates_each_seal_by_default_to_within_two_days_in_the_past() {
+    val fake = FakePublisher()
+    val secrets = listOf(recipASecret, recipBSecret, recipCSecret)
+
+    val recipients = linkedSetOf(key(recipASecret), key(recipBSecret), key(recipCSecret))
+    RelayNotifier(SecretKeyHex.ofHexString(leadSecret), fake, now = { noticeTime })
+      .notifyGateOpen(notice, recipients, timeout)
+
+    assertEquals(3, fake.published.size)
+    val backdates =
+      fake.published.zip(secrets).map { (wrap, secret) ->
+        noticeTime - sealOf(wrap, secret).createdAt
+      }
+    val twoDays = 2L * 24 * 60 * 60
+    assertTrue(
+      "every backdate lies in [0, two days): $backdates",
+      backdates.all { it in 0L until twoDays },
+    )
+    // Three uniform draws over 172,800 seconds are all zero with probability about 2^-52.
+    assertTrue("the default does backdate: $backdates", backdates.any { it > 0L })
+  }
+
+  /** The seal inside [wrap], opened by hand with [recipientSecret]: [Nip59.unwrap] returns only the
+   * rumor. */
+  private fun sealOf(wrap: NostrEvent, recipientSecret: String): NostrEvent {
+    val conversationKey = Nip44.conversationKey(hexToBytes(recipientSecret), hexToBytes(wrap.pubkey))
+    return parseEvent(Nip44.decrypt(wrap.content, conversationKey)!!)!!
+  }
+
+  /** Local hex decoder — the module's `Hex` is internal, and a test target links `:nostr` as a dep,
+   * not `associates`, so it cannot reach it. */
+  private fun hexToBytes(s: String): ByteArray =
+    ByteArray(s.length / 2) {
+      ((s[it * 2].digitToInt(16) shl 4) or s[it * 2 + 1].digitToInt(16)).toByte()
+    }
 }

@@ -80,7 +80,8 @@ sealed interface GiftWrapEncoding {
  * TIMESTAMPS are caller-supplied and never read as a clock (A4-3). NIP-59 suggests backdating both
  * the seal's and the wrap's `created_at` by a random amount to blur timing; that policy is the
  * caller's. The seal's timestamp travels encrypted, so no relay ever checks it; the wrap's is public,
- * and a relay that bounds clock drift on ingest rejects a wrap dated too far from its own clock.
+ * and a relay may refuse an event dated earlier than a lower limit it sets (NIP-11 advertises it as
+ * `limitation.created_at_lower_limit`), so a backdated wrap can be refused where a seal cannot.
  */
 object Nip59 {
   /** The seal's kind (NIP-59). */

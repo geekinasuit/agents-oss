@@ -21,16 +21,19 @@ fun interface EventPublisher {
  * and partial delivery to some custodians is a LIVENESS gap (A4-3's posture), never a quorum
  * failure: the release decision is the fold's, and it does not depend on who received a notice.
  *
- * A cost of that pairwise shape: one gate-open publishes N events from the lead's key in a burst,
- * so the relay learns the custodian-set CARDINALITY (how many custodians a gate has), even with no
- * recipient tag on any event. That disclosure is not among A4-6's ratified residuals — it is
- * inherent to per-recipient NIP-44 delivery, not a defect in this codec.
+ * What that pairwise shape shows the relay: one gate-open publishes N gift wraps in a burst, each
+ * signed by its own single-use key and `p`-tagged with one recipient's key. No event pubkey links a
+ * wrap to the lead, but every wrap arrives on the publishing connection, which names the lead if it
+ * authenticated (NIP-42). So the relay can learn which recipient keys the lead notifies, and how many
+ * per gate: the custodian set's CARDINALITY. Both are inherent to per-recipient gift-wrap delivery,
+ * not defects in this codec; [RecipientKey] says which key a deployment lists, so that what the relay
+ * learns is a notification key rather than an approval identity.
  *
  * Mechanism, not policy — WHICH custodians and WHICH relay live in coach (§REPO_SEAM).
  */
 interface Notifier {
   /**
-   * Encrypt [notice] to each of [recipients] and publish. [timeout] bounds EACH publish's socket
+   * Gift-wrap [notice] to each of [recipients] and publish. [timeout] bounds EACH publish's socket
    * I/O only — see [RelayNotifier] for why the encryption cost sits outside it. Returns a
    * per-recipient report; throws only for the caller bug of an empty recipient set (a gate opened
    * with nobody to tell).
@@ -59,12 +62,13 @@ sealed interface NotifyOutcome {
   data class Failed(val detail: String) : NotifyOutcome
 
   /**
-   * The serialized notice was too large to encrypt inline ([plaintextBytes] over [ceilingBytes]);
-   * nothing was published. The size test is on the notice plaintext, which is identical for every
-   * recipient (a recipient's key changes the ciphertext's bytes, never its length), so this is a
-   * notice-GLOBAL outcome: either every recipient's entry is NotEncodable, or none is. Surfaced as a
-   * typed per-recipient outcome rather than thrown, so an oversize notice is a liveness gap the
-   * caller reads off the report, not an exception escaping the codec.
+   * The notice was too large to wrap inline: its serialized rumor is [plaintextBytes], over
+   * [ceilingBytes]. Nothing was published. The rumor differs between recipients only in the key its
+   * `p` tag carries, always 64 hex characters, and every recipient's rumor carries the fan-out's one
+   * notice time, so its size is the same for all of them. That makes this a notice-GLOBAL outcome:
+   * either every recipient's entry is NotEncodable, or none is. Surfaced as a typed per-recipient
+   * outcome rather than thrown, so an oversize notice is a liveness gap the caller reads off the
+   * report, not an exception escaping the codec.
    */
   data class NotEncodable(val plaintextBytes: Int, val ceilingBytes: Int) : NotifyOutcome
 }
@@ -72,9 +76,10 @@ sealed interface NotifyOutcome {
 /**
  * The relay-backed [Notifier]. Two PHASES, deliberately separated:
  *
- *   1. CRYPTO, with NO deadline: every recipient's conversation key, encryption, and event
- *      signature are computed up front. This is where the cost lives — a point multiplication and a
- *      fresh BIP-340 signature per recipient — and it is charged against NO timeout.
+ *   1. CRYPTO, with NO deadline: every recipient's gift wrap is built up front. This is where the
+ *      cost lives — per recipient, two key agreements, two encryptions, and two BIP-340 signatures
+ *      (the lead's on the seal, a single-use key's on the wrap), plus drawing that single-use key —
+ *      and it is charged against NO timeout.
  *   2. I/O, where [timeout] bounds only the socket: each encoded event is published, and the
  *      timeout it is given covers only that publish's send + OK-await.
  *
@@ -99,6 +104,11 @@ sealed interface NotifyOutcome {
  * would throw from inside the eager per-recipient crypto phase and sink delivery to EVERY custodian,
  * not just fail one call.
  *
+ * One gate-open has one notice time: [now] is read once per [notifyGateOpen], and every recipient's
+ * rumor and wrap carry it. Each seal is dated that time minus its own [sealBackdateSeconds] draw —
+ * [encodeGateOpenNotice] says why only the seal is backdated. Each recipient also draws two aux
+ * values from [auxRandHex], one per signature. All of these draws are phase-1 work.
+ *
  * Publishes SEQUENTIALLY. For 2a.4's recipient sets (1-of-1, a few custodians at most) that is
  * simplest and correct; the crypto phase is already isolated, so concurrency, if ever wanted, is a
  * change to phase 2 alone.
@@ -108,6 +118,7 @@ class RelayNotifier(
   private val publisher: EventPublisher,
   private val now: () -> Long = { Instant.now().epochSecond },
   private val auxRandHex: () -> String = ::freshNotifierAuxRandHex,
+  private val sealBackdateSeconds: () -> Long = ::freshSealBackdateSeconds,
 ) : Notifier {
   init {
     // Refuse a malformed lead key here, at the config boundary. Left unchecked it would reach the
@@ -131,14 +142,23 @@ class RelayNotifier(
       "a gate-open notice needs at least one recipient — a gate opened with nobody to notify"
     }
     // Phase 1 — crypto, off the deadline: encode EVERY recipient before any publish. associateWith
-    // is eager, so all conversation keys, encryptions, and signatures complete here, in the set's
+    // is eager, so all key agreements, encryptions, and signatures complete here, in the set's
     // iteration order, before phase 2 touches the wire. The held key is decoded to bytes per recipient
     // (useKeyBytes zeroes each transient copy on the way out) and the HELD holder survives the whole
     // fan-out — it is cleared only by close(), never per notice, so recipient N+1 still signs after N.
+    val createdAt = now()
     val encodings: Map<RecipientKey, NoticeEncoding> =
       recipients.associateWith { recipient ->
         leadSecretKey.useKeyBytes { keyBytes ->
-          encodeGateOpenNotice(keyBytes, recipient, notice, now(), auxRandHex())
+          encodeGateOpenNotice(
+            leadKeyBytes = keyBytes,
+            recipient = recipient,
+            notice = notice,
+            createdAt = createdAt,
+            sealCreatedAt = createdAt - sealBackdateSeconds(),
+            sealAuxRandHex = auxRandHex(),
+            wrapAuxRandHex = auxRandHex(),
+          )
         }
       }
     // Phase 2 — I/O: publish each encoded event; [timeout] bounds only this socket step.
@@ -184,3 +204,10 @@ private fun freshNotifierAuxRandHex(): String {
   notifierSecureRandom.nextBytes(bytes)
   return bytes.joinToString("") { "%02x".format(it) }
 }
+
+/** How far back a seal may be dated: NIP-17's "up to two days in the past". */
+private const val SEAL_BACKDATE_WINDOW_SECONDS = 2 * 24 * 60 * 60
+
+/** A fresh seal backdate in seconds, uniform over [0, two days). Drawn once per wrap, in phase 1. */
+private fun freshSealBackdateSeconds(): Long =
+  notifierSecureRandom.nextInt(SEAL_BACKDATE_WINDOW_SECONDS).toLong()
