@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.shared.auth
 
+import com.geekinasuit.agency.shared.json.jsonMayNestDeeperThan
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -11,11 +12,12 @@ import kotlinx.serialization.json.JsonPrimitive
  * committed identity from it.
  *
  * Substrate-neutral like the rest of this module — no transport, relay, or event-format
- * concept appears — and dependent only on kotlinx-serialization (the BUILD file states the
- * layering), so the canonical form is a JSON array and nothing here reaches for a hash or a
- * curve. The actual signature check is the substrate adapter's business, wired behind
- * [ApprovalVerifier]; the fold consumes the interface, so it stays testable with a
- * deterministic verifier and free of a crypto dependency until the real adapter lands.
+ * concept appears — and dependent only on kotlinx-serialization and the shared JSON nesting
+ * bound (the BUILD file states the layering), so the canonical form is a JSON array and
+ * nothing here reaches for a hash or a curve. The actual signature check is the substrate
+ * adapter's business, wired behind [ApprovalVerifier]; the fold consumes the interface, so it
+ * stays testable with a deterministic verifier and free of a crypto dependency until the real
+ * adapter lands.
  */
 fun interface ApprovalVerifier {
   /**
@@ -96,8 +98,15 @@ fun committedPreimage(
  * treats a preimage it cannot parse as unverifiable, never as a pass. Total and
  * deterministic: it never throws, so a hostile preimage folds to "unverified", not a boot
  * crash.
+ *
+ * Safe on untrusted text, which a preimage is until a signature over it verifies — and a
+ * caller may parse before it verifies. A preimage that may nest deeper than the committed
+ * shape (one flat array) is refused before the parse: the parser recurses once per level,
+ * and deep enough nesting would overflow the stack with an Error, which the parse's
+ * `catch (Exception)` does not see.
  */
 fun parseCommitted(preimage: String): CommittedApproval? {
+  if (jsonMayNestDeeperThan(preimage, COMMITTED_DEPTH)) return null
   val arr =
     try {
       CANONICAL.parseToJsonElement(preimage) as? JsonArray ?: return null
@@ -115,3 +124,6 @@ fun parseCommitted(preimage: String): CommittedApproval? {
     nonce = fields[3],
   )
 }
+
+/** How deep a [committedPreimage] nests: one flat array of strings. */
+private const val COMMITTED_DEPTH = 1

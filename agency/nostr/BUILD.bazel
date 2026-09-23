@@ -34,6 +34,8 @@ kt_jvm_library(
     visibility = ["//visibility:public"],
     deps = [
         "//agency/shared/auth",
+        # The nesting bound Nip59 runs on decrypted plaintext before parsing it.
+        "//agency/shared/json",
         "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jvm",
         # The wire OBJECT is parsed with a vetted JSON library (hand-rolling a parser for hostile
         # relay input would be the liability); the id-preimage in NostrEvent.kt stays hand-rolled.
@@ -139,6 +141,7 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.nostr.Nip59Test",
     runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
     deps = [
+        "//agency/shared/json:small_stack",
         "@maven//:junit_junit",
     ],
 )
@@ -177,12 +180,12 @@ kt_jvm_test(
 )
 
 # The relay TRANSPORT (step 3b): the socket that carries the wire format above. Kept out of :nostr
-# so the codec stays pure — this is the target that dials. It depends ONLY on :nostr's public
-# String-based API (it bounds the raw text's JSON nesting with jsonMayNestDeeperThan and hands the
-# text to parseRelayMessage), so it carries NO JSON dependency of its own; and it is built on the
-# JDK's java.net.http.WebSocket, so it adds no @maven dependency at all. The lead key rides in as
-# configuration — the -jni native is a runtime dep of the CONSUMING test that signs, not of this
-# library.
+# so the codec stays pure — this is the target that dials. It depends only on :nostr's public
+# String-based API and the dependency-free nesting bound (it bounds the raw text's JSON nesting with
+# jsonMayNestDeeperThan and hands the text to parseRelayMessage), so it carries NO JSON library of
+# its own; and it is built on the JDK's java.net.http.WebSocket, so it adds no @maven dependency at
+# all. The lead key rides in as configuration — the -jni native is a runtime dep of the CONSUMING
+# test that signs, not of this library.
 kt_jvm_library(
     name = "relay",
     srcs = [
@@ -197,7 +200,10 @@ kt_jvm_library(
         "SecretKeyHex.kt",
     ],
     visibility = ["//visibility:public"],
-    deps = [":nostr"],
+    deps = [
+        ":nostr",
+        "//agency/shared/json",
+    ],
 )
 
 # The fake relay test double: a raw-socket RFC-6455 SERVER (the JDK ships a WebSocket client but no

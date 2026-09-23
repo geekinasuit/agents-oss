@@ -24,6 +24,8 @@ kt_jvm_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        # The nesting bound parseCommitted runs on a preimage before parsing it.
+        "//agency/shared/json",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
@@ -62,6 +64,7 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.shared.auth.ApprovalVerificationTest",
     deps = [
         ":auth",
+        "//agency/shared/json:small_stack",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",

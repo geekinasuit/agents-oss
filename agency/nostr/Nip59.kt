@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.nostr
 
+import com.geekinasuit.agency.shared.json.jsonMayNestDeeperThan
 import java.security.SecureRandom
 
 /**
