@@ -44,6 +44,13 @@ import javax.crypto.spec.SecretKeySpec
  * operator; the operator's approval client (step 6) decrypts. A relay never sees a decryptable
  * key, and the fold's release decision does not depend on this codec at all — confidentiality
  * of the notice and authorization of the release are separate layers.
+ *
+ * KEY MATERIAL IS ZEROED once this codec is done with it: the shared point and its x coordinate
+ * once the conversation key is derived from them, and a message's derived keys, with the HKDF
+ * output they were cut from, once that message is encrypted or decrypted. The conversation key is
+ * the caller's to zero, since a caller may use one for many messages. The zeroing is best-effort
+ * hygiene, not a guarantee: the JVM may have copied an array before it is zeroed, and the JDK's
+ * HMAC and ChaCha20 keep internal copies of the keys they are given, which nothing here can reach.
  */
 object Nip44 {
     private const val VERSION: Byte = 2
@@ -75,10 +82,16 @@ object Nip44 {
         val compressed = ByteArray(33)
         compressed[0] = 0x02
         theirXOnlyPublicKey.copyInto(compressed, 1)
-        val point = secp.pubKeyTweakMul(secp.pubkeyParse(compressed), ourPrivateKey)
-        check(point.size == 65) { "expected an uncompressed point, got ${point.size} bytes" }
-        return point.copyOfRange(1, 33)
+        return xOfSharedPoint(secp.pubKeyTweakMul(secp.pubkeyParse(compressed), ourPrivateKey))
     }
+
+    /** The x coordinate of [point], an uncompressed shared point, which this zeroes: the point
+     * holds the x it yields. */
+    internal fun xOfSharedPoint(point: ByteArray): ByteArray =
+        point.zeroedAfter {
+            check(it.size == 65) { "expected an uncompressed point, got ${it.size} bytes" }
+            it.copyOfRange(1, 33)
+        }
 
     /**
      * The per-pair conversation key: HKDF-extract (HMAC with the fixed salt) over the shared
@@ -87,20 +100,45 @@ object Nip44 {
      * a bad one is a local error, not hostile traffic to fold closed.
      */
     fun conversationKey(ourPrivateKey: ByteArray, theirXOnlyPublicKey: ByteArray): ByteArray =
-        hmac(key = SALT, data = sharedPointX(ourPrivateKey, theirXOnlyPublicKey))
+        conversationKeyFromSharedX(sharedPointX(ourPrivateKey, theirXOnlyPublicKey))
+
+    /** The HKDF-extract over [sharedX], which this zeroes: the salt is public, so anyone holding
+     * the shared x re-derives the conversation key from it. */
+    internal fun conversationKeyFromSharedX(sharedX: ByteArray): ByteArray =
+        sharedX.zeroedAfter { hmac(key = SALT, data = it) }
 
     internal class MessageKeys(val chachaKey: ByteArray, val chachaNonce: ByteArray, val hmacKey: ByteArray)
 
-    /** HKDF-expand the conversation key to 76 bytes with [nonce] as info, split by the spec's
-     * offsets: ChaCha key [0,32), ChaCha nonce [32,44), HMAC key [44,76). */
-    internal fun messageKeys(conversationKey: ByteArray, nonce: ByteArray): MessageKeys {
-        val okm = hkdfExpand(prk = conversationKey, info = nonce, length = 76)
-        return MessageKeys(
-            chachaKey = okm.copyOfRange(0, 32),
-            chachaNonce = okm.copyOfRange(32, 44),
-            hmacKey = okm.copyOfRange(44, 76),
-        )
+    /**
+     * Runs [block] on the message keys for [nonce]: the conversation key HKDF-expanded to 76 bytes
+     * with [nonce] as info. Zeroes them once [block] returns or throws. [conversationKey] is the
+     * caller's and is left as it was, since a caller may use one for many messages.
+     */
+    internal fun <T> withMessageKeys(
+        conversationKey: ByteArray,
+        nonce: ByteArray,
+        block: (MessageKeys) -> T,
+    ): T {
+        val keys = splitMessageKeys(hkdfExpand(prk = conversationKey, info = nonce, length = 76))
+        try {
+            return block(keys)
+        } finally {
+            keys.chachaKey.fill(0)
+            keys.chachaNonce.fill(0)
+            keys.hmacKey.fill(0)
+        }
     }
+
+    /** Splits [okm] by the spec's offsets — ChaCha key [0,32), ChaCha nonce [32,44), HMAC key
+     * [44,76) — and zeroes it, since it holds the same bytes as the keys it yields. */
+    internal fun splitMessageKeys(okm: ByteArray): MessageKeys =
+        okm.zeroedAfter {
+            MessageKeys(
+                chachaKey = it.copyOfRange(0, 32),
+                chachaNonce = it.copyOfRange(32, 44),
+                hmacKey = it.copyOfRange(44, 76),
+            )
+        }
 
     /**
      * The spec's padding schedule: pad to a power-of-two-derived chunk so a payload's length
@@ -148,10 +186,11 @@ object Nip44 {
         padded[1] = (unpadded.size and 0xff).toByte()
         unpadded.copyInto(padded, 2)
 
-        val keys = messageKeys(conversationKey, nonce)
-        val ciphertext = chacha20(keys.chachaKey, keys.chachaNonce, padded)
-        val mac = hmac(key = keys.hmacKey, data = nonce + ciphertext)
-        return Base64.getEncoder().encodeToString(byteArrayOf(VERSION) + nonce + ciphertext + mac)
+        return withMessageKeys(conversationKey, nonce) { keys ->
+            val ciphertext = chacha20(keys.chachaKey, keys.chachaNonce, padded)
+            val mac = hmac(key = keys.hmacKey, data = nonce + ciphertext)
+            Base64.getEncoder().encodeToString(byteArrayOf(VERSION) + nonce + ciphertext + mac)
+        }
     }
 
     /**
@@ -183,24 +222,25 @@ object Nip44 {
         val ciphertext = raw.copyOfRange(33, raw.size - 32)
         val mac = raw.copyOfRange(raw.size - 32, raw.size)
 
-        val keys = messageKeys(conversationKey, nonce)
-        // Authenticate BEFORE decrypting, and compare in constant time. A MAC checked after the
-        // fact, or with an early-exit byte comparison, is the classic way this format is got
-        // wrong; MessageDigest.isEqual is the constant-time compare, and totality does not
-        // weaken it — the throw-vs-return timing is not the side channel, an early-exit compare
-        // would be.
-        val expected = hmac(key = keys.hmacKey, data = nonce + ciphertext)
-        require(MessageDigest.isEqual(expected, mac)) { "invalid MAC" }
+        return withMessageKeys(conversationKey, nonce) { keys ->
+            // Authenticate BEFORE decrypting, and compare in constant time. A MAC checked after the
+            // fact, or with an early-exit byte comparison, is the classic way this format is got
+            // wrong; MessageDigest.isEqual is the constant-time compare, and totality does not
+            // weaken it — the throw-vs-return timing is not the side channel, an early-exit compare
+            // would be.
+            val expected = hmac(key = keys.hmacKey, data = nonce + ciphertext)
+            require(MessageDigest.isEqual(expected, mac)) { "invalid MAC" }
 
-        val padded = chacha20(keys.chachaKey, keys.chachaNonce, ciphertext)
-        val declared = ((padded[0].toInt() and 0xff) shl 8) or (padded[1].toInt() and 0xff)
-        require(declared > 0 && 2 + declared <= padded.size) { "invalid padding: declared $declared" }
-        // The declared length must be the one the padding rule would have produced, or a sender
-        // could hide bytes in the padding a reader never sees. This is also what bounds an
-        // accepted payload at the spec's 65,603-byte decoded ceiling: declared is 16-bit, so
-        // nothing longer than 2 + paddedLength(65535) can agree with any declared length.
-        require(padded.size == 2 + paddedLength(declared)) { "invalid padding length" }
-        return String(padded, 2, declared, Charsets.UTF_8)
+            val padded = chacha20(keys.chachaKey, keys.chachaNonce, ciphertext)
+            val declared = ((padded[0].toInt() and 0xff) shl 8) or (padded[1].toInt() and 0xff)
+            require(declared > 0 && 2 + declared <= padded.size) { "invalid padding: declared $declared" }
+            // The declared length must be the one the padding rule would have produced, or a sender
+            // could hide bytes in the padding a reader never sees. This is also what bounds an
+            // accepted payload at the spec's 65,603-byte decoded ceiling: declared is 16-bit, so
+            // nothing longer than 2 + paddedLength(65535) can agree with any declared length.
+            require(padded.size == 2 + paddedLength(declared)) { "invalid padding length" }
+            String(padded, 2, declared, Charsets.UTF_8)
+        }
     }
 
     private fun randomNonce(): ByteArray {
@@ -225,18 +265,36 @@ object Nip44 {
         return mac.doFinal(data)
     }
 
+    // Each block T(i) = HMAC(prk, T(i-1) || info || i) is fed to the next through the Mac rather
+    // than a concatenated array, and zeroed once copied out, so the output holds the only copy of
+    // the derived bytes that this code can reach.
     private fun hkdfExpand(prk: ByteArray, info: ByteArray, length: Int): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(prk, "HmacSHA256"))
         val out = ByteArray(length)
-        var previous = ByteArray(0)
+        var block = ByteArray(0)
         var written = 0
         var counter = 1
         while (written < length) {
-            previous = hmac(key = prk, data = previous + info + byteArrayOf(counter.toByte()))
-            val take = minOf(previous.size, length - written)
-            previous.copyInto(out, written, 0, take)
+            mac.update(block)
+            mac.update(info)
+            mac.update(counter.toByte())
+            block.fill(0)
+            block = mac.doFinal()
+            val take = minOf(block.size, length - written)
+            block.copyInto(out, written, 0, take)
             written += take
             counter++
         }
+        block.fill(0)
         return out
     }
 }
+
+/** Runs [block] on this key material, then zeroes it — whether [block] returns or throws. */
+internal inline fun <T> ByteArray.zeroedAfter(block: (ByteArray) -> T): T =
+    try {
+        block(this)
+    } finally {
+        fill(0)
+    }

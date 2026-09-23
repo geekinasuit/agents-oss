@@ -99,7 +99,8 @@ kt_jvm_test(
 # for its probe vectors, rather than the kt_jvm_test its neighbours use. The file is shared from
 # //agency/crypto (one copy, one published digest). associates= makes the test a friend of the
 # codec's module so it can reach the internal seams the vectors need — the nonce-injecting
-# encrypt, the intermediate key schedule, the padding rule, and the module's Hex codec.
+# encrypt, the intermediate key schedule, the padding rule, and the module's Hex codec — and the
+# helpers that zero key material, whose inputs a test can then inspect.
 kt_jvm_library(
     name = "nip44_test_lib",
     testonly = True,
