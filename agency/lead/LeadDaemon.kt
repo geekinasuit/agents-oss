@@ -694,16 +694,23 @@ class LeadDaemon(
     // leaves a gate nothing else mints for: no release can clear it, and no operator is told of
     // it. A gate a DENY_ALL daemon opened is left the same way once the daemon restarts under a
     // ceremony auth, since DENY_ALL mints no nonce. This mints for such a gate on the terms in
-    // force now: a ceremony auth, and a gate digest that is still the substrate's evidence for its
-    // kind. A gate issued a nonce on its current digest at any point gets no other. A voided nonce
-    // stays withdrawn, since a second one would re-authorize the payload the void withdrew. A spent
-    // nonce's gate was already released on that digest, which the release fold never allows twice,
-    // so a second nonce could never be spent and would only announce a decided gate again. A gate
-    // the journal records with a blank id gets none either: a nonce bound to a blank id would make
-    // every later fold of the journal fail.
-    if (leadAuth.hasApprovers) {
+    // force now: a ceremony auth, the gate id the gate-open derives for the current ticket, and a
+    // gate digest that is still the substrate's evidence for its kind. A gate issued a nonce on its
+    // current digest at any point gets no other. A voided nonce stays withdrawn, since a second one
+    // would re-authorize the payload the void withdrew. A spent nonce's gate was already released
+    // on that digest, which the release fold never allows twice, so a second nonce could never be
+    // spent and would only announce a decided gate again.
+    //
+    // So the id and digest a nonce is bound to here are never blank, which the fold refuses, and
+    // are ASCII: the id is a kind [evidenceDigest] knows and a ticket ref in the charset the claim
+    // accepts, and the digest is in the hex form the substrate records. The pass needs ASCII to
+    // converge. The journal does not hand every string back as written (a lone surrogate reads back
+    // as '?'), and a nonce whose id or digest reads back changed never matches its gate, so the
+    // gate would be minted for again on every pass.
+    val wellFormedTicket = lead.currentTicket?.takeIf { TICKET_REF_RE.matches(it) }
+    if (leadAuth.hasApprovers && wellFormedTicket != null) {
       for (gate in lead.openGates.values) {
-        if (gate.gateId.isBlank()) continue
+        if (gate.gateId != gateIdFor(gate.gateKind, wellFormedTicket)) continue
         val everIssued =
           lead.issuedNonces.values.any {
             it.gateId == gate.gateId && it.payloadDigest == gate.payloadDigest
@@ -864,14 +871,16 @@ class LeadDaemon(
   /** The digest the substrate recorded as the evidence a gate of [gateKind] binds to: the plan
    * artifact's for the plan gate, the commit manifest's for the commit gate, none for any other
    * kind. A gate opens only on this digest, and a gate-open's nonce is minted only while the
-   * gate's digest still equals it. A blank recorded digest counts as none: it is evidence of
-   * nothing, and a nonce minted on it would make every later fold of the journal fail. */
+   * gate's digest still equals it. A recorded digest counts only in the form the substrate records
+   * one, and any other counts as none: a nonce bound to a blank digest would make every later fold
+   * of the journal fail, and one bound to a digest the journal does not hand back as written would
+   * never match its gate. */
   private fun evidenceDigest(gateKind: String, lead: LeadState): String? =
     when (gateKind) {
       GateKinds.PLAN_APPROVAL -> lead.planArtifactSha
       GateKinds.COMMIT_APPROVAL -> lead.commitManifestDigest
       else -> null
-    }?.takeIf { it.isNotBlank() }
+    }?.takeIf { SHA256_HEX_RE.matches(it) }
 
   /** Journal a fresh single-use nonce bound to ([gateId], [payloadDigest]), the pair the release
    * fold checks it against, and return it. */
@@ -1583,6 +1592,9 @@ private const val MAX_ACCEPTED_MAIL_CHARS = 64_000
  * malformed ref from wedging the pipeline or polluting a namespace. */
 private val TICKET_REF_RE = Regex("[A-Za-z0-9._-]+")
 private const val MAX_TICKET_REF_LEN = 128
+
+/** The form the substrate records an evidence digest in: [sha256HexBytes]'s lowercase hex. */
+private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
 
 /** Deterministic fault seam: the fixture exits 42 at a named instruction boundary. */
 fun interface FaultInjector {

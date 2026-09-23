@@ -14,6 +14,8 @@ import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.JsonUnquotedLiteral
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -34,7 +36,8 @@ import org.junit.rules.TemporaryFolder
  * auth. The honest [ScriptedCognition] walk drives a real plan-gate-open, so these cells
  * exercise the write path end to end; the journal states the daemon does not produce on its
  * own (a voided nonce, a release, a re-open on a new or blank digest, a blank recorded digest, a
- * gate under a blank id) are hand-appended on top of it.
+ * gate under a blank id or another ticket's, a digest or claimed ticket ref holding a lone
+ * surrogate) are hand-appended on top of it.
  */
 class NonceMintTest {
 
@@ -387,6 +390,111 @@ class NonceMintTest {
     store.close()
   }
 
+  @Test
+  fun aGateOpenUnderAnotherTicketsIdGetsNoNonce() {
+    // The gate-open opens only the gate id it derives for the current ticket, so a gate open under
+    // another ticket's id reaches the fold only from the journal. The mint finishes a gate-open, so
+    // that gate gets no nonce, and no operator is asked to approve a gate nothing reads.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val first = f1.lead.issuedNonces.values.toList()
+    assertEquals("the gate-open minted one nonce", 1, first.size)
+    val otherGate = gateIdFor(GateKinds.PLAN_APPROVAL, "t2")
+    store.append(
+      LeadKinds.GATE_OPENED,
+      buildJsonObject {
+        put("gateId", otherGate)
+        put("gateKind", GateKinds.PLAN_APPROVAL)
+        put("payloadDigest", f1.lead.planArtifactSha!!)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    assertEquals("the current ticket is still t1", "t1", f.lead.currentTicket)
+    assertTrue("the fold opened the other ticket's gate", otherGate in f.lead.openGates)
+    assertEquals("no nonce is minted for it", first, f.lead.issuedNonces.values.toList())
+    store.close()
+  }
+
+  @Test
+  fun aGateReOpenedOnADigestHoldingALoneSurrogateGetsNoNonceAndTheWakeConverges() {
+    // The substrate records a digest as hex, so a digest holding a lone surrogate reaches the fold
+    // only from a journal that wrote the surrogate as a JSON escape. A nonce minted on it would be
+    // stored with '?' in the surrogate's place, never match the gate, and be minted again on every
+    // pass until the pass gives up. The digest is not in the recorded form, so it gets no nonce.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val first = planNonces(f1.lead)
+    assertEquals("the gate-open minted one nonce", 1, first.size)
+    store.append(
+      LeadKinds.PLAN_ARTIFACT_RECORDED,
+      buildJsonObject {
+        put("path", f1.lead.planArtifactPath!!)
+        put("sha256", escapedLoneSurrogateAfter("ab"))
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    store.append(
+      LeadKinds.GATE_OPENED,
+      buildJsonObject {
+        put("gateId", PLAN_GATE)
+        put("gateKind", GateKinds.PLAN_APPROVAL)
+        put("payloadDigest", escapedLoneSurrogateAfter("ab"))
+      },
+      ORIGIN_SUBSTRATE,
+    )
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    assertEquals(
+      "the gate is open on the digest with its surrogate",
+      "ab$LONE_SURROGATE",
+      f.lead.openGates[PLAN_GATE]?.payloadDigest,
+    )
+    assertEquals("no nonce is minted for it", first, planNonces(f.lead))
+    store.close()
+  }
+
+  @Test
+  fun aGateUnderAClaimHoldingALoneSurrogateGetsNoNonceAndTheWakeConverges() {
+    // The claim accepts only ticket refs in an ASCII charset, so a claimed ref holding a lone
+    // surrogate reaches the fold only from a journal that wrote the surrogate as a JSON escape, and
+    // so does a gate under the id derived from it. A nonce minted for that gate would be stored with
+    // '?' in the surrogate's place, never match the gate, and be minted again on every pass until
+    // the pass gives up. The ref is not one the claim accepts, so the gate gets no nonce.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val first = f1.lead.issuedNonces.values.toList()
+    assertEquals("the gate-open minted one nonce", 1, first.size)
+    store.append(
+      LeadKinds.TICKET_CLAIMED,
+      buildJsonObject { put("ticketRef", escapedLoneSurrogateAfter("t")) },
+      ORIGIN_SUBSTRATE,
+    )
+    store.append(
+      LeadKinds.GATE_OPENED,
+      buildJsonObject {
+        put("gateId", escapedLoneSurrogateAfter(gateIdFor(GateKinds.PLAN_APPROVAL, "t")))
+        put("gateKind", GateKinds.PLAN_APPROVAL)
+        put("payloadDigest", f1.lead.planArtifactSha!!)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val ticket = "t$LONE_SURROGATE"
+    assertEquals("the fold holds the claim with its surrogate", ticket, f.lead.currentTicket)
+    assertTrue(
+      "and a gate under the id derived from it",
+      gateIdFor(GateKinds.PLAN_APPROVAL, ticket) in f.lead.openGates,
+    )
+    assertEquals("no nonce is minted for it", first, f.lead.issuedNonces.values.toList())
+    store.close()
+  }
+
   /**
    * Runs a ceremony daemon until an injected crash lands between a [gateKind] gate's GATE_OPENED
    * and its NONCE_ISSUED, two sequential appends, and returns the state the journal folds to then.
@@ -412,6 +520,13 @@ class NonceMintTest {
   /** The nonces issued for the plan gate, in issue order. */
   private fun planNonces(lead: LeadState): List<IssuedNonce> =
     lead.issuedNonces.values.filter { it.gateId == PLAN_GATE }.sortedBy { it.issuedSeq }
+
+  /** A JSON string of [prefix] then a lone surrogate, written as the escape a JSON writer may use
+   * for one, which the fold reads back as the surrogate. A plain [String] value would carry the
+   * surrogate raw, and the journal stores a raw one as '?'. */
+  @OptIn(ExperimentalSerializationApi::class)
+  private fun escapedLoneSurrogateAfter(prefix: String) =
+    JsonUnquotedLiteral("\"" + prefix + LONE_SURROGATE_ESCAPE + "\"")
 
   private fun SqliteStore.planArtifactRecorded(path: String, digest: String) =
     append(
@@ -466,5 +581,11 @@ class NonceMintTest {
     val PLAN_GATE = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
     val COMMIT_GATE = gateIdFor(GateKinds.COMMIT_APPROVAL, "t1")
     val OTHER_DIGEST = "0".repeat(64)
+
+    /** A high surrogate with no low surrogate after it: not valid Unicode text on its own. */
+    val LONE_SURROGATE = Char(0xD800).toString()
+
+    /** The JSON escape for [LONE_SURROGATE]. */
+    val LONE_SURROGATE_ESCAPE = "\\" + "ud800"
   }
 }
