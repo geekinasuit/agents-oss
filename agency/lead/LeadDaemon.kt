@@ -13,6 +13,9 @@ import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.fold
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 import java.util.concurrent.LinkedBlockingQueue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -843,11 +846,12 @@ class LeadDaemon(
    * re-fire of the sink's per-recipient crypto.
    *
    * The artifact the operator reads is resolved from the gate's lead-owned bound copy first (a
-   * [payloadDigest] match verified). An UNRESOLVED artifact — the bound store disturbed after the
-   * gate opened — is a different failure from a sink fault: the gate is open and blocking and
-   * nothing reached the operator. It is escalated (so the stuck gate is visible, not a silent stall)
-   * and recorded failed WITHOUT calling the sink — a blank-artifact signal cannot build a notice —
-   * and the nonce is still marked, so the recovery arm does not re-read the bad file every pass.
+   * [payloadDigest] match verified). An UNRESOLVED artifact — no bound path in the journal, the
+   * bound store disturbed after the gate opened, or an intact artifact that is blank or not valid
+   * UTF-8 — is a different failure from a sink fault: the gate is open and blocking and nothing
+   * reached the operator. It is escalated (so the stuck gate is visible, not a silent stall) and
+   * recorded failed WITHOUT calling the sink — a blank-artifact signal cannot build a notice — and
+   * the nonce is still marked, so the recovery arm does not re-read the bad file every pass.
    */
   private fun announceAndMark(
     gateId: String,
@@ -871,8 +875,8 @@ class LeadDaemon(
           } catch (e: Exception) {
             // A sink fault is a delivery failure the transport layer owns (retry and alerting are
             // coach-side wiring, not the substrate's), so it is recorded, not escalated — a flapping
-            // relay must not become an escalation storm. Only the Unresolved arm escalates: an
-            // unreadable bound copy is a substrate-internal integrity fault nothing else surfaces.
+            // relay must not become an escalation storm. Only the Unresolved arm escalates: a bound
+            // copy that cannot be inlined is a fault nothing else surfaces.
             AnnounceOutcome.Failed("sink threw: ${e.message}")
           }
       }
@@ -900,7 +904,7 @@ class LeadDaemon(
     }
 
   /** The outcome of reading a gate's inlined artifact: the verified [Resolved.content] to announce,
-   * or an [Unresolved.reason] naming why the lead-owned bound copy could not be read — the reason
+   * or an [Unresolved.reason] naming why the lead-owned bound copy cannot be inlined. The reason
    * rides into the notify marker, which is the field an operator debugs a stuck gate from. */
   private sealed interface ArtifactResolution {
     data class Resolved(val content: String) : ArtifactResolution
@@ -917,9 +921,12 @@ class LeadDaemon(
    *
    * The bytes must hash to [payloadDigest] — the correctness property that the operator reads
    * EXACTLY what the nonce authorizes, not merely a check that the store is intact. A well-formed
-   * open gate always has a bound path (path and digest fold from one event), so a null path, a
-   * missing file, a read fault, a mismatch, or a blank artifact all mean the bound store was
-   * disturbed after the gate opened.
+   * open gate always has a bound path (path and digest fold from one event), so a null path means
+   * the journal is malformed, and a missing file, a read fault, or a mismatch means the bound store
+   * was disturbed after the gate opened. Two intact artifacts are refused as well, though each is
+   * exactly what the nonce authorizes: bytes that are not valid UTF-8, because the notice carries
+   * text and no decoding of them would show the operator exactly those bytes; and a blank artifact,
+   * because a notice with nothing to read cannot be built.
    */
   private fun resolveGateArtifact(
     gateKind: String,
@@ -944,7 +951,18 @@ class LeadDaemon(
         return ArtifactResolution.Unresolved("read-fault:${e.message}")
       }
     if (sha256HexBytes(bytes) != payloadDigest) return ArtifactResolution.Unresolved("digest-mismatch")
-    val content = String(bytes, Charsets.UTF_8)
+    // Decoded strictly: a lenient decode swaps malformed bytes for U+FFFD, showing the operator
+    // text the digest does not authorize, and showing distinct byte strings as the same text.
+    val content =
+      try {
+        Charsets.UTF_8.newDecoder()
+          .onMalformedInput(CodingErrorAction.REPORT)
+          .onUnmappableCharacter(CodingErrorAction.REPORT)
+          .decode(ByteBuffer.wrap(bytes))
+          .toString()
+      } catch (e: CharacterCodingException) {
+        return ArtifactResolution.Unresolved("artifact-not-utf8")
+      }
     if (content.isBlank()) return ArtifactResolution.Unresolved("empty-artifact")
     return ArtifactResolution.Resolved(content)
   }
