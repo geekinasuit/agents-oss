@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.nostr
 
+import com.geekinasuit.agency.shared.json.onSmallStack
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
@@ -371,16 +372,6 @@ class Nip59Test {
       .serialize()
       .toByteArray(Charsets.UTF_8)
       .size
-
-  /** Runs [block] on a thread with a deliberately small stack and returns its result, rethrowing on
-   * the test thread whatever it threw — an Error such as StackOverflowError included. */
-  private fun <T> onSmallStack(block: () -> T): T {
-    var outcome: Result<T>? = null
-    val thread = Thread(null, { outcome = runCatching(block) }, "nip59-small-stack", 256L * 1024)
-    thread.start()
-    thread.join()
-    return outcome!!.getOrThrow()
-  }
 
   private companion object {
     // The worked example in NIP-59 itself (github.com/nostr-protocol/nips, 59.md, retrieved

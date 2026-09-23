@@ -1,0 +1,40 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+# The JSON nesting bound: the check untrusted JSON text passes before kotlinx's tree parser sees it.
+# The parser recurses once per level, so text nested deep enough overflows the stack with an Error
+# that a total parse's catch does not see. Dependency-free and substrate-neutral, so the auth layer
+# uses it without depending on the nostr substrate; nostr depending on auth stays the only edge
+# between them.
+
+kt_jvm_library(
+    name = "json",
+    srcs = ["JsonNesting.kt"],
+    visibility = ["//visibility:public"],
+)
+
+# Test support for the bound's users: run a parse on a small stack, so a depth check that lets deep
+# nesting through fails its cell with a StackOverflowError instead of passing on a deeper stack.
+kt_jvm_library(
+    name = "small_stack",
+    testonly = True,
+    srcs = ["SmallStack.kt"],
+    visibility = [
+        "//agency/nostr:__pkg__",
+        "//agency/shared/auth:__pkg__",
+    ],
+)
+
+# The scan against the parser it guards: its structural rules by example, then property cells that
+# measure how deep kotlinx's reader actually nests, over random soup and random valid JSON. It parses
+# with kotlinx, so it carries the JSON dep the library does not.
+kt_jvm_test(
+    name = "json_nesting_test",
+    size = "small",
+    srcs = ["JsonNestingTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.json.JsonNestingTest",
+    deps = [
+        ":json",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)

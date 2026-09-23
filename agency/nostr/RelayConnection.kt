@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.nostr
 
+import com.geekinasuit.agency.shared.json.jsonMayNestDeeperThan
 import java.net.ConnectException
 import java.net.URI
 import java.net.UnknownHostException
@@ -682,7 +683,7 @@ class RelayConnection(
       // catch(Throwable) here would instead INTERCEPT that Error and try to run breach()/abort() on a
       // stack the overflow has just exhausted, trading a clean fail-closed for an attempted recovery
       // that cannot reliably complete. So there is no catch; correctness rests on the guard — its
-      // agreement with the parser checked in NostrWireTest, its margin by the ceiling-depth cell,
+      // agreement with the parser checked in JsonNestingTest, its margin by the ceiling-depth cell,
       // every build.
       val message = parseRelayMessage(text) ?: return
       // An OK relay-message is a publish/auth ACK, routed to the waiter that sent the matching event

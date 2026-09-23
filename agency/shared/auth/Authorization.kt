@@ -224,8 +224,9 @@ data class ApprovalEvidence(
  *
  * Byte-identical to the journal module's `Envelope.newSaltHex`, and deliberately not
  * shared with it: this module is substrate-neutral and depends only on
- * kotlinx-serialization (the BUILD file states the layering), so it re-types four lines
- * rather than importing a journal dep — or minting a shared module — to borrow them.
+ * kotlinx-serialization and the shared JSON nesting bound (the BUILD file states the
+ * layering), so it re-types four lines rather than importing a journal dep — or minting a
+ * shared module — to borrow them.
  */
 fun freshNonceHex(rng: SecureRandom = SecureRandom()): String {
   val bytes = ByteArray(32)

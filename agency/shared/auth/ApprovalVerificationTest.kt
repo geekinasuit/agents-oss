@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.shared.auth
 
+import com.geekinasuit.agency.shared.json.onSmallStack
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -70,6 +71,32 @@ class ApprovalVerificationTest {
     // Never throws — a hostile or truncated preimage folds to "unverified", not a boot crash.
     assertNull(parseCommitted("not json{"))
     assertNull(parseCommitted(""))
+  }
+
+  @Test
+  fun parseRefusesADeeplyNestedPreimageBeforeTheParserCanOverflow() {
+    // A preimage is untrusted text until a signature over it verifies, and a caller may parse it
+    // first. Parsing this one would overflow this small stack, so a null here means parseCommitted
+    // refused it before parsing.
+    assertNull(onSmallStack { parseCommitted("[".repeat(60_000)) })
+  }
+
+  @Test
+  fun parseRefusesAPreimageThatContinuesPastItsClosersBeforeTheParserCanOverflow() {
+    // kotlinx keeps reading an array after its `]` when a value follows, so the parser nests this
+    // preimage one level per `[1]` although its brackets never nest past one. Parsing it would
+    // overflow this small stack.
+    assertNull(onSmallStack { parseCommitted("[1]".repeat(20_000)) })
+  }
+
+  @Test
+  fun bracketsQuotesAndBackslashesInsideAFieldAreContentNotNesting() {
+    // The depth bound counts only structural brackets, so committed fields full of them still nest
+    // one level and parse back exactly; a plain bracket count would refuse them.
+    val committed = CommittedApproval("pk-[[[[", "g{{{1", "d\"]]}}", "n\\[\\\"[")
+    val preimage =
+      committedPreimage(committed.publicKey, committed.gateId, committed.payloadDigest, committed.nonce)
+    assertEquals(committed, parseCommitted(preimage))
   }
 
   @Test
