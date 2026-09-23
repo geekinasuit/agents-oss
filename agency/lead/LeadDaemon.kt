@@ -698,9 +698,12 @@ class LeadDaemon(
     // kind. A gate issued a nonce on its current digest at any point gets no other. A voided nonce
     // stays withdrawn, since a second one would re-authorize the payload the void withdrew. A spent
     // nonce's gate was already released on that digest, which the release fold never allows twice,
-    // so a second nonce could never be spent and would only announce a decided gate again.
+    // so a second nonce could never be spent and would only announce a decided gate again. A gate
+    // the journal records with a blank id gets none either: a nonce bound to a blank id would make
+    // every later fold of the journal fail.
     if (leadAuth.hasApprovers) {
       for (gate in lead.openGates.values) {
+        if (gate.gateId.isBlank()) continue
         val everIssued =
           lead.issuedNonces.values.any {
             it.gateId == gate.gateId && it.payloadDigest == gate.payloadDigest
@@ -861,8 +864,8 @@ class LeadDaemon(
   /** The digest the substrate recorded as the evidence a gate of [gateKind] binds to: the plan
    * artifact's for the plan gate, the commit manifest's for the commit gate, none for any other
    * kind. A gate opens only on this digest, and a gate-open's nonce is minted only while the
-   * gate's digest still equals it. A blank recorded digest counts as none, since a nonce minted
-   * on it would make every later fold of the journal fail. */
+   * gate's digest still equals it. A blank recorded digest counts as none: it is evidence of
+   * nothing, and a nonce minted on it would make every later fold of the journal fail. */
   private fun evidenceDigest(gateKind: String, lead: LeadState): String? =
     when (gateKind) {
       GateKinds.PLAN_APPROVAL -> lead.planArtifactSha

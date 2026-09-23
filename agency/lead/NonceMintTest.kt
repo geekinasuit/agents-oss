@@ -33,8 +33,8 @@ import org.junit.rules.TemporaryFolder
  * terms, and so is a gate a DENY_ALL daemon opened, once the daemon restarts under a ceremony
  * auth. The honest [ScriptedCognition] walk drives a real plan-gate-open, so these cells
  * exercise the write path end to end; the journal states the daemon does not produce on its
- * own (a voided nonce, a release, a re-open on a new or blank digest) are hand-appended on top
- * of it.
+ * own (a voided nonce, a release, a re-open on a new or blank digest, a blank recorded digest, a
+ * gate under a blank id) are hand-appended on top of it.
  */
 class NonceMintTest {
 
@@ -321,6 +321,69 @@ class NonceMintTest {
     assertEquals("the gate is open on the blank digest", "", f.lead.openGates[PLAN_GATE]?.payloadDigest)
     assertEquals("no nonce is minted for it", first, planNonces(f.lead))
     assertEquals("the journal still folds", first, planNonces(leadFold(store.readAll(), ceremonyAuth())))
+    store.close()
+  }
+
+  @Test
+  fun aGateOpenProposedOnABlankRecordedDigestIsRejectedAndTheJournalStillFolds() {
+    // The gate-open half of the blank rule. The honest walk proposes the recorded plan digest as
+    // it is, so a blank recorded digest reaches the gate-open itself, which must refuse it rather
+    // than open the gate and bind a nonce to the blank digest.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val crash = FaultInjector {
+      if (it == "after-plan-recorded") throw RuntimeException("crash after the plan is recorded")
+    }
+    val d1 = daemon(dir, store, ceremonyAuth(), faults = crash)
+    var threw = false
+    try {
+      d1.driveUntilQuiescent()
+    } catch (e: RuntimeException) {
+      threw = true
+    }
+    assertTrue("the injected crash fired after the plan was recorded", threw)
+    val beforeGateOpen = d1.refold().lead
+    assertFalse("the plan gate has not opened", PLAN_GATE in beforeGateOpen.openGates)
+    store.planArtifactRecorded(beforeGateOpen.planArtifactPath!!, "")
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    assertFalse("the plan gate stays closed", PLAN_GATE in f.lead.openGates)
+    assertTrue("no nonce is minted", f.lead.issuedNonces.isEmpty())
+    assertTrue(
+      "the gate-open is rejected with an escalation",
+      f.lead.escalations.any { it.startsWith("gate-open rejected for $PLAN_GATE") },
+    )
+    assertTrue("the journal still folds", leadFold(store.readAll(), ceremonyAuth()).issuedNonces.isEmpty())
+    store.close()
+  }
+
+  @Test
+  fun aGateOpenUnderABlankIdGetsNoNonceAndTheJournalStillFolds() {
+    // The daemon never builds a blank gate id, but the fold opens a gate under one. A nonce bound
+    // to a blank id would make every later fold of the journal fail, so that gate gets none.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val first = planNonces(f1.lead)
+    assertEquals("the gate-open minted one nonce", 1, first.size)
+    store.append(
+      LeadKinds.GATE_OPENED,
+      buildJsonObject {
+        put("gateId", "")
+        put("gateKind", GateKinds.PLAN_APPROVAL)
+        put("payloadDigest", f1.lead.planArtifactSha!!)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    assertTrue("the fold opened a gate under the blank id", "" in f.lead.openGates)
+    assertEquals("no nonce is minted for it", first, f.lead.issuedNonces.values.toList())
+    assertEquals(
+      "the journal still folds",
+      first,
+      leadFold(store.readAll(), ceremonyAuth()).issuedNonces.values.toList(),
+    )
     store.close()
   }
 
