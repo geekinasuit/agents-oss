@@ -36,6 +36,8 @@ kt_jvm_library(
         "//agency/shared/auth",
         # The nesting bound Nip59 runs on decrypted plaintext before parsing it.
         "//agency/shared/json",
+        # Whether a notice's artifact has something to read, the rule the lead holds too.
+        "//agency/shared/text",
         "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jvm",
         # The wire OBJECT is parsed with a vetted JSON library (hand-rolling a parser for hostile
         # relay input would be the liability); the id-preimage in NostrEvent.kt stays hand-rolled.

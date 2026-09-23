@@ -1,5 +1,7 @@
 package com.geekinasuit.agency.lead
 
+import com.geekinasuit.agency.shared.text.hasReadableText
+
 /**
  * The lead-facing seam for announcing that a ceremony gate opened with a single-use nonce, so an
  * operator can be told what to authorize. TRANSPORT-NEUTRAL by construction: no relay, recipient,
@@ -26,7 +28,8 @@ fun interface GateOpenSink {
  * The daemon reads [artifact] from the gate's lead-owned bound copy and verifies its bytes hash to
  * [payloadDigest] before constructing this signal, so the operator reads EXACTLY what the nonce
  * authorizes: the hash match is a correctness property of the notice, not storage hygiene. [artifact]
- * is never blank — a blank one cannot build a notice — enforced here so no sink is handed one.
+ * always has something to read ([hasReadableText]): a notice cannot be built from one that does not,
+ * so it is refused here and no sink is handed one.
  */
 data class GateOpenSignal(
   val gateId: String,
@@ -35,7 +38,7 @@ data class GateOpenSignal(
   val artifact: String,
 ) {
   init {
-    require(artifact.isNotBlank()) { "GateOpenSignal.artifact must not be blank" }
+    require(hasReadableText(artifact)) { "GateOpenSignal.artifact must have something to read" }
   }
 }
 

@@ -12,6 +12,7 @@ import com.geekinasuit.agency.shared.journal.JournalStore
 import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.fold
+import com.geekinasuit.agency.shared.text.hasReadableText
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
@@ -988,8 +989,10 @@ class LeadDaemon(
    * the journal is malformed, and a missing file, a read fault, or a mismatch means the bound store
    * was disturbed after the gate opened. Two intact artifacts are refused as well, though each is
    * exactly what the nonce authorizes: bytes that are not valid UTF-8, because the notice carries
-   * text and no decoding of them would show the operator exactly those bytes; and a blank artifact,
-   * because a notice with nothing to read cannot be built.
+   * text and no decoding of them would show the operator exactly those bytes; and an artifact with
+   * nothing to read ([hasReadableText]), because a notice with nothing to read cannot be built. A
+   * blank one is reported as `empty-artifact`, and any other with nothing to read, such as one made
+   * only of zero-width characters, as `unreadable-artifact`.
    */
   private fun resolveGateArtifact(
     gateKind: String,
@@ -1027,6 +1030,7 @@ class LeadDaemon(
         return ArtifactResolution.Unresolved("artifact-not-utf8")
       }
     if (content.isBlank()) return ArtifactResolution.Unresolved("empty-artifact")
+    if (!hasReadableText(content)) return ArtifactResolution.Unresolved("unreadable-artifact")
     return ArtifactResolution.Resolved(content)
   }
 
