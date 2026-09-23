@@ -63,7 +63,8 @@ class RelayCeilingTest {
   @Test
   fun `the exclusion check passes only the form it reads, naming a method its class declares`() {
     // Each argument must be selected from among others. HotSpot honours some that the check
-    // refuses, such as the `::` form, but the check cannot tell what those exclude.
+    // refuses, such as the `::` form, but the check cannot tell what those exclude. The `:=` form
+    // sets the list of commands instead of adding to it, so it can drop the exclusion in BUILD.
     val reader = "kotlinx/serialization/json/internal/JsonTreeReader"
     val dotted = "kotlinx.serialization.json.internal.JsonTreeReader"
     val cases =
@@ -76,6 +77,7 @@ class RelayCeilingTest {
         "-XX:CompileCommand=exclude,$dotted::readArray" to UNREADABLE_FORM,
         "-XX:CompileCommand=Exclude,$reader.readArray" to UNREADABLE_FORM,
         "-XX:CompileCommand=exclude $reader readArray" to UNREADABLE_FORM,
+        "-XX:CompileCommand:=exclude,$reader.readArray" to UNREADABLE_FORM,
         "-XX:CompileCommandFile=compile-commands" to UNREADABLE_FORM,
       )
     val loader = RelayCeilingTest::class.java.classLoader
@@ -158,7 +160,8 @@ class RelayCeilingTest {
      * every argument whose name starts with `-XX:CompileCommand`, and passes only
      * `-XX:CompileCommand=exclude,package/Class.method` naming a method the class declares. Any
      * other form fails, though HotSpot may honour it, because the check cannot tell what it
-     * excludes.
+     * excludes. The check does not read compiler directives: a directive, or the diagnostic
+     * `-XX:+CompilerDirectivesIgnoreCompileCommands`, can turn off an exclusion the check passes.
      */
     private fun checkCompileExclusions() {
       val loader = RelayCeilingTest::class.java.classLoader
@@ -174,7 +177,10 @@ class RelayCeilingTest {
     private fun compileCommandArguments(jvmArguments: List<String>): List<String> =
       jvmArguments.filter { it.startsWith("-XX:CompileCommand") }
 
-    /** Why [argument] may exclude nothing, or null if it names a method its class declares. */
+    /**
+     * Why [argument] may exclude nothing, or null if it names a method its class declares. An error
+     * from listing a loaded class's methods is rethrown: it does not show the method is missing.
+     */
     private fun exclusionProblem(argument: String, loader: ClassLoader): String? {
       val (classPath, methodName) =
         EXCLUSION.matchEntire(argument)?.destructured ?: return UNREADABLE_FORM
