@@ -110,7 +110,7 @@ object Nip59 {
 
   // The deepest any field of a NIP-01 event nests: the object, its tags array, one tag. Decrypted
   // plaintext that nests deeper cannot be a well-formed seal or rumor, so unwrap refuses it before
-  // the parser — which recurses once per level — can spend the stack on it.
+  // the parser can spend the stack on it (jsonMayNestDeeperThan says which nesting does).
   private const val MAX_EVENT_JSON_DEPTH = 3
 
   // NIP-01 spells a pubkey as 64 lowercase hex characters. Hex.decode also reads other spellings of
