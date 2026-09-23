@@ -30,9 +30,11 @@ import java.security.MessageDigest
  * worst moment, so the contract is asserted in the tests rather than left implicit.
  *
  * Total and fail-closed: a malformed key, signature, or an unparseable preimage folds to
- * `false`, never a throw — a verification that cannot run is not a pass. Wiring this verifier
- * into the daemon (retiring RejectingVerifier as the default) is step 5's job, not this module's;
- * shipping the verifier does not by itself open any gate.
+ * `false`, never a throw — a verification that cannot run is not a pass. So does a preimage
+ * holding an unpaired surrogate: it has no UTF-8 encoding, so no signature is over it, and a
+ * lenient encoder would hash `?` in its place, the preimage of a different string. Wiring this
+ * verifier into the daemon (retiring RejectingVerifier as the default) is step 5's job, not this
+ * module's; shipping the verifier does not by itself open any gate.
  */
 object Bip340ApprovalVerifier : ApprovalVerifier {
   private const val SCHEME_ID = "bip340"
@@ -45,8 +47,8 @@ object Bip340ApprovalVerifier : ApprovalVerifier {
   ): Boolean {
     if (schemeId != SCHEME_ID) return false
     return try {
-      val message =
-        MessageDigest.getInstance("SHA-256").digest(preimage.toByteArray(Charsets.UTF_8))
+      val bytes = utf8OrNull(preimage) ?: return false
+      val message = MessageDigest.getInstance("SHA-256").digest(bytes)
       Bip340.verifyBytes(Hex.decode(signature), message, Hex.decode(publicKey))
     } catch (_: Exception) {
       false

@@ -6,6 +6,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -220,6 +221,22 @@ class Nip44Test {
 
         val maximal = "a".repeat(65535)
         assertEquals("a maximal-length message round-trips", maximal, Nip44.decrypt(Nip44.encrypt(maximal, key), key))
+    }
+
+    @Test
+    fun `a plaintext holding an unpaired surrogate is refused, not encrypted as a question mark`() {
+        // An unpaired surrogate has no UTF-8 encoding. A lenient encoder would encrypt '?' in its
+        // place, and the recipient would decrypt a different string from the one the caller passed.
+        // The plaintext is ours, so this is a local bug and throws, as an empty plaintext does.
+        val key = Hex.decode(valid("get_conversation_key").getJSONObject(0).getString("conversation_key"))
+        for (lone in listOf(Char(0xD800), Char(0xDC00))) {
+            assertThrows("U+${lone.code.toString(16)}", IllegalArgumentException::class.java) {
+                Nip44.encrypt("a" + lone + "b", key)
+            }
+        }
+        val pair = "a" + String(Character.toChars(0x1F600)) + "b"
+        val roundTripped = Nip44.decrypt(Nip44.encrypt(pair, key), key)
+        assertEquals("control: a surrogate pair round-trips", pair, roundTripped)
     }
 
     @Test

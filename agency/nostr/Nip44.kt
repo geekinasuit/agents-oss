@@ -121,6 +121,9 @@ object Nip44 {
      * empty or longer than 65535 bytes — NIP-44 v2 frames the length in a 16-bit prefix, so 65535
      * is the format's hard ceiling, not a policy choice. A payload that would exceed it is not a
      * bigger message to this codec; it is an artifact to encrypt separately and reference (A4-6).
+     * It also throws if [plaintext] holds an unpaired surrogate: such a string has no UTF-8
+     * encoding, and a lenient encoder would encrypt `?` in its place, so the recipient would read
+     * a different string from the one passed here.
      */
     fun encrypt(plaintext: String, conversationKey: ByteArray): String =
         encryptWithNonce(plaintext, conversationKey, randomNonce())
@@ -134,7 +137,9 @@ object Nip44 {
     internal fun encryptWithNonce(plaintext: String, conversationKey: ByteArray, nonce: ByteArray): String {
         require(conversationKey.size == 32) { "conversation key must be 32 bytes" }
         require(nonce.size == 32) { "nonce must be 32 bytes" }
-        val unpadded = plaintext.toByteArray(Charsets.UTF_8)
+        val unpadded = requireNotNull(utf8OrNull(plaintext)) {
+            "plaintext holds an unpaired surrogate, which has no UTF-8 encoding"
+        }
         require(unpadded.isNotEmpty() && unpadded.size <= 65535) {
             "plaintext length out of range: ${unpadded.size} (must be 1..65535)"
         }
