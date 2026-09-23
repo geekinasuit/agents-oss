@@ -284,10 +284,10 @@ kt_jvm_test(
     ],
 )
 
-# Step 4 — the gate-open NOTICE codec (A4-6): encode a content-minimal notice as a lead-signed,
-# NIP-44-encrypted, regular-kind event addressed to one recipient. Signs and encrypts, so it needs
-# the native runtime-only, like the sign/verify test; it parses the decrypted plaintext with kotlinx
-# to assert the round-trip, so it carries the JSON dep as nostr_wire_test does.
+# Step 4 — the gate-open NOTICE codec (A4-6): gift-wrap a notice to one recipient (NIP-59) as a
+# lead-authored kind-14 rumor, and pin the rumor, wrap, and seal a recipient opens. Signs, encrypts,
+# and opens wraps with the real primitives, so it needs the native runtime-only, like the sign/verify
+# test. It reads every layer through :nostr's own public codec, so it needs no JSON dep.
 kt_jvm_test(
     name = "gate_open_notice_test",
     size = "small",
@@ -297,7 +297,6 @@ kt_jvm_test(
     deps = [
         ":nostr",
         "@maven//:junit_junit",
-        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
 )
 
@@ -321,7 +320,8 @@ kt_jvm_test(
 
 # Step 4 — the relay-backed notifier's fan-out over a recipient SET: dedup of case-variant keys,
 # fail-closed on an empty set, per-recipient outcomes (partial delivery = liveness gap), the oversize
-# refusal surfaced as NotEncodable, and the crypto-before-deadline phase order (#45). Tests through a
+# refusal surfaced as NotEncodable, the crypto-before-deadline phase order (#45), and the gift-wrap
+# timestamps (one notice time per fan-out, each seal backdated by its own draw). Tests through a
 # fake EventPublisher — no socket — but signs in the crypto phase, so it needs the native
 # runtime-only.
 kt_jvm_test(

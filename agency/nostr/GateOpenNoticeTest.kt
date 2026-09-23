@@ -1,9 +1,7 @@
 package com.geekinasuit.agency.nostr
 
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -11,90 +9,112 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The gate-open notice codec (A4-6). These cells sign and encrypt with the real BIP-340 / NIP-44
- * primitives (native runtime), and pin the slice's irreversible or security-bearing choices: the
- * event is lead-signed and regular-kinded, the notice round-trips to the recipient, an oversize
- * notice is a typed refusal (not a throw), no recipient tag leaks the custodian set, and
- * trial-decryption cleanly separates custodians — which is what makes dropping the `#p` tag safe.
+ * The gate-open notice codec (A4-6). These cells wrap and open with the real BIP-340, NIP-44, and
+ * NIP-59 primitives (native runtime), and pin the slice's cross-component and security-bearing
+ * choices: the rumor a recipient reads (its kind, author, content, and the exact tags a reader
+ * parses), the wrap a relay stores (a regular kind, a single-use signer, one `p` tag naming the
+ * recipient), the timestamps (the notice time on the rumor and the wrap, the caller's backdate on the
+ * seal), an oversize notice as a typed refusal at the gift-wrap ceiling, and one custodian's notice
+ * staying closed to another.
  */
 class GateOpenNoticeTest {
   private val leadSecret = "0000000000000000000000000000000000000000000000000000000000000001"
   private val recipASecret = "0000000000000000000000000000000000000000000000000000000000000002"
   private val recipBSecret = "0000000000000000000000000000000000000000000000000000000000000003"
-  private val aux = "0101010101010101010101010101010101010101010101010101010101010101"
+  private val sealAux = "0101010101010101010101010101010101010101010101010101010101010101"
+  private val wrapAux = "0202020202020202020202020202020202020202020202020202020202020202"
+  private val noticeTime = 1_700_000_000L
+  private val sealTime = noticeTime - 3_600L
 
-  private fun encoded(notice: GateOpenNotice, recipientSecret: String = recipASecret): NostrEvent {
-    val recipient = RecipientKey.of(Bip340.xonlyPubkeyHex(recipientSecret))
-    val encoding =
-      encodeGateOpenNotice(hexToBytes(leadSecret), recipient, notice, createdAt = 1000L, auxRandHex = aux)
-    assertTrue("expected an Encoded result", encoding is NoticeEncoding.Encoded)
+  private val leadPub = Bip340.xonlyPubkeyHex(leadSecret)
+  private val recipA = RecipientKey.of(Bip340.xonlyPubkeyHex(recipASecret))
+
+  private fun encode(notice: GateOpenNotice, recipient: RecipientKey = recipA): NoticeEncoding =
+    encodeGateOpenNotice(
+      leadKeyBytes = hexToBytes(leadSecret),
+      recipient = recipient,
+      notice = notice,
+      createdAt = noticeTime,
+      sealCreatedAt = sealTime,
+      sealAuxRandHex = sealAux,
+      wrapAuxRandHex = wrapAux,
+    )
+
+  private fun wrapped(notice: GateOpenNotice, recipient: RecipientKey = recipA): NostrEvent {
+    val encoding = encode(notice, recipient)
+    assertTrue("expected an Encoded result, was $encoding", encoding is NoticeEncoding.Encoded)
     return (encoding as NoticeEncoding.Encoded).event
   }
 
   @Test
-  fun encodes_a_lead_signed_event_the_recipient_can_decrypt() {
+  fun the_recipient_opens_a_lead_authored_kind_14_rumor_carrying_the_artifact() {
     val notice = GateOpenNotice("gate-1", "digest-abc", "nonce-xyz", "approve deploy of build 42")
-    val event = encoded(notice)
+    val rumor = Nip59.unwrap(hexToBytes(recipASecret), wrapped(notice))
 
-    assertEquals("signed by the lead", Bip340.xonlyPubkeyHex(leadSecret), event.pubkey)
-    assertTrue("the lead's transport signature must verify", event.verify())
-
-    // Operator side (step 6): the SAME conversation key derived from the recipient's own secret and
-    // the lead's pubkey (ECDH is symmetric), then decrypt.
-    val leadPub = Bip340.xonlyPubkeyHex(leadSecret)
-    val convKey = Nip44.conversationKey(hexToBytes(recipASecret), hexToBytes(leadPub))
-    val plaintext = Nip44.decrypt(event.content, convKey)
-    assertNotNull("the addressed recipient can decrypt", plaintext)
-
-    val obj = Json.parseToJsonElement(plaintext!!).jsonObject
-    assertEquals("gate-1", obj["gateId"]!!.jsonPrimitive.content)
-    assertEquals("digest-abc", obj["payloadDigest"]!!.jsonPrimitive.content)
-    assertEquals("nonce-xyz", obj["nonce"]!!.jsonPrimitive.content)
-    assertEquals("approve deploy of build 42", obj["artifact"]!!.jsonPrimitive.content)
+    assertNotNull("the addressed recipient opens the wrap", rumor)
+    assertEquals("NIP-17's chat-message kind", 14, GATE_OPEN_NOTICE_RUMOR_KIND)
+    assertEquals(GATE_OPEN_NOTICE_RUMOR_KIND, rumor!!.kind)
+    assertEquals("authored by the lead", leadPub, rumor.pubkey)
+    assertEquals("dated at the notice time", noticeTime, rumor.createdAt)
+    assertEquals("the content is the artifact, verbatim", "approve deploy of build 42", rumor.content)
   }
 
   @Test
-  fun refuses_an_oversize_notice_as_a_typed_result_not_a_throw() {
-    // > 65535 UTF-8 bytes in the artifact alone, before JSON overhead.
-    val notice = GateOpenNotice("gate-1", "digest", "nonce", "x".repeat(70_000))
-    val recipient = RecipientKey.of(Bip340.xonlyPubkeyHex(recipASecret))
-    val encoding = encodeGateOpenNotice(hexToBytes(leadSecret), recipient, notice, 1000L, aux)
+  fun the_rumor_carries_exactly_the_tags_a_reader_parses() {
+    val notice = GateOpenNotice("gate-1", "digest-abc", "nonce-xyz", "artifact")
+    val rumor = Nip59.unwrap(hexToBytes(recipASecret), wrapped(notice))!!
 
-    assertTrue("an oversize notice is a typed refusal", encoding is NoticeEncoding.TooLarge)
-    val tooLarge = encoding as NoticeEncoding.TooLarge
-    assertEquals("names NIP-44 v2's 16-bit length ceiling", 65535, tooLarge.ceilingBytes)
-    assertTrue("reports the actual over-ceiling size", tooLarge.plaintextBytes > 65535)
-  }
-
-  @Test
-  fun attaches_no_recipient_tag_so_the_relay_never_learns_the_custodian_set() {
-    val event = encoded(GateOpenNotice("gate-1", "d", "n", "a"))
-    assertTrue(
-      "A4-6's ratified residuals do not include recipient-set disclosure — no #p tag",
-      event.tags.isEmpty(),
+    assertEquals(
+      listOf(
+        listOf("p", recipA.hex),
+        listOf("subject", "Approval requested: gate gate-1"),
+        listOf("agency-gate-id", "gate-1"),
+        listOf("agency-payload-digest", "digest-abc"),
+        listOf("agency-nonce", "nonce-xyz"),
+      ),
+      rumor.tags,
     )
   }
 
   @Test
-  fun publishes_under_a_regular_stored_kind() {
-    assertTrue("regular (relay-stored) kinds are 1000..9999", GATE_OPEN_NOTICE_KIND in 1000..9999)
-    assertEquals(GATE_OPEN_NOTICE_KIND, encoded(GateOpenNotice("gate-1", "d", "n", "a")).kind)
+  fun the_relay_sees_a_regular_kind_gift_wrap_naming_only_its_recipient() {
+    val wrap = wrapped(GateOpenNotice("gate-1", "d", "n", "a"))
+
+    assertEquals(Nip59.GIFT_WRAP_KIND, wrap.kind)
+    assertTrue("regular (relay-stored) kinds are 1000..9999", wrap.kind in 1000..9999)
+    assertEquals("one tag, naming the recipient", listOf(listOf("p", recipA.hex)), wrap.tags)
+    assertNotEquals("signed by a single-use key, not the lead", leadPub, wrap.pubkey)
+    assertTrue("the wrap's signature verifies", wrap.verify())
   }
 
   @Test
-  fun a_notice_for_one_custodian_does_not_decrypt_for_another() {
-    val notice = GateOpenNotice("gate-1", "digest-abc", "nonce-xyz", "custodian-only artifact")
-    val event = encoded(notice, recipientSecret = recipASecret)
-    val leadPub = Bip340.xonlyPubkeyHex(leadSecret)
+  fun the_wrap_carries_the_notice_time_and_only_the_seal_is_backdated() {
+    val wrap = wrapped(GateOpenNotice("gate-1", "d", "n", "a"))
+    assertEquals("the wrap is dated at the notice time", noticeTime, wrap.createdAt)
 
-    // Custodian B trial-decrypts with its own (B, lead) key — folds to null, so B learns nothing and
-    // the relay needed no recipient tag to route.
-    val bKey = Nip44.conversationKey(hexToBytes(recipBSecret), hexToBytes(leadPub))
-    assertNull("a notice for A does not decrypt for B", Nip44.decrypt(event.content, bKey))
+    val seal = openWrapLayer(wrap, recipASecret)
+    assertEquals(Nip59.SEAL_KIND, seal.kind)
+    assertEquals("the seal is signed by the lead", leadPub, seal.pubkey)
+    assertEquals("the seal carries the caller's backdated time", sealTime, seal.createdAt)
+  }
 
-    // Custodian A trial-decrypts and reads it.
-    val aKey = Nip44.conversationKey(hexToBytes(recipASecret), hexToBytes(leadPub))
-    assertNotNull("the addressed custodian reads it", Nip44.decrypt(event.content, aKey))
+  @Test
+  fun refuses_an_oversize_notice_at_the_gift_wrap_ceiling_as_a_typed_result() {
+    // 50,000 bytes: within what one NIP-44 layer carries (65,535), over what a gift wrap carries.
+    val encoding = encode(GateOpenNotice("gate-1", "digest", "nonce", "x".repeat(50_000)))
+
+    assertTrue("an oversize notice is a typed refusal", encoding is NoticeEncoding.TooLarge)
+    val tooLarge = encoding as NoticeEncoding.TooLarge
+    assertEquals("names the gift wrap's ceiling", Nip59.RUMOR_CEILING_BYTES, tooLarge.ceilingBytes)
+    assertTrue("reports the whole rumor's size", tooLarge.plaintextBytes > 50_000)
+  }
+
+  @Test
+  fun a_notice_for_one_custodian_does_not_open_for_another() {
+    val wrap = wrapped(GateOpenNotice("gate-1", "digest-abc", "nonce-xyz", "custodian-only artifact"))
+
+    assertNull("a wrap for A does not open for B", Nip59.unwrap(hexToBytes(recipBSecret), wrap))
+    assertNotNull("the addressed custodian opens it", Nip59.unwrap(hexToBytes(recipASecret), wrap))
   }
 
   @Test
@@ -103,6 +123,15 @@ class GateOpenNoticeTest {
     // RecipientKey.of must refuse it here, at the config boundary, rather than let it abort the
     // fan-out's crypto phase downstream and sink delivery to every custodian.
     assertThrows(IllegalArgumentException::class.java) { RecipientKey.of("ff".repeat(32)) }
+  }
+
+  /** Opens the wrap's outer layer by hand, to read the seal inside: [Nip59.unwrap] returns only the
+   * rumor. */
+  private fun openWrapLayer(wrap: NostrEvent, recipientSecret: String): NostrEvent {
+    val conversationKey = Nip44.conversationKey(hexToBytes(recipientSecret), hexToBytes(wrap.pubkey))
+    val sealJson = Nip44.decrypt(wrap.content, conversationKey)
+    assertNotNull("the recipient decrypts the wrap layer", sealJson)
+    return parseEvent(sealJson!!)!!
   }
 
   /** Local hex decoder — the module's `Hex` is internal, and a test target links `:nostr` as a dep,

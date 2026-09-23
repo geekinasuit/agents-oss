@@ -35,13 +35,13 @@ class ListeningNeverAuthorizesTest {
       AllowList(listOf(Principal("operator", "authorizer", listOf(SchemeKey("bip340", authorPub)))))
     val quorum = oneOfOne("operator")
 
-    // A well-formed event of the notifier's OWN gate-open kind, whose CONTENT reads like a release
-    // directive — the sharpest carrier an attacker could replay inbound at the daemon.
+    // A well-formed event of the kind the notifier puts on the wire (a gift wrap), whose CONTENT reads
+    // like a release directive — the sharpest carrier an attacker could replay inbound at the daemon.
     val commandShaped =
       signEvent(
         secretKeyHex = authorSecret,
         createdAt = 1L,
-        kind = GATE_OPEN_NOTICE_KIND,
+        kind = Nip59.GIFT_WRAP_KIND,
         tags = emptyList(),
         content = """{"cmd":"release_gate","gateId":"gate-1"}""",
         auxRandHex = aux,
