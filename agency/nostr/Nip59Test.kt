@@ -218,6 +218,19 @@ class Nip59Test {
   }
 
   @Test
+  fun refuses_a_rumor_whose_question_mark_is_spelled_as_a_lone_surrogate() {
+    // A sender can spell a '?' in its rumor as the JSON escape for U+D800, which parses to a lone
+    // surrogate: a different string. A lenient UTF-8 encoder hashes that surrogate as '?', so the
+    // rumor's claimed id, computed over the '?', would still match. The honest spelling unwraps.
+    val honest = rumor(content = "a?b").serialize()
+    val respelled = honest.replace("a?b", "a" + "\\" + "ud800" + "b")
+    assertNotEquals(honest, respelled)
+    assertNotNull(unwrapForA(handWrap(handSeal(honest).serialize())))
+    val unwrapped = unwrapForA(handWrap(handSeal(respelled).serialize()))
+    assertNull("unwrapped, with content chars ${unwrapped?.content?.map { it.code }}", unwrapped)
+  }
+
+  @Test
   fun refuses_a_deeply_nested_seal_plaintext_before_the_parser_can_overflow() {
     // Anyone can address a wrap to the recipient, so the decrypted plaintext is hostile JSON that
     // no relay-frame bound ever saw (it crossed the transport as base64). This runs on a small
@@ -329,6 +342,15 @@ class Nip59Test {
   @Test
   fun a_rumor_kind_outside_the_nip01_range_is_refused_at_construction() {
     assertThrows(IllegalArgumentException::class.java) { rumor().copy(kind = 65_536) }
+  }
+
+  @Test
+  fun a_rumor_string_holding_an_unpaired_surrogate_is_refused_at_construction() {
+    // Such a string has no UTF-8 encoding, so the rumor would have no NIP-01 id.
+    val lone = "a" + Char(0xD800) + "b"
+    assertThrows("content", IllegalArgumentException::class.java) { rumor(content = lone) }
+    assertThrows("tag", IllegalArgumentException::class.java) { rumor(tags = listOf(listOf("e", lone))) }
+    assertThrows("pubkey", IllegalArgumentException::class.java) { rumor(pubkey = lone) }
   }
 
   /** A kind-13 seal over [plaintext], signed by [signerSecret] and encrypted to recipient A — the

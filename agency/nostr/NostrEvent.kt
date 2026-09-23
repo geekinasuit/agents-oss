@@ -1,5 +1,8 @@
 package com.geekinasuit.agency.nostr
 
+import java.nio.CharBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
 
 /**
@@ -55,7 +58,16 @@ object Nip01 {
     return sb.toString()
   }
 
-  /** The event id: lowercase hex of `sha256(preimage)`. */
+  /**
+   * The event id: lowercase hex of `sha256` over the UTF-8 bytes of the [preimage].
+   *
+   * THROWS [IllegalArgumentException] if a string field holds an unpaired surrogate. A UTF-16
+   * surrogate that is not half of a high-low pair names no character, so the string has no UTF-8
+   * encoding and the event no NIP-01 id. The JDK's lenient encoder would write `?` in its place,
+   * which gives the string the id, and so the valid signature, of a different string. The JSON
+   * parser can produce such a string from a unicode escape, so [verify] and the parsers, which must
+   * not throw, refuse one instead.
+   */
   fun eventId(
     pubkey: String,
     createdAt: Long,
@@ -63,10 +75,21 @@ object Nip01 {
     tags: List<List<String>>,
     content: String,
   ): String =
-    Hex.encode(
-      MessageDigest.getInstance("SHA-256")
-        .digest(preimage(pubkey, createdAt, kind, tags, content).toByteArray(Charsets.UTF_8))
-    )
+    requireNotNull(eventIdOrNull(pubkey, createdAt, kind, tags, content)) {
+      "an event string holds an unpaired surrogate: it has no UTF-8 encoding, so the event has no NIP-01 id"
+    }
+
+  /** [eventId], or `null` where [eventId] throws: for callers that must not throw. */
+  internal fun eventIdOrNull(
+    pubkey: String,
+    createdAt: Long,
+    kind: Int,
+    tags: List<List<String>>,
+    content: String,
+  ): String? =
+    utf8OrNull(preimage(pubkey, createdAt, kind, tags, content))?.let {
+      Hex.encode(MessageDigest.getInstance("SHA-256").digest(it))
+    }
 
   private fun appendTags(sb: StringBuilder, tags: List<List<String>>) {
     sb.append('[')
@@ -106,9 +129,42 @@ object Nip01 {
 }
 
 /**
+ * The UTF-8 encoding of [s], or `null` if [s] holds an unpaired surrogate and so has none. Encoded
+ * strictly, because `String.toByteArray` would write `?` for the surrogate, and two different strings
+ * would then encode to the same bytes. A fresh encoder per call: a CharsetEncoder is not thread-safe.
+ */
+internal fun utf8OrNull(s: String): ByteArray? =
+  try {
+    val encoded =
+      Charsets.UTF_8.newEncoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT)
+        .encode(CharBuffer.wrap(s))
+    ByteArray(encoded.remaining()).also { encoded.get(it) }
+  } catch (_: CharacterCodingException) {
+    null
+  }
+
+/** Whether [s] has a UTF-8 encoding, that is, holds no unpaired surrogate ([utf8OrNull]). */
+internal fun hasUtf8Encoding(s: String): Boolean = utf8OrNull(s) != null
+
+/** Whether every string an event's id covers ([pubkey], each tag element, [content]) has a UTF-8
+ * encoding, so that the event has a NIP-01 id ([Nip01.eventId]). */
+internal fun idStringsHaveUtf8Encoding(
+  pubkey: String,
+  tags: List<List<String>>,
+  content: String,
+): Boolean = hasUtf8Encoding(pubkey) && hasUtf8Encoding(content) && tags.all { it.all(::hasUtf8Encoding) }
+
+/**
  * Sign a new event: derive the x-only pubkey from [secretKeyHex], compute the NIP-01 id over the
  * fields, and sign that id. [auxRandHex] is the 32 bytes of BIP-340 aux randomness (a caller
  * supplies it so tests are deterministic; production supplies fresh randomness).
+ *
+ * THROWS [IllegalArgumentException] if a string field holds an unpaired surrogate: the event then
+ * has no id to sign ([Nip01.eventId]). A caller that builds such a string has a local bug, but a
+ * field can also carry a string the caller did not build: [buildAuthEvent] passes a relay's AUTH
+ * challenge through as a tag, so a relay can make this throw.
  */
 fun signEvent(
   secretKeyHex: String,
@@ -142,11 +198,12 @@ fun signEvent(
  * Verify an event as it arrives from an untrusted relay: recompute the id from the fields and
  * refuse if the claimed [NostrEvent.id] does not match (a relay cannot pin a different id to the
  * same content), then verify the [NostrEvent.sig] over that id under [NostrEvent.pubkey]. Total —
- * any malformed field folds to `false`. Proves WHO signed; it does not and must not decide
- * whether a release is authorized.
+ * any malformed field folds to `false`, a string holding an unpaired surrogate included: the event
+ * then has no id ([Nip01.eventId]). Proves WHO signed; it does not and must not decide whether a
+ * release is authorized.
  */
 fun NostrEvent.verify(): Boolean {
-  val recomputed = Nip01.eventId(pubkey, createdAt, kind, tags, content)
+  val recomputed = Nip01.eventIdOrNull(pubkey, createdAt, kind, tags, content) ?: return false
   if (recomputed != id) return false
   return Bip340.verify(sig, id, pubkey)
 }

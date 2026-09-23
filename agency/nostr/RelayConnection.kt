@@ -323,8 +323,10 @@ class RelayConnection(
         }
       } catch (e: Exception) {
         // No e.message: signing is the one exception path that handles the secret key, and its
-        // message could echo key-derived material into a result string. The exception class is enough
-        // to classify the fault; the detail stays out.
+        // message could echo key-derived material into a result string, so only the exception class
+        // is reported. That class does not say whose fault it was: an IllegalArgumentException can
+        // come from the relay, whose challenge, if it holds an unpaired surrogate, leaves the auth
+        // event with no id to sign (buildAuthEvent).
         return AuthResult.Failed("could not sign auth event: ${e.javaClass.simpleName}")
       }
 
