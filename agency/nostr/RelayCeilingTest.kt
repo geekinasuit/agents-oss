@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.nostr
 
+import java.lang.management.ManagementFactory
 import java.time.Duration
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -93,6 +94,8 @@ class RelayCeilingTest {
 
     private const val ROOMY_STACK_BYTES = 64L * 1024 * 1024
 
+    private const val EXCLUDE_FLAG = "-XX:CompileCommand=exclude,"
+
     /** [n] objects, each the value of the one before it, around [value]. */
     private fun objects(n: Int, value: String): String = "{\"a\":".repeat(n) + value + "}".repeat(n)
 
@@ -109,6 +112,30 @@ class RelayCeilingTest {
     fun warmUp() {
       for (frame in listOf(ARRAYS, OBJECTS, OBJECTS_AROUND_AN_ARRAY)) {
         repeat(WARM_UPS) { parseOnRoomyStack(frame) }
+      }
+    }
+
+    /**
+     * Fails the class if a `-XX:CompileCommand=exclude` flag the JVM runs with names a method that
+     * does not exist. HotSpot does not check the pattern. One that matches no method prints the
+     * same startup line as one that does, and excludes nothing, so relay_ceiling_c1_split_test
+     * would run at tier 3 throughout, the state relay_ceiling_c1_test already pins, and still pass.
+     * That target is the only one with such a flag. A pattern not in its `package/Class.method`
+     * form fails the check too.
+     */
+    @BeforeClass
+    @JvmStatic
+    fun checkCompileExclusions() {
+      val patterns =
+        ManagementFactory.getRuntimeMXBean().inputArguments.filter { it.startsWith(EXCLUDE_FLAG) }
+      for (pattern in patterns.map { it.removePrefix(EXCLUDE_FLAG) }) {
+        val className = pattern.substringBeforeLast('.').replace('/', '.')
+        val methodName = pattern.substringAfterLast('.')
+        val declared =
+          runCatching { Class.forName(className, false, RelayCeilingTest::class.java.classLoader) }
+            .map { cls -> cls.declaredMethods.any { it.name == methodName } }
+            .getOrDefault(false)
+        assertTrue("$pattern names no method, so it excludes nothing from compilation", declared)
       }
     }
 
