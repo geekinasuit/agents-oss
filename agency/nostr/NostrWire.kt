@@ -171,8 +171,8 @@ fun authMessage(event: NostrEvent): String =
  * return. SERIALIZE-ONLY — the client sends a filter and the relay applies it; the client never
  * parses one back, so there is a builder ([reqMessage]) and no parser.
  *
- * MECHANISM, not policy (§REPO_SEAM): this is the general filter TYPE. WHICH kind, and WHICH event a
- * `#e` tag references, are values coach supplies when it builds the approval subscription — never
+ * MECHANISM, not policy: this is the general filter TYPE. WHICH kind, and WHICH event a `#e` tag
+ * references, are values the deployment supplies when it builds the approval subscription — never
  * hardcoded here.
  *
  * The field set is the COHERENCE-MINIMAL selector of an approval-collection subscription — the WHAT
@@ -243,10 +243,10 @@ fun closeMessage(subscriptionId: String): String =
 
 /**
  * Build a NIP-42 auth event (kind 22242) answering a relay's [challenge] for [relayUrl]. The
- * [relayUrl] is a parameter, not a constant — this module is mechanism, and which relay is
- * configuration that lives outside oss (§REPO_SEAM). `content` is empty by NIP-42 convention; the
- * `relay` and `challenge` tags carry the binding the relay checks. Signed exactly like any other
- * event, so a relay verifies it with the same [verify].
+ * [relayUrl] is a parameter, not a constant — this module is mechanism, and which relay is the
+ * deployment's configuration. `content` is empty by NIP-42 convention; the `relay` and `challenge`
+ * tags carry the binding the relay checks. Signed exactly like any other event, so a relay verifies
+ * it with the same [verify].
  */
 fun buildAuthEvent(
   secretKeyHex: String,

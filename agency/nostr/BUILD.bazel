@@ -11,9 +11,9 @@ load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
 #
 # The :nostr LIBRARY is pure and hermetic — no relay connection, no socket, nothing that binds or
 # dials (A4-2). The transport that DOES dial (step 3b) is the separate :relay target below: it
-# depends on :nostr and takes the relay URL and the lead key as required configuration (§REPO_SEAM
-# keeps those values in coach). Keeping it a distinct target — not extra srcs on :nostr — is what
-# keeps the codec itself hermetic; a consumer that wants only the codec never links a socket.
+# depends on :nostr and takes the relay URL and the lead key as required configuration, which the
+# deployment supplies. Keeping it a distinct target — not extra srcs on :nostr — is what keeps the
+# codec itself hermetic; a consumer that wants only the codec never links a socket.
 #
 # secp256k1: the -jvm coordinate carries the API (compiled against here); the native lives in
 # -jni-jvm and rides each CONSUMING TEST as runtime_deps, exactly as agency/crypto documents — a

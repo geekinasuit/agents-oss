@@ -61,7 +61,7 @@ class RecipientKey private constructor(val hex: String) {
     private val HEX = Regex("[0-9a-fA-F]{64}")
 
     /** Validate [raw] as a 32-byte x-only pubkey — correct hex shape AND a real curve point — and
-     * normalize to lowercase, or throw. A malformed recipient key is a coach-config bug, loud like
+     * normalize to lowercase, or throw. A malformed recipient key is a configuration bug, loud like
      * the rest of this module's configured-key validation (`RelayConfig`, `Nip44.conversationKey`),
      * not hostile traffic to fold closed. Validating the POINT here, at the config boundary, is what
      * keeps an off-curve key from reaching the fan-out's crypto phase and aborting delivery to every
@@ -123,8 +123,8 @@ const val GATE_OPEN_NOTICE_RUMOR_KIND = 14
 /**
  * Encode [notice] as a NIP-59 gift wrap addressed to a SINGLE [recipient] (A4-6: NIP-44 encrypts to
  * exactly one recipient, so notification is pairwise — [RelayNotifier] loops this over a recipient
- * set). Mechanism, not policy: [leadKeyBytes] and which recipients exist are coach-side
- * (§REPO_SEAM); this function just builds the carrier.
+ * set). Mechanism, not policy: [leadKeyBytes] and which recipients exist are the deployment's
+ * configuration; this function just builds the carrier.
  *
  * THE RUMOR is what the recipient reads once the wrap is opened ([Nip59.unwrap]). It is authored by
  * the lead key, dated [createdAt], of kind [GATE_OPEN_NOTICE_RUMOR_KIND], and its content is

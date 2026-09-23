@@ -81,8 +81,8 @@ class LeadDaemon(
   /** Where a ceremony gate-open is announced so an operator can authorize it ([GateOpenSink]).
    * Defaults to [NoOpGateOpenSink]: an un-wired daemon marks the gate announced (so the arm fires
    * at most once) but reaches no operator — a real sink, and the recipients/relay it needs, are
-   * coach-side wiring (§REPO_SEAM). Under a non-ceremony auth no nonce is minted, so the notify arm
-   * never fires and this is never consulted, exactly as the mint is inert under [LeadAuth.DENY_ALL]. */
+   * the deployment's wiring. Under a non-ceremony auth no nonce is minted, so the notify arm never
+   * fires and this is never consulted, exactly as the mint is inert under [LeadAuth.DENY_ALL]. */
   private val gateOpenSink: GateOpenSink = NoOpGateOpenSink,
   private val dedupEffects: Boolean = true,
   private val capabilityDesc: String = "scripted/none",
@@ -874,9 +874,9 @@ class LeadDaemon(
             gateOpenSink.announce(GateOpenSignal(gateId, payloadDigest, nonce, resolved.content))
           } catch (e: Exception) {
             // A sink fault is a delivery failure the transport layer owns (retry and alerting are
-            // coach-side wiring, not the substrate's), so it is recorded, not escalated — a flapping
-            // relay must not become an escalation storm. Only the Unresolved arm escalates: a bound
-            // copy that cannot be inlined is a fault nothing else surfaces.
+            // the deployment's wiring, not the substrate's), so it is recorded, not escalated — a
+            // flapping relay must not become an escalation storm. Only the Unresolved arm
+            // escalates: a bound copy that cannot be inlined is a fault nothing else surfaces.
             AnnounceOutcome.Failed("sink threw: ${e.message}")
           }
       }
