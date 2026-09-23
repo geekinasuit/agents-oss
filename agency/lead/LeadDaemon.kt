@@ -12,6 +12,7 @@ import com.geekinasuit.agency.shared.journal.JournalStore
 import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.fold
+import com.geekinasuit.agency.shared.text.hasReadableText
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
@@ -910,11 +911,12 @@ class LeadDaemon(
    *
    * The artifact the operator reads is resolved from the gate's lead-owned bound copy first (a
    * [payloadDigest] match verified). An UNRESOLVED artifact — no bound path in the journal, the
-   * bound store disturbed after the gate opened, or an intact artifact that is blank or not valid
-   * UTF-8 — is a different failure from a sink fault: the gate is open and blocking and nothing
-   * reached the operator. It is escalated (so the stuck gate is visible, not a silent stall) and
-   * recorded failed WITHOUT calling the sink — a blank-artifact signal cannot build a notice — and
-   * the nonce is still marked, so the recovery arm does not re-read the bad file every pass.
+   * bound store disturbed after the gate opened, or an intact artifact that is not valid UTF-8 or
+   * has nothing to read ([hasReadableText]) — is a different failure from a sink fault: the gate is
+   * open and blocking and nothing reached the operator. It is escalated (so the stuck gate is
+   * visible, not a silent stall) and recorded failed WITHOUT calling the sink — a signal with
+   * nothing to read cannot be built — and the nonce is still marked, so the recovery arm does not
+   * re-read the bad file every pass.
    */
   private fun announceAndMark(
     gateId: String,
@@ -988,8 +990,10 @@ class LeadDaemon(
    * the journal is malformed, and a missing file, a read fault, or a mismatch means the bound store
    * was disturbed after the gate opened. Two intact artifacts are refused as well, though each is
    * exactly what the nonce authorizes: bytes that are not valid UTF-8, because the notice carries
-   * text and no decoding of them would show the operator exactly those bytes; and a blank artifact,
-   * because a notice with nothing to read cannot be built.
+   * text and no decoding of them would show the operator exactly those bytes; and an artifact with
+   * nothing to read ([hasReadableText]), because a notice with nothing to read cannot be built. A
+   * blank one is reported as `empty-artifact`, and any other with nothing to read, such as one made
+   * only of zero-width characters, as `unreadable-artifact`.
    */
   private fun resolveGateArtifact(
     gateKind: String,
@@ -1027,6 +1031,7 @@ class LeadDaemon(
         return ArtifactResolution.Unresolved("artifact-not-utf8")
       }
     if (content.isBlank()) return ArtifactResolution.Unresolved("empty-artifact")
+    if (!hasReadableText(content)) return ArtifactResolution.Unresolved("unreadable-artifact")
     return ArtifactResolution.Resolved(content)
   }
 

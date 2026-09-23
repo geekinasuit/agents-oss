@@ -137,6 +137,25 @@ class GateOpenNoticeTest {
     assertThrows(IllegalArgumentException::class.java) { RecipientKey.of("ff".repeat(32)) }
   }
 
+  @Test
+  fun refuses_a_notice_whose_artifact_has_nothing_to_read_at_construction() {
+    // The artifact is what the operator reads instead of a digest, so an artifact with nothing to
+    // read is refused whether or not it is blank.
+    val unreadable =
+      mapOf(
+        "blank" to " \n",
+        "a zero-width space and a newline" to codePoints(0x200B, 0x0A),
+        "the Hangul filler" to codePoints(0x3164),
+      )
+    for ((label, artifact) in unreadable) {
+      assertThrows(label, IllegalArgumentException::class.java) { GateOpenNotice("g", "d", "n", artifact) }
+    }
+  }
+
+  /** The string of [codePoints], so that no invisible character is written into this file. */
+  private fun codePoints(vararg codePoints: Int): String =
+    buildString { codePoints.forEach { appendCodePoint(it) } }
+
   /** Opens the wrap's outer layer by hand, to read the seal inside: [Nip59.unwrap] returns only the
    * rumor. */
   private fun openWrapLayer(wrap: NostrEvent, recipientSecret: String): NostrEvent {

@@ -49,6 +49,8 @@ kt_jvm_library(
         "//agency/shared/auth",
         "//agency/shared/harness",
         "//agency/shared/journal",
+        # Whether a gate-open artifact has something to read, the rule the notice codec holds too.
+        "//agency/shared/text",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
         "@maven//:org_json_json",

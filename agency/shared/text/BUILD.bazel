@@ -1,0 +1,23 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+# Whether text has something for a person to read: the check a gate-open artifact passes before the
+# lead announces it and before a notice is built from it. Dependency-free and substrate-neutral, like
+# //agency/shared/json, so the lead and the nostr notice codec share one rule and neither depends on
+# the other.
+
+kt_jvm_library(
+    name = "text",
+    srcs = ["ReadableText.kt"],
+    visibility = ["//visibility:public"],
+)
+
+kt_jvm_test(
+    name = "readable_text_test",
+    size = "small",
+    srcs = ["ReadableTextTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.text.ReadableTextTest",
+    deps = [
+        ":text",
+        "@maven//:junit_junit",
+    ],
+)

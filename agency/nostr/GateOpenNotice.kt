@@ -1,5 +1,7 @@
 package com.geekinasuit.agency.nostr
 
+import com.geekinasuit.agency.shared.text.hasReadableText
+
 /**
  * A gate-open notice (A4-6): what the lead tells the operator the moment a gate opens, so the
  * operator authorizes something they can READ rather than a digest they cannot resolve. It carries
@@ -26,8 +28,11 @@ data class GateOpenNotice(
     require(payloadDigest.isNotBlank()) { "payloadDigest must be non-blank" }
     require(nonce.isNotBlank()) { "nonce must be non-blank" }
     // The artifact is the whole point of A4-6 — the thing the operator reads instead of
-    // blind-signing a digest — so a blank one is a caller bug, refused at construction.
-    require(artifact.isNotBlank()) { "artifact must be non-blank — a notice with nothing to read defeats A4-6" }
+    // blind-signing a digest — so one with nothing to read (hasReadableText), blank or not, is a
+    // caller bug, refused at construction.
+    require(hasReadableText(artifact)) {
+      "artifact must have something to read — a notice with nothing to read defeats A4-6"
+    }
     // Every field rides in the rumor the notice travels as, whose id needs each string's UTF-8
     // encoding, and a string holding an unpaired surrogate has none (Nip01.eventId). Refused here, so
     // encodeGateOpenNotice never meets a notice it cannot encode.
