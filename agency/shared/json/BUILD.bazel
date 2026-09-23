@@ -25,10 +25,12 @@ kt_jvm_library(
     ],
 )
 
-# The premise every small-stack cell rests on: the unguarded parse of the shallowest nesting any of
-# them feeds overflows the small stack. -Xbatch compiles in the foreground, so the cell's warm-up
-# leaves the reader compiled — frames that nest deeper than interpreted ones before overflowing —
-# before the attempt runs, rather than whenever a background compile happens to finish.
+# What kotlinx's parser does with deep nesting on the small stack: the premise every small-stack
+# cell rests on (the unguarded parse of the shallowest nesting any of them feeds overflows it), and
+# the facts JsonNesting.kt states about which nesting it reads on the stack. -Xbatch compiles in
+# the foreground, so each cell's warm-ups leave the reader compiled — frames that nest deeper than
+# interpreted ones before overflowing — before the attempt runs, rather than whenever a background
+# compile happens to finish.
 kt_jvm_test(
     name = "small_stack_test",
     size = "small",

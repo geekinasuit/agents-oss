@@ -8,15 +8,15 @@ package com.geekinasuit.agency.shared.json
  * parse stands in for this check. True refuses the text, and may refuse text that would not have nested
  * that deep.
  *
- * WHICH NESTING OVERFLOWS, in kotlinx-serialization 1.8.1 (re-check on a version change): the parser
- * recurses on the call stack once per level of array nesting, and once per level of object nesting
- * until 200 objects deep. There it moves further object levels to a reader that keeps them on the
- * heap, but an array inside that region recurses on the stack again, and so do the objects inside that
- * array. So nesting objects alone recurses about 200 levels at most, while nesting with arrays in it
- * can recurse deep enough to overflow. The scan counts both kinds of opener, and it must: counting
- * only `[` would admit a single array in the heap region with deep objects inside it, all of which
- * the parser reads on the stack. Counting `{` also refuses deep object-only nesting this parser
- * would have read.
+ * WHICH NESTING OVERFLOWS, in kotlinx-serialization 1.8.1 (`SmallStackTest` checks each fact here,
+ * so a version that changes one fails there): the parser recurses on the call stack once per level
+ * of array nesting, and once per level of object nesting until 200 objects deep. There it moves
+ * further object levels to a reader that keeps them on the heap, but an array inside that region
+ * recurses on the stack again, and so do the objects inside that array. So nesting objects alone
+ * recurses about 200 levels at most, while nesting with arrays in it can recurse deep enough to
+ * overflow. The scan counts both kinds of opener, and it must: counting only `[` would admit a
+ * single array in the heap region with deep objects inside it, all of which the parser reads on the
+ * stack. Counting `{` also refuses deep object-only nesting this parser would have read.
  *
  * STRING-AWARE: it tracks JSON string literals, escapes included, and counts only STRUCTURAL `[` and
  * `{`. A bracket inside a string is content the parser reads without recursing, not nesting, which is
