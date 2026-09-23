@@ -298,8 +298,9 @@ kt_jvm_test(
 # As relay_ceiling_c1_test, but readArray is never compiled, so each array level calls from the
 # compiled JsonTreeReader.read into the interpreted readArray and back. A tiered run can be in this
 # state, for example after readArray's compiled code is discarded while read's is kept, and there an
-# array level was measured to need more stack than at tier 3. HotSpot accepts an exclusion that
-# matches no method, so the class fails at startup when the method this one names does not exist.
+# array level was measured to need more stack than at tier 3. HotSpot runs on, excluding nothing,
+# when an exclusion names no method or is misspelled, so the class fails before its warm-ups unless
+# this flag names a method that exists, in the package/Class.method form.
 kt_jvm_test(
     name = "relay_ceiling_c1_split_test",
     size = "small",
