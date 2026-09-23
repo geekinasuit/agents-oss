@@ -52,9 +52,8 @@ class SmallStackTest {
   private companion object {
     // The shallowest nesting any onSmallStack cell feeds: `[1]` repeated 13,000 times, which
     // kotlinx nests one level per `[1]`. A cell that feeds shallower array nesting must lower
-    // this. Nesting objects alone does not overflow the small stack: kotlinx-serialization 1.8.1
-    // moves object nesting past 200 levels to a reader that keeps it on the heap, so a cell that
-    // feeds only objects passes whether or not its guard fires.
+    // this. Nesting objects alone does not overflow the small stack ([jsonMayNestDeeperThan] says
+    // which nesting does), so a cell that feeds only objects passes whether or not its guard fires.
     val SHALLOWEST = "[1]".repeat(13_000)
     const val ROOMY_STACK_BYTES = 64L * 1024 * 1024
     // More than one: the reader compiled during the first warm-up can be discarded before that

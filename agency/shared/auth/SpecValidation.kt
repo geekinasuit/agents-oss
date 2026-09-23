@@ -121,12 +121,13 @@ fun authSpecPreimage(principals: List<Principal>, quorum: QuorumNode): String {
  * catch turns any of them — and kotlinx's own parse exception — into a Refused carrying the
  * message.
  *
- * Input-size caveat, the same one [quorumFromJson] documents at its own text boundary: the
+ * Nesting caveat, the same one [quorumFromJson] documents at its own text boundary: the
  * STRUCTURED level is bounded by the reused constructors ([quorumFromJson]'s depth cap,
  * [AllowList]'s id/key distinctness), but the text→JsonElement step is kotlinx's recursive
- * descent and is NOT depth-refused — a deeply nested preimage overflows the stack with an Error
- * that `catch (Exception)` does not see. This function does not itself bound that; a caller
- * handing it UNVERIFIED text owns the input bound. In the [loadAuthorizationSpec] path it is
+ * descent and is NOT depth-refused — deep enough nesting overflows the stack with an Error that
+ * `catch (Exception)` does not see; the KDoc on jsonMayNestDeeperThan (//agency/shared/json) says
+ * which nesting. This function does not itself bound that; a caller handing it UNVERIFIED text
+ * must bound its nesting first. In the [loadAuthorizationSpec] path it is
  * moot: the root signature is verified BEFORE the parse, so only bytes the pinned root actually
  * signed reach here, and an attacker who cannot forge that signature cannot drive a depth-bomb
  * into this parser.

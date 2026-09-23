@@ -142,11 +142,13 @@ fun quorumToJson(node: QuorumNode): JsonObject =
  * threshold or group size, a principal repeated across leaves (via the constructors), and
  * depth beyond [MAX_QUORUM_DEPTH]. The group-size bound is checked BEFORE the children
  * parse, so an oversized hostile array is refused for its count rather than walked first.
- * (The depth cap bounds THIS walk; the text→JsonObject parse upstream has no depth
- * refusal of its own — kotlinx 1.8.1 heap-walks deep input rather than overflowing — so a
- * caller turning hostile TEXT into the [JsonObject] handed here needs its own input-size
- * bound at that boundary.) A predicate that does not parse is a policy that does not
- * exist — never a defaulted one.
+ * (The depth cap bounds THIS walk, not the text→JsonObject parse upstream, which has no
+ * depth refusal of its own: deep enough nesting makes that parse recurse until the stack
+ * overflows, with an Error a `catch (Exception)` does not see. So a caller turning hostile
+ * TEXT into the [JsonObject] handed here must bound that text's nesting first —
+ * jsonMayNestDeeperThan (//agency/shared/json) does, and its KDoc says which nesting
+ * overflows.) A predicate that does not parse is a policy that does not exist — never a
+ * defaulted one.
  */
 fun quorumFromJson(json: JsonObject): QuorumNode = parseNode(json, depth = 1)
 

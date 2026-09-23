@@ -101,9 +101,9 @@ fun committedPreimage(
  *
  * Safe on untrusted text, which a preimage is until a signature over it verifies — and a
  * caller may parse before it verifies. A preimage that may nest deeper than the committed
- * shape (one flat array) is refused before the parse: the parser recurses once per level,
- * and deep enough nesting would overflow the stack with an Error, which the parse's
- * `catch (Exception)` does not see.
+ * shape (one flat array) is refused before the parse: deep enough nesting makes the parser
+ * recurse until the stack overflows ([jsonMayNestDeeperThan] says which nesting), with an
+ * Error the parse's `catch (Exception)` does not see.
  */
 fun parseCommitted(preimage: String): CommittedApproval? {
   if (jsonMayNestDeeperThan(preimage, COMMITTED_DEPTH)) return null

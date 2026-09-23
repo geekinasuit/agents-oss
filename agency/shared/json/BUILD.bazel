@@ -1,10 +1,11 @@
 load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
 
 # The JSON nesting bound: the check untrusted JSON text passes before kotlinx's tree parser sees it.
-# The parser recurses once per level, so text nested deep enough overflows the stack with an Error
-# that a total parse's catch does not see. Dependency-free and substrate-neutral, so the auth layer
-# uses it without depending on the nostr substrate; nostr depending on auth stays the only edge
-# between them.
+# The parser recurses on the call stack once per level of array nesting, and once per level of object
+# nesting until kotlinx moves deep objects to a reader that keeps them on the heap (JsonNesting.kt has
+# the detail), so text nested deep enough overflows the stack with an Error that a total parse's catch
+# does not see. Dependency-free and substrate-neutral, so the auth layer uses it without depending on
+# the nostr substrate; nostr depending on auth stays the only edge between them.
 
 kt_jvm_library(
     name = "json",
