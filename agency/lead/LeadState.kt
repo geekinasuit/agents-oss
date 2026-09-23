@@ -319,14 +319,20 @@ data class LeadState(
    * marks them) so a re-issue of a spent value is detectable as the anomaly it is. */
   val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
   val consumedNonces: Set<String> = emptySet(),
-  /** Nonces whose gate-open has already been announced to the operator ([LeadKinds.GATE_OPEN_NOTIFIED]).
-   * Keyed by the NONCE, not the gate: a nonce is single-use and bound to one (gate, digest), so a
-   * gate re-opened on a new digest mints a NEW nonce and is announced afresh, while the announced one
-   * is never re-announced. The notify arm reads this to fire at most once per nonce; recording the
-   * marker on EVERY outcome (a delivery failure included) is what keeps a faulted announce a
-   * fail-closed liveness gap rather than a per-pass re-announce. Ticket-scoped: [LeadKinds.TICKET_DONE]
-   * clears it, as it does [issuedNonces]. */
+  /** Nonces whose gate-open announce is final ([LeadKinds.GATE_OPEN_NOTIFIED] without `retry`):
+   * announced, not announced because no sink is wired or the artifact could not be inlined, or
+   * failed on its last attempt. Keyed by the NONCE, not the gate: a nonce is single-use and bound
+   * to one (gate, digest), so a gate re-opened on a new digest mints a NEW nonce and is announced
+   * afresh, while a final one is never announced again. The notify arm reads this to stop; a
+   * marker that says the announce will be sent again counts in [failedAnnounces] instead.
+   * Ticket-scoped: [LeadKinds.TICKET_DONE] clears it, as it does [issuedNonces]. */
   val notifiedNonces: Set<String> = emptySet(),
+  /** Nonce → how many of its announces failed with a failure the sink reported, each marked to be
+   * sent again ([LeadKinds.GATE_OPEN_NOTIFIED] with `retry`). The notify arm reads it to find the
+   * timer the next attempt waits on, and the daemon to number that attempt, so a failing sink is
+   * called once per attempt, never once per pass. [notifiedNonces] takes precedence: a nonce in it
+   * is not sent again whatever this holds. Ticket-scoped: [LeadKinds.TICKET_DONE] clears it. */
+  val failedAnnounces: Map<String, Int> = emptyMap(),
   /** gateId → approvals that RE-VERIFIED at fold time (signature over preimage, key in the
    * allow-list, committed binding agreeing with the flat copies). The set a release's quorum
    * is evaluated over — an approval that did not verify never lands here, so the flat
@@ -427,15 +433,16 @@ data class LeadState(
  * these carry security-relevant tails (escalations, stale releases, mis-origined entries).
  *
  * The nonce/approval records ([LeadState.issuedNonces], [LeadState.consumedNonces],
- * [LeadState.verifiedApprovals], [LeadState.notifiedNonces]) sit DELIBERATELY outside this
- * cap: they are correctness-bearing records, not views. Evicting a consumed nonce re-enables
- * the replay it exists to reject; evicting an issued nonce or a verified approval silently
- * voids a live authorization; evicting a notified nonce re-enables the duplicate gate-open
- * announce its marker exists to suppress. ([LeadState.unverifiedApprovals] IS capped by this
+ * [LeadState.verifiedApprovals], [LeadState.notifiedNonces], [LeadState.failedAnnounces]) sit
+ * DELIBERATELY outside this cap: they are correctness-bearing records, not views. Evicting a
+ * consumed nonce re-enables the replay it exists to reject; evicting an issued nonce or a verified
+ * approval silently voids a live authorization; evicting a notified nonce re-enables the duplicate
+ * gate-open announce its marker exists to suppress; evicting a failed-announce count restarts that
+ * nonce's attempts, undoing their bound. ([LeadState.unverifiedApprovals] IS capped by this
  * tail — an approval that did not verify contributes nothing a release depends on, so it is a
  * view, not a record.) [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
  * an audit marker whose absence is itself a claim ("released under the ceremony"), so an
- * evicted entry would not lose the answer, it would invert it. All five share the same
+ * evicted entry would not lose the answer, it would invert it. All six share the same
  * bound: the ticket, not a tail — TICKET_DONE clears them — and their kinds are
  * origin-gated, so only the substrate and the authorization layer can grow them: a party
  * positioned to flood them could already write worse. */
@@ -575,6 +582,7 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
           issuedNonces = emptyMap(),
           consumedNonces = emptySet(),
           notifiedNonces = emptySet(),
+          failedAnnounces = emptyMap(),
           verifiedApprovals = emptyMap(),
           unverifiedApprovals = emptyList(),
           pods = emptyMap(),
@@ -727,12 +735,19 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
           else -> s.copy(consumedNonces = s.consumedNonces + nonce)
         }
       }
-      LeadKinds.GATE_OPEN_NOTIFIED ->
-        // The gate-open for this nonce has been announced to the operator (the announce outcome
-        // rides in the payload for the record; the fold needs only the fact, so the notify arm
-        // fires at most once per nonce). The substrate is the sole writer and announces only a
-        // nonce it just resolved open, so no gate/issue cross-check is warranted here.
-        s.copy(notifiedNonces = s.notifiedNonces + p.str("nonce"))
+      LeadKinds.GATE_OPEN_NOTIFIED -> {
+        // One attempt to announce this nonce's gate-open (the outcome rides in the payload for the
+        // record). A marker that says the announce will be sent again counts one more failed
+        // attempt; any other is final. A marker without the field is final, which is also how a
+        // binary that does not retry reads one that has it. The substrate is the sole writer and
+        // announces only a nonce it just resolved open, so no gate/issue cross-check is warranted.
+        val nonce = p.str("nonce")
+        if (p.marksRetry())
+          s.copy(
+            failedAnnounces = s.failedAnnounces + (nonce to (s.failedAnnounces[nonce] ?: 0) + 1)
+          )
+        else s.copy(notifiedNonces = s.notifiedNonces + nonce)
+      }
       LeadKinds.APPROVAL_RECORDED -> foldApproval(s, e, p, auth)
       LeadKinds.COGNITION_PROPOSED ->
         s.copy(cognitionSpendUsd = s.cognitionSpendUsd + accruedCost(p))
@@ -1008,4 +1023,12 @@ private fun kotlinx.serialization.json.JsonObject.strOrNull(k: String): String? 
   val el = this[k] ?: return null
   if (el is kotlinx.serialization.json.JsonNull) return null
   return el.jsonPrimitive.content
+}
+
+/** Whether a notify marker says its announce will be sent again: only a JSON `true` in `retry`
+ * does. Absent, null, a string, or any other value reads as final, the outcome that sends nothing
+ * again, so a malformed field can cost a retry but never cause one. */
+private fun kotlinx.serialization.json.JsonObject.marksRetry(): Boolean {
+  val el = this["retry"] as? kotlinx.serialization.json.JsonPrimitive ?: return false
+  return !el.isString && el.content == "true"
 }

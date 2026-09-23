@@ -16,6 +16,17 @@ import com.geekinasuit.agency.shared.text.hasReadableText
  * exception — and the daemon guards the call, so a sink that breaks this contract by throwing an
  * ordinary exception still cannot take the loop down: the fault is recorded as a failed announce
  * instead. (A fatal Error is not caught; it propagates, as an Error does anywhere in the loop.)
+ *
+ * RETURNS PROMPTLY: [announce] holds the loop thread for as long as it runs, so a sink does not
+ * retry or wait inside the call. It returns [AnnounceOutcome.Failed] when it cannot deliver, and
+ * the daemon sends the whole signal again on a later wake, after a backoff, for a bounded number of
+ * attempts; when the last fails, the daemon escalates. So a recipient reached on an earlier attempt
+ * may receive the same signal again; the nonce is single-use, so a repeat cannot authorize twice. A
+ * sink that reached some recipients and not others chooses: [AnnounceOutcome.Announced] if what it
+ * delivered lets the operator act, or [AnnounceOutcome.Failed] to have the whole signal sent again.
+ * The retry and the escalation need the daemon's timer service to fire. Its default,
+ * [TimerService.NOOP], fires nothing, and under it a failed announce is neither sent again nor
+ * escalated.
  */
 fun interface GateOpenSink {
   fun announce(signal: GateOpenSignal): AnnounceOutcome
@@ -45,8 +56,9 @@ data class GateOpenSignal(
 /**
  * The lead-neutral result of [GateOpenSink.announce], recorded verbatim as the notify marker's
  * outcome. Never thrown — a fault is [Failed], so a sink that could not deliver leaves a legible
- * record and the gate is still marked announced (a fail-closed liveness gap), rather than the loop
- * re-announcing every pass.
+ * record. Only a [Failed] the sink reports, or a throw from it, is sent again, when a retry timer
+ * fires, never on every pass of the loop. The daemon's own [Failed] for an artifact it could not
+ * resolve is final.
  */
 sealed interface AnnounceOutcome {
   /** The sink took responsibility for the announcement; [summary] is opaque to the substrate — a
@@ -57,7 +69,9 @@ sealed interface AnnounceOutcome {
    * fires at most once — the notice reaches an operator only once a real sink is wired. */
   object NoSink : AnnounceOutcome
 
-  /** The sink faulted; [detail] is journaled. A value, not a throw — the loop survives. */
+  /** The sink could not deliver; [detail] is journaled. The daemon sends the signal again later,
+   * when its timer service fires (see [GateOpenSink]), for a bounded number of attempts, and
+   * escalates when the last fails. A value, not a throw — the loop survives. */
   data class Failed(val detail: String) : AnnounceOutcome
 }
 

@@ -77,6 +77,10 @@ class LeadDaemon(
    * pre-ceremony releases still fold as before, since the fold ([leadFold]) refuses the
    * nonce-less path only under a ceremony auth ([LeadAuth.hasApprovers]), never under DENY_ALL. */
   private val leadAuth: LeadAuth,
+  /** Fires the daemon's timers, such as the one a failed gate-open announce waits on before it is
+   * sent again. Defaults to [TimerService.NOOP], which fires nothing: under it a failed announce is
+   * neither sent again nor escalated. A deployment that wires a real [gateOpenSink] passes a
+   * service that fires, such as [ThreadTimerService]. */
   private val timers: TimerService = TimerService.NOOP,
   private val faults: FaultInjector = FaultInjector.NONE,
   /** Where a ceremony gate-open is announced so an operator can authorize it ([GateOpenSink]).
@@ -723,14 +727,25 @@ class LeadDaemon(
     }
 
     // Recovery path for the gate-open announce: re-announce any ceremony gate that is open with a
-    // nonce but not yet marked. The normal announce happens at gate-open in executeProposals; this
-    // catches a crash between the mint and its notify marker, and announces a nonce the mint
-    // recovery above issued, because a restart's adopt runs this pass BEFORE cognition and so sees
-    // the already-open gate. Only a ceremony auth mints a nonce, so this announces nothing on a
-    // journal no ceremony daemon has written to.
+    // nonce whose announce is not final. The normal announce happens at gate-open in
+    // executeProposals; this catches a crash between the mint and its notify marker, and announces
+    // a nonce the mint recovery above issued, because a restart's adopt runs this pass BEFORE
+    // cognition and so sees the already-open gate. It also sends again an announce the sink
+    // reported failed, once the retry timer armed for that failure has fired, and arms that timer
+    // itself when a crash fell between the failure's marker and its arming. Only a ceremony auth
+    // mints a nonce, so this announces nothing on a journal no ceremony daemon has written to.
     for (gate in lead.openGates.values) {
       val nonce = lead.openNonceFor(gate) ?: continue
       if (nonce.nonce in lead.notifiedNonces) continue
+      val failures = lead.failedAnnounces[nonce.nonce] ?: 0
+      if (failures > 0) {
+        val timerId = announceRetryTimerId(nonce.nonce, failures)
+        if (timerId !in shared.armedTimers) {
+          armAnnounceRetry(nonce.nonce, failures)
+          return true
+        }
+        if (timerId !in shared.firedTimers) continue
+      }
       announceAndMark(gate.gateId, gate.gateKind, nonce.payloadDigest, nonce.nonce, lead)
       return true
     }
@@ -900,23 +915,32 @@ class LeadDaemon(
   }
 
   /**
-   * Announce a ceremony gate-open through [gateOpenSink] and mark the nonce
+   * Announce a ceremony gate-open through [gateOpenSink] and mark the attempt
    * ([LeadKinds.GATE_OPEN_NOTIFIED]). Called at the mint site (the normal announce, in the same
-   * drive the gate opens) and from the mechanical pass (the restart-recovery re-announce). The sink
-   * must not throw; an ordinary exception is contained as a failed outcome, so it cannot sink the
-   * single loop thread — a fatal [Error] is not caught, it propagates as one does anywhere else in
-   * the loop. The marker is written on EVERY outcome, a delivery failure included, so a nonce is
-   * announced at most once — a recorded failure is a fail-closed liveness gap, never a per-pass
-   * re-fire of the sink's per-recipient crypto.
+   * drive the gate opens) and from the mechanical pass (the restart-recovery re-announce, and each
+   * retry). The sink must not throw; an ordinary exception is contained as a failed outcome, so it
+   * cannot sink the single loop thread — a fatal [Error] is not caught, it propagates as one does
+   * anywhere else in the loop.
+   *
+   * The marker is written on EVERY outcome, so the recovery arm never calls the sink again on its
+   * own. A failure the sink reports is the one outcome sent again: its marker says so, and its
+   * retry timer is armed at once, since the gate-open blocks the pipeline and no later wake may
+   * come to arm it. The arm calls the sink again only when that timer fires, so a failing sink is
+   * called once per attempt, never once per pass, with [ANNOUNCE_RETRY_DELAYS_MS] between
+   * attempts. When the last of [MAX_ANNOUNCE_ATTEMPTS] attempts fails, the announce is escalated
+   * once and its marker is final. These bounds count attempts whose marker landed: a crash between
+   * an attempt and its marker sends that attempt again on restart, and on the last attempt it
+   * escalates again. The escalation comes before the marker because the other order loses it in
+   * that crash.
    *
    * The artifact the operator reads is resolved from the gate's lead-owned bound copy first (a
    * [payloadDigest] match verified). An UNRESOLVED artifact — no bound path in the journal, the
    * bound store disturbed after the gate opened, or an intact artifact that is not valid UTF-8 or
    * has nothing to read ([hasReadableText]) — is a different failure from a sink fault: the gate is
-   * open and blocking and nothing reached the operator. It is escalated (so the stuck gate is
-   * visible, not a silent stall) and recorded failed WITHOUT calling the sink — a signal with
-   * nothing to read cannot be built — and the nonce is still marked, so the recovery arm does not
-   * re-read the bad file every pass.
+   * open and blocking and nothing reached the operator. It is escalated at once (so the stuck gate
+   * is visible, not a silent stall) and recorded failed WITHOUT calling the sink — a signal with
+   * nothing to read cannot be built — and its marker is final, so the recovery arm does not re-read
+   * the bad file every pass.
    */
   private fun announceAndMark(
     gateId: String,
@@ -925,8 +949,10 @@ class LeadDaemon(
     nonce: String,
     lead: LeadState,
   ) {
+    val attempt = (lead.failedAnnounces[nonce] ?: 0) + 1
+    val resolved = resolveGateArtifact(gateKind, payloadDigest, lead)
     val outcome: AnnounceOutcome =
-      when (val resolved = resolveGateArtifact(gateKind, payloadDigest, lead)) {
+      when (resolved) {
         is ArtifactResolution.Unresolved -> {
           escalate(
             "gate-open notify unresolved for $gateId ($gateKind): ${resolved.reason} — " +
@@ -938,13 +964,26 @@ class LeadDaemon(
           try {
             gateOpenSink.announce(GateOpenSignal(gateId, payloadDigest, nonce, resolved.content))
           } catch (e: Exception) {
-            // A sink fault is a delivery failure the transport layer owns (retry and alerting are
-            // the deployment's wiring, not the substrate's), so it is recorded, not escalated — a
-            // flapping relay must not become an escalation storm. Only the Unresolved arm
-            // escalates: a bound copy that cannot be inlined is a fault nothing else surfaces.
+            // A sink that throws has failed to deliver, as one that returns Failed has: it is sent
+            // again, and escalated only when its last attempt fails, so a flapping relay costs one
+            // escalation per nonce, not a storm. A crash between that escalation and its marker
+            // escalates once more on restart.
             AnnounceOutcome.Failed("sink threw: ${e.message}")
           }
       }
+    // Only a failure the sink reported is sent again. An unresolved artifact was escalated above,
+    // and a delivery, or no sink wired, has nothing to send again.
+    val sinkFailure =
+      if (resolved is ArtifactResolution.Resolved) outcome as? AnnounceOutcome.Failed else null
+    val retry = sinkFailure != null && attempt < MAX_ANNOUNCE_ATTEMPTS
+    if (sinkFailure != null && !retry) {
+      // The detail is the sink's text, so it is cut short: the full text would push the rest of the
+      // reason past the escalation's own bound. The marker keeps the detail up to that bound.
+      escalate(
+        "gate-open notify failed for $gateId ($gateKind) after $attempt attempts: " +
+          "${sinkFailure.detail.take(200)} — gate is open and blocking, operator not notified"
+      )
+    }
     faults.at("after-gate-announced")
     store.append(
       LeadKinds.GATE_OPEN_NOTIFIED,
@@ -953,9 +992,41 @@ class LeadDaemon(
         put("payloadDigest", payloadDigest)
         put("nonce", nonce)
         put("outcome", announceLabel(outcome).take(MAX_JOURNALED_STRING))
+        if (retry) put("retry", true)
       },
       origin = ORIGIN_SUBSTRATE,
     )
+    if (retry) {
+      faults.at("before-announce-retry-armed")
+      armAnnounceRetry(nonce, attempt)
+    }
+  }
+
+  /**
+   * Arm the timer that the retry after [failures] failed announces of [nonce] waits on. It is
+   * journaled before it is handed to [timers], so a restart re-arms it at adopt. Its id names the
+   * nonce and the attempt, so the notify arm finds it from the fold and arms it only if it was
+   * never journaled.
+   */
+  private fun armAnnounceRetry(nonce: String, failures: Int) {
+    val delayMs =
+      ANNOUNCE_RETRY_DELAYS_MS[(failures - 1).coerceIn(ANNOUNCE_RETRY_DELAYS_MS.indices)]
+    val timer =
+      ArmedTimer(
+        announceRetryTimerId(nonce, failures),
+        System.currentTimeMillis() + delayMs,
+        ANNOUNCE_RETRY_ACTION,
+      )
+    store.append(
+      "timer-armed",
+      buildJsonObject {
+        put("id", timer.id)
+        put("fireAtEpochMs", timer.fireAtEpochMs)
+        put("action", timer.action)
+      },
+      origin = ORIGIN_SUBSTRATE,
+    )
+    timers.arm(timer) { id -> queue.put(WakeEvent.TimerDue(id)) }
   }
 
   /** The journaled form of an [AnnounceOutcome] — the notify marker's `outcome` field. The success
@@ -1572,6 +1643,21 @@ private val TASK_REF_RE = Regex("[A-Za-z0-9:._-]+")
  * proposal cardinality nor string size can bloat the journal or grow re-fold memory. */
 private const val MAX_PROPOSALS_PER_WAKE = 16
 private const val MAX_JOURNALED_STRING = 4000
+
+/** The waits before each retry of a gate-open announce the sink reported failed: the first retry
+ * comes 30 s after the first failure, the last 30 min after the fourth. With the first attempt that
+ * is [MAX_ANNOUNCE_ATTEMPTS] attempts over about 42 minutes; a sink down for longer is a fault the
+ * operator must see, so its last failure escalates. */
+private val ANNOUNCE_RETRY_DELAYS_MS = listOf(30_000L, 120_000L, 600_000L, 1_800_000L)
+
+private val MAX_ANNOUNCE_ATTEMPTS = ANNOUNCE_RETRY_DELAYS_MS.size + 1
+
+/** The action a gate-open retry timer's `timer-armed` entry records. */
+private const val ANNOUNCE_RETRY_ACTION = "gate-open-announce-retry"
+
+/** The id of the timer that the retry after [failures] failed announces of [nonce] waits on. */
+private fun announceRetryTimerId(nonce: String, failures: Int): String =
+  "gate-open-retry:$nonce:$failures"
 
 /** Lead-tier attempt cap (see [LeadDaemon] failureAbandons): failure-abandons per taskRef
  * per PROCESS before the spawn site stops re-proposing and escalates. Three genuine
