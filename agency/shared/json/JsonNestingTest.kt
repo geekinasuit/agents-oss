@@ -159,7 +159,9 @@ class JsonNestingTest {
       )
 
     // Shapes the soup seldom assembles by chance: each continues an array past a closer, hides
-    // nesting behind a string, an escape, or non-JSON whitespace, or banks depth with stray closers.
+    // nesting behind a string, an escape, or non-JSON whitespace, banks depth with stray closers,
+    // or hides closers and a comma in a string, which a scan counting them would read as the
+    // array ending before the nesting after it.
     val HAND_PICKED =
       listOf(
         "[1][1][1]",
@@ -172,8 +174,12 @@ class JsonNestingTest {
         "[\"\\\\\",[[[",
         "[\"\\\"\",[[[",
         "]]]],[[[[",
+        "[\"],\",[",
+        "[[\"]],\",[[",
       )
 
-    val SCALARS = listOf("1", "-2.5e3", "true", "null", "\"s\"", "\"[{\\\"\\\\\"")
+    // Among them, strings holding openers, an escaped quote and an escaped backslash, and closers
+    // with a comma after them: structure the scan must read as content.
+    val SCALARS = listOf("1", "-2.5e3", "true", "null", "\"s\"", "\"[{\\\"\\\\\"", "\"]},\"")
   }
 }
