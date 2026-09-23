@@ -106,13 +106,17 @@ sealed interface NoticeEncoding {
  * stores is the gift wrap around it ([Nip59.GIFT_WRAP_KIND]), a regular kind, so an operator whose
  * client was offline when the gate opened fetches the notice on reconnect.
  *
- * Such a client has two limits. It looks for the notice only on the relays it reads for the
- * recipient key, which NIP-17 clients take from that key's kind-10050 list, so the relay a
- * deployment publishes to must be on that list. And it renders the content, which is the artifact,
- * by its own rules: a client that fetches link previews, images, or embeds for links in the text
- * tells whoever wrote those links the reader's address and when they read it, and the artifact's
- * author may be hostile. A reader built for these notices shows the artifact as inert text (see
- * [encodeGateOpenNotice]).
+ * Such a client has two limits. It looks for the notice only on the relays it reads DMs from for
+ * the recipient key: the key's kind-10050 list, and in some clients other relay lists as well. The
+ * relay a deployment publishes to belongs on the kind-10050 list, since NIP-17 has a sender
+ * publish only to the relays on it; a relay only on another list reaches just the clients that
+ * also read that one. The list is itself an event, signed by the recipient key, and relays it does
+ * not name can store it, so a relay that refuses kind-10050 events can still be named on it, as
+ * long as the recipient's client also publishes the list to a relay that accepts it. And the
+ * client renders the content, which is the artifact, by its own rules: a client that fetches link
+ * previews, images, or embeds for links in the text tells whoever wrote those links the reader's
+ * address and when they read it, and the artifact's author may be hostile. A reader built for
+ * these notices shows the artifact as inert text (see [encodeGateOpenNotice]).
  *
  * The notice's fields ride in the rumor's tags and its content is the artifact itself, so giving the
  * notice a kind of its own, with a reader built for it, changes this constant and the subject line —
