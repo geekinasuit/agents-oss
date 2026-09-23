@@ -30,9 +30,11 @@ import org.junit.rules.TemporaryFolder
  * [LeadAuth.hasApprovers] — the same one the release fold reads to refuse a nonce-less
  * release ([LeadState.foldRelease]); one predicate, read at both the write and the fold. A
  * gate-open that a crash cut short before its mint is minted at the next wake, on the same
- * terms. The honest [ScriptedCognition] walk drives a real plan-gate-open, so these cells
+ * terms, and so is a gate a DENY_ALL daemon opened, once the daemon restarts under a ceremony
+ * auth. The honest [ScriptedCognition] walk drives a real plan-gate-open, so these cells
  * exercise the write path end to end; the journal states the daemon does not produce on its
- * own (a voided nonce, a release, a re-open on a new digest) are hand-appended on top of it.
+ * own (a voided nonce, a release, a re-open on a new or blank digest) are hand-appended on top
+ * of it.
  */
 class NonceMintTest {
 
@@ -223,6 +225,25 @@ class NonceMintTest {
   }
 
   @Test
+  fun aGateADenyAllDaemonOpenedGetsANonceOnceTheDaemonRestartsUnderACeremonyAuth() {
+    // DENY_ALL opens the gate and mints nothing, so a restart under a ceremony auth finds an open
+    // gate with no nonce, as a crash before the mint leaves one. The auth in force now decides:
+    // the gate gets one nonce, bound to its digest, and the nonce is announced.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val pre = daemon(dir, store, LeadAuth.DENY_ALL).driveUntilQuiescent().lead
+    assertTrue("the plan gate opened under DENY_ALL", PLAN_GATE in pre.openGates)
+    assertTrue("DENY_ALL minted nothing", pre.issuedNonces.isEmpty())
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val minted = planNonces(f.lead)
+    assertEquals("the ceremony restart mints one nonce", 1, minted.size)
+    assertEquals("bound to the gate's digest", pre.planArtifactSha, minted[0].payloadDigest)
+    assertTrue("the minted nonce is announced", minted[0].nonce in f.lead.notifiedNonces)
+    store.close()
+  }
+
+  @Test
   fun anOrphanWhoseEvidenceMovedGetsNoNonce() {
     // A gate opens only on the digest the substrate records as evidence for its kind. The mint a
     // wake owes an orphan finishes that gate-open, so it checks the same thing: a plan artifact
@@ -273,6 +294,33 @@ class NonceMintTest {
       nonces[1],
       f.lead.openNonceFor(f.lead.openGates.getValue(PLAN_GATE)),
     )
+    store.close()
+  }
+
+  @Test
+  fun aGateOpenOnABlankDigestGetsNoNonceAndTheJournalStillFolds() {
+    // A blank recorded digest is no evidence. A nonce bound to it would make every later fold of
+    // the journal fail, so a gate open on one is left without a nonce.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val first = planNonces(f1.lead)
+    assertEquals("the gate-open minted one nonce", 1, first.size)
+    store.planArtifactRecorded(f1.lead.planArtifactPath!!, "")
+    store.append(
+      LeadKinds.GATE_OPENED,
+      buildJsonObject {
+        put("gateId", PLAN_GATE)
+        put("gateKind", GateKinds.PLAN_APPROVAL)
+        put("payloadDigest", "")
+      },
+      ORIGIN_SUBSTRATE,
+    )
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    assertEquals("the gate is open on the blank digest", "", f.lead.openGates[PLAN_GATE]?.payloadDigest)
+    assertEquals("no nonce is minted for it", first, planNonces(f.lead))
+    assertEquals("the journal still folds", first, planNonces(leadFold(store.readAll(), ceremonyAuth())))
     store.close()
   }
 

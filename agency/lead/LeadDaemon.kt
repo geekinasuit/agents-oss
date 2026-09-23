@@ -692,10 +692,13 @@ class LeadDaemon(
     // Recovery path for the gate-open mint. A ceremony gate-open is two appends, GATE_OPENED and
     // then its NONCE_ISSUED, and the daemon never re-opens an open gate, so a crash between them
     // leaves a gate nothing else mints for: no release can clear it, and no operator is told of
-    // it. This finishes that gate-open on the terms it started under: a ceremony auth, and a gate
-    // digest that is still the substrate's evidence for its kind. A gate issued a nonce on its
-    // current digest at any point gets no other, because a nonce voided or spent by a release
-    // stays withdrawn: a second one would authorize that payload again.
+    // it. A gate a DENY_ALL daemon opened is left the same way once the daemon restarts under a
+    // ceremony auth, since DENY_ALL mints no nonce. This mints for such a gate on the terms in
+    // force now: a ceremony auth, and a gate digest that is still the substrate's evidence for its
+    // kind. A gate issued a nonce on its current digest at any point gets no other. A voided nonce
+    // stays withdrawn, since a second one would re-authorize the payload the void withdrew. A spent
+    // nonce's gate was already released on that digest, which the release fold never allows twice,
+    // so a second nonce could never be spent and would only announce a decided gate again.
     if (leadAuth.hasApprovers) {
       for (gate in lead.openGates.values) {
         val everIssued =
@@ -712,8 +715,8 @@ class LeadDaemon(
     // nonce but not yet marked. The normal announce happens at gate-open in executeProposals; this
     // catches a crash between the mint and its notify marker, and announces a nonce the mint
     // recovery above issued, because a restart's adopt runs this pass BEFORE cognition and so sees
-    // the already-open gate. openNonceFor yields a nonce only under a ceremony auth, so this is
-    // inert in deployment, exactly as the mint is.
+    // the already-open gate. Only a ceremony auth mints a nonce, so this announces nothing on a
+    // journal no ceremony daemon has written to.
     for (gate in lead.openGates.values) {
       val nonce = lead.openNonceFor(gate) ?: continue
       if (nonce.nonce in lead.notifiedNonces) continue
@@ -858,13 +861,14 @@ class LeadDaemon(
   /** The digest the substrate recorded as the evidence a gate of [gateKind] binds to: the plan
    * artifact's for the plan gate, the commit manifest's for the commit gate, none for any other
    * kind. A gate opens only on this digest, and a gate-open's nonce is minted only while the
-   * gate's digest still equals it. */
+   * gate's digest still equals it. A blank recorded digest counts as none, since a nonce minted
+   * on it would make every later fold of the journal fail. */
   private fun evidenceDigest(gateKind: String, lead: LeadState): String? =
     when (gateKind) {
       GateKinds.PLAN_APPROVAL -> lead.planArtifactSha
       GateKinds.COMMIT_APPROVAL -> lead.commitManifestDigest
       else -> null
-    }
+    }?.takeIf { it.isNotBlank() }
 
   /** Journal a fresh single-use nonce bound to ([gateId], [payloadDigest]), the pair the release
    * fold checks it against, and return it. */
