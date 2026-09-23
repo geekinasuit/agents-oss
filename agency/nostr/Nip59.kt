@@ -133,10 +133,11 @@ object Nip59 {
    * [senderKey] is raw bytes the caller owns; wrap reads it and neither retains nor zeroes it (as
    * [encodeGateOpenNotice] treats its key). The wrap key is drawn fresh from a CSPRNG on every call
    * and zeroed after use, as are the conversation keys derived here; no caller can supply or reuse
-   * one. The zeroing is best-effort hygiene, not a guarantee that no key material remains in memory:
-   * [Nip44.conversationKey]'s own intermediates, from which a conversation key can be re-derived, are
-   * not zeroed. The timestamps and the two aux-randomness values are caller-supplied for the reason
-   * [signEvent] takes them: production draws them fresh, a test pins them.
+   * one. The zeroing is best-effort hygiene, not a guarantee that no key material remains in memory,
+   * for the reasons [Nip44] gives; the same native binding also signs with the wrap key and the
+   * sender key, and may leave copies of both in native memory it does not clear. The timestamps and
+   * the two aux-randomness values are caller-supplied for the reason [signEvent] takes them:
+   * production draws them fresh, a test pins them.
    */
   fun wrap(
     senderKey: ByteArray,
@@ -249,11 +250,3 @@ object Nip59 {
     return key
   }
 }
-
-/** Runs [block] on this key material, then zeroes it — whether [block] returns or throws. */
-private inline fun <T> ByteArray.zeroedAfter(block: (ByteArray) -> T): T =
-  try {
-    block(this)
-  } finally {
-    fill(0)
-  }

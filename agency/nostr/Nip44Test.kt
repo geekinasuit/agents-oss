@@ -4,6 +4,7 @@ import fr.acinq.secp256k1.Secp256k1
 import java.io.File
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -19,7 +20,10 @@ import org.junit.Test
  * owes and the probe did not: that a malformed payload returns `null` rather than throwing (the
  * totality contract a hostile relay input relies on), that the shared-point primitive is point
  * multiplication and not the library's hashing ecdh (the trap, pinned in THIS module), that a
- * fresh nonce is drawn per message, and that the 16-bit length ceiling is enforced at both ends.
+ * fresh nonce is drawn per message, that the 16-bit length ceiling is enforced at both ends, and
+ * that the helpers the codec zeroes its derived key material with do zero it. That the codec's
+ * own paths call those helpers is checked by reading: a test has no handle on an array the codec
+ * creates and drops inside one call.
  *
  * The vector file is agency/crypto/testdata/nip44.vectors.json — the spec's own file, shared
  * rather than copied so its published SHA-256 stays a single source of truth. It arrives via the
@@ -105,15 +109,16 @@ class Nip44Test {
 
     @Test
     fun `the message-key schedule matches the spec for every vector`() {
+        // One conversation key serves every vector, so a schedule that zeroed it would fail from
+        // the second vector on.
         val group = messageKeyVectors()
         val conversationKey = Hex.decode(group.getString("conversation_key"))
         val keys = group.getJSONArray("keys")
         for (i in 0 until keys.length()) {
             val v = keys.getJSONObject(i)
-            val derived = Nip44.messageKeys(conversationKey, Hex.decode(v.getString("nonce")))
-            assertEquals("key $i chacha_key", v.getString("chacha_key"), Hex.encode(derived.chachaKey))
-            assertEquals("key $i chacha_nonce", v.getString("chacha_nonce"), Hex.encode(derived.chachaNonce))
-            assertEquals("key $i hmac_key", v.getString("hmac_key"), Hex.encode(derived.hmacKey))
+            Nip44.withMessageKeys(conversationKey, Hex.decode(v.getString("nonce"))) { derived ->
+                assertMessageKeys("key $i", v, derived)
+            }
         }
     }
 
@@ -255,4 +260,92 @@ class Nip44Test {
         assertEquals("nonce is 32 bytes", 32, nonceB.size)
         assertNotEquals("two messages must not share a nonce", Hex.encode(nonceA), Hex.encode(nonceB))
     }
+
+    @Test
+    fun `zeroedAfter zeroes the array whether its block returns or throws`() {
+        val returned = ByteArray(32) { 0x5a.toByte() }
+        val seen = returned.zeroedAfter { it.copyOf() }
+        assertTrue("the block sees the bytes before they are zeroed", seen.all { it == 0x5a.toByte() })
+        assertTrue("zeroed once the block returns", returned.isZeroed())
+
+        val thrown = ByteArray(32) { 0x5a.toByte() }
+        assertThrows(IllegalStateException::class.java) { thrown.zeroedAfter { error("the block failed") } }
+        assertTrue("zeroed once the block throws", thrown.isZeroed())
+    }
+
+    @Test
+    fun `the shared point and its x coordinate are zeroed once the conversation key is derived`() {
+        val v = valid("get_conversation_key").getJSONObject(0)
+        val compressed = byteArrayOf(0x02.toByte()) + Hex.decode(v.getString("pub2"))
+        val point = secp.pubKeyTweakMul(secp.pubkeyParse(compressed), Hex.decode(v.getString("sec1")))
+        assertFalse("the point starts out as key material", point.isZeroed())
+
+        val x = Nip44.xOfSharedPoint(point)
+        assertTrue("the point is zeroed once its x is copied out", point.isZeroed())
+        assertFalse("x starts out as key material", x.isZeroed())
+
+        val key = Nip44.conversationKeyFromSharedX(x)
+        assertEquals("the conversation key is the spec's", v.getString("conversation_key"), Hex.encode(key))
+        assertTrue("x is zeroed once the conversation key is derived", x.isZeroed())
+    }
+
+    @Test
+    fun `the HKDF output is zeroed once it is split into the message keys`() {
+        // The spec cuts the three keys from one 76-byte HKDF output, in order, so a vector's three
+        // keys concatenated are that output.
+        val v = messageKeyVectors().getJSONArray("keys").getJSONObject(0)
+        val okm = Hex.decode(v.getString("chacha_key") + v.getString("chacha_nonce") + v.getString("hmac_key"))
+        assertEquals("the HKDF output is 76 bytes", 76, okm.size)
+
+        assertMessageKeys("split", v, Nip44.splitMessageKeys(okm))
+        assertTrue("the HKDF output is zeroed once split", okm.isZeroed())
+    }
+
+    @Test
+    fun `the message keys are zeroed once their block returns or throws, and the conversation key is not`() {
+        val group = messageKeyVectors()
+        val conversationKey = Hex.decode(group.getString("conversation_key"))
+        val v = group.getJSONArray("keys").getJSONObject(0)
+        val nonce = Hex.decode(v.getString("nonce"))
+
+        val returned =
+            Nip44.withMessageKeys(conversationKey, nonce) { keys ->
+                assertMessageKeys("in the block", v, keys)
+                keys
+            }
+        assertTrue("zeroed once the block returns", returned.isZeroed())
+
+        var thrown: Nip44.MessageKeys? = null
+        assertThrows(IllegalStateException::class.java) {
+            Nip44.withMessageKeys(conversationKey, nonce) { keys ->
+                thrown = keys
+                error("the block failed")
+            }
+        }
+        assertTrue("zeroed once the block throws", thrown!!.isZeroed())
+        // A round trip through the public API on the same key, so the check below also covers
+        // encrypt and decrypt leaving the caller's key alone, not only withMessageKeys.
+        assertEquals(
+            "the key round-trips a message",
+            "m",
+            Nip44.decrypt(Nip44.encrypt("m", conversationKey), conversationKey),
+        )
+        assertEquals(
+            "the caller's conversation key is left as it was",
+            group.getString("conversation_key"),
+            Hex.encode(conversationKey),
+        )
+    }
+
+    /** Asserts that [keys] are the message keys message-key vector [v] lists. */
+    private fun assertMessageKeys(label: String, v: JSONObject, keys: Nip44.MessageKeys) {
+        assertEquals("$label chacha_key", v.getString("chacha_key"), Hex.encode(keys.chachaKey))
+        assertEquals("$label chacha_nonce", v.getString("chacha_nonce"), Hex.encode(keys.chachaNonce))
+        assertEquals("$label hmac_key", v.getString("hmac_key"), Hex.encode(keys.hmacKey))
+    }
+
+    private fun ByteArray.isZeroed(): Boolean = all { it == 0.toByte() }
+
+    private fun Nip44.MessageKeys.isZeroed(): Boolean =
+        chachaKey.isZeroed() && chachaNonce.isZeroed() && hmacKey.isZeroed()
 }
