@@ -254,6 +254,69 @@ kt_jvm_test(
     ],
 )
 
+# The DEPTH bound's margin: a frame nested exactly MAX_JSON_DEPTH deep, which the depth check admits,
+# parses on the listener thread without overflowing that thread's stack. How much stack the parser
+# needs per level depends on its JIT state, so one test class runs under three targets, each pinning
+# a state: interpreted, the parser's state until the JIT compiles it; compiled by C1 with profiling
+# (tier 3); and tier 3 with kotlinx's JsonTreeReader.readArray left interpreted. Of the states
+# measured, all on aarch64, the last two need the most stack per level. Native-free, like
+# relay_connection_test.
+kt_jvm_test(
+    name = "relay_ceiling_interpreted_test",
+    size = "small",
+    srcs = ["RelayCeilingTest.kt"],
+    jvm_flags = ["-Xint"],
+    test_class = "com.geekinasuit.agency.nostr.RelayCeilingTest",
+    deps = [
+        ":fake_relay",
+        ":nostr",
+        ":relay",
+        "@maven//:junit_junit",
+    ],
+)
+
+# TieredStopAtLevel=3 stops compilation at tier 3. -Xbatch finishes each compile before the call
+# that triggered it goes on, so the class's warm-ups leave the methods the parser recurses through
+# compiled before the first cell.
+kt_jvm_test(
+    name = "relay_ceiling_c1_test",
+    size = "small",
+    srcs = ["RelayCeilingTest.kt"],
+    jvm_flags = [
+        "-Xbatch",
+        "-XX:TieredStopAtLevel=3",
+    ],
+    test_class = "com.geekinasuit.agency.nostr.RelayCeilingTest",
+    deps = [
+        ":fake_relay",
+        ":nostr",
+        ":relay",
+        "@maven//:junit_junit",
+    ],
+)
+
+# As relay_ceiling_c1_test, but readArray is never compiled, so each array level calls from the
+# compiled JsonTreeReader.read into the interpreted readArray and back. A tiered run can be in this
+# state, for example after readArray's compiled code is discarded while read's is kept, and there an
+# array level was measured to need more stack than at tier 3.
+kt_jvm_test(
+    name = "relay_ceiling_c1_split_test",
+    size = "small",
+    srcs = ["RelayCeilingTest.kt"],
+    jvm_flags = [
+        "-Xbatch",
+        "-XX:TieredStopAtLevel=3",
+        "-XX:CompileCommand=exclude,kotlinx/serialization/json/internal/JsonTreeReader.readArray",
+    ],
+    test_class = "com.geekinasuit.agency.nostr.RelayCeilingTest",
+    deps = [
+        ":fake_relay",
+        ":nostr",
+        ":relay",
+        "@maven//:junit_junit",
+    ],
+)
+
 # The subscription transport (step 3b-2): subscribe()/closeSubscription() framing and round-trip, and
 # the A4-3 hostile-relay matrix (withheld, reordered, delayed, replayed) proving the transport is a
 # faithful pipe. Native-free like relay_connection_test — the events it delivers are structural

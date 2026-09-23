@@ -178,23 +178,28 @@ sealed interface SubscribeResult {
  * EVENT/EOSE/CLOSED that a [subscribe] produces).
  *
  * Built on the JDK's [WebSocket]: no new dependency, matching the [HttpClient] the harness already
- * uses. The receive path is a callback [Listener] on the JDK's own executor thread; it hands typed
- * [RelayMessage]s to the caller through a bounded queue. It is deliberately NOT bridged into a
- * coroutine Channel/Flow: the WebSocket's demand model (one `request(1)` per delivery = exactly one
- * outstanding listener invocation) already IS the backpressure, and it is what lets the fragment
- * accumulator below be a plain [StringBuilder] with no lock — the listener is invoked serially. A
- * Channel would add a second backpressure system that can disagree with the first, and its full
- * state either blocks inside the callback (wedging that serialized thread) or drops. (AcpClient
- * uses Flow only because its acp-jvm SDK's Transport takes a CoroutineScope; nothing in
- * java.net.http.WebSocket does.)
+ * uses. The receive path is a callback [Listener], which the JDK invokes on a thread of its choosing
+ * (one of the client's executor threads, or a thread of `CompletableFuture`'s default executor: a
+ * worker of the common ForkJoinPool, or a new thread per task when that pool's parallelism is below
+ * 2); it hands typed [RelayMessage]s to the caller through a bounded queue. It is deliberately NOT
+ * bridged into a coroutine Channel/Flow: the WebSocket's demand model (one `request(1)` per
+ * delivery = exactly one outstanding listener invocation) already IS the backpressure, and it is
+ * what lets the fragment accumulator below be a plain [StringBuilder] with no lock — the listener
+ * is invoked serially. A Channel would add a second backpressure system that can disagree with the
+ * first, and its full state either blocks inside the callback (wedging that serialized thread) or
+ * drops. (AcpClient uses Flow only because its acp-jvm SDK's Transport takes a CoroutineScope;
+ * nothing in java.net.http.WebSocket does.)
  */
 class RelayConnection(
   private val config: RelayConfig,
   // Injectable for tests; production uses the JDK default. The DEPTH guard's headroom (that
   // MAX_JSON_DEPTH parses below the parser's overflow depth; [MAX_JSON_DEPTH] says what checks
-  // that, and what does not) is scoped to the default executor's thread-stack size. A caller
-  // passing its own HttpClient backed by a custom executor with smaller-stack threads lowers that
-  // overflow depth and owns that margin.
+  // that, and what does not) is scoped to the default thread-stack size, which every thread the
+  // JDK invokes the listener on gets by default: the client's executor threads, and the threads of
+  // CompletableFuture's default executor (the common ForkJoinPool's workers, or a new thread per
+  // task when that pool's parallelism is below 2). A caller passing its own HttpClient backed by an
+  // executor with smaller-stack threads lowers that overflow depth for each frame the JDK delivers
+  // on one of them, and owns that margin.
   private val httpClient: HttpClient = HttpClient.newHttpClient(),
 ) {
   // Complete, parsed messages awaiting the caller. Bounded (see COUNT bound above); offered to,
@@ -731,14 +736,20 @@ class RelayConnection(
      * any auth/gate message (a handful of levels) and below the depth at which that parser
      * StackOverflows on this listener's thread. That overflow depth is not a constant: it shifts
      * with the frame's shape, with the thread's stack size, and with whether the parse runs
-     * interpreted or compiled. So the margin is not trusted to a single measured number; instead
-     * the ceiling-depth cells parse MAX_JSON_DEPTH-deep frames on the real listener thread every CI
-     * run. They cover two shapes, arrays only and objects only, and the objects-only frame keeps
-     * only about 200 of its levels on the stack. They do not cover an array nested inside objects
-     * past that point, which puts the objects inside it back on the stack ([jsonMayNestDeeperThan]
-     * says which nesting), and they do not pin whether the parse runs interpreted or compiled. So a
-     * parser or stack change that lowered the overflow depth under this ceiling fails the build
-     * only for the shapes the cells parse, in the JIT state they happen to run in. */
+     * interpreted or compiled, and by which compiler. So the margin is not trusted to a single
+     * measured number; instead RelayCeilingTest parses frames nested exactly this deep on the
+     * listener thread every CI run. It parses three shapes: arrays only; objects only, which keeps
+     * only about 200 of its levels on the stack; and objects with an array inside the 200th, which
+     * keeps all but one of its levels there ([jsonMayNestDeeperThan] says which nesting). It parses
+     * them in three pinned JIT states: interpreted, the parser's state until the JIT compiles it;
+     * C1-compiled with profiling (tier 3); and tier 3 with kotlinx's readArray left interpreted, a
+     * split that a tiered run can also be in. Of the states measured, all on aarch64, the last two
+     * need the most stack per level, the split more than tier 3 per array level. So a parser or JDK
+     * change that lowered the overflow depth under this ceiling in one of these states, on the
+     * default thread stack of the platform CI runs on, fails the build. On aarch64 the other states
+     * measured need no more stack per level than these, and none was measured on the x86_64 CI runs
+     * on; they, a smaller default stack elsewhere, and a caller's executor with smaller stacks are
+     * not checked. */
     const val MAX_JSON_DEPTH: Int = 1024
 
     /** COUNT bound: complete-but-unconsumed messages the queue holds before a flood is treated as
