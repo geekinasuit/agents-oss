@@ -2,13 +2,20 @@ package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.pod.PodSpec
 import com.geekinasuit.agency.shared.auth.AllowList
+import com.geekinasuit.agency.shared.auth.ApprovalEvidence
 import com.geekinasuit.agency.shared.auth.ApprovalVerifier
 import com.geekinasuit.agency.shared.auth.Principal
 import com.geekinasuit.agency.shared.auth.SchemeKey
+import com.geekinasuit.agency.shared.auth.committedPreimage
 import com.geekinasuit.agency.shared.auth.oneOfOne
 import com.geekinasuit.agency.shared.journal.EffectReceiver
+import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
+import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
+import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -21,9 +28,11 @@ import org.junit.rules.TemporaryFolder
  * The gate-open nonce mint (2a.4 step A): the substrate mints a single-use nonce the moment
  * it journals a gate-open, but ONLY under a ceremony auth. The predicate is
  * [LeadAuth.hasApprovers] — the same one the release fold reads to refuse a nonce-less
- * release ([LeadState.foldRelease]); one predicate, read at both the write and the fold. The
- * honest [ScriptedCognition] walk drives a real plan-gate-open, so these cells exercise the
- * write path end to end rather than a hand-appended event.
+ * release ([LeadState.foldRelease]); one predicate, read at both the write and the fold. A
+ * gate-open that a crash cut short before its mint is minted at the next wake, on the same
+ * terms. The honest [ScriptedCognition] walk drives a real plan-gate-open, so these cells
+ * exercise the write path end to end; the journal states the daemon does not produce on its
+ * own (a voided nonce, a release, a re-open on a new digest) are hand-appended on top of it.
  */
 class NonceMintTest {
 
@@ -105,16 +114,176 @@ class NonceMintTest {
   }
 
   @Test
-  fun aCrashBetweenGateOpenAndMintLeavesTheGateStuckNonceLessNotBypassable() {
+  fun aCrashBetweenGateOpenAndMintIsMintedAtTheNextWakeAndStillNotBypassable() {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
-    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    val afterCrash = crashAfterGateOpened(dir, store, GateKinds.PLAN_APPROVAL)
+    assertTrue("the gate opened before the crash", PLAN_GATE in afterCrash.openGates)
+    assertTrue("the crash left the gate nonce-less", afterCrash.issuedNonces.isEmpty())
 
-    // GATE_OPENED and NONCE_ISSUED are two sequential appends. Crash at the seam between them:
-    // the fault fires right after GATE_OPENED, before the mint runs.
+    // A fresh process adopts the orphaned journal, and a nonce-less release is attempted. The
+    // wake mints the orphan's nonce, bound to the digest the gate opened on, and announces it,
+    // while the release fold still refuses the nonce-less release under a ceremony auth.
+    val d2 = daemon(dir, store, ceremonyAuth())
+    d2.injectAuthRelease(PLAN_GATE, afterCrash.planArtifactSha!!)
+    val f = d2.driveUntilQuiescent()
+    val minted = planNonces(f.lead)
+    assertEquals("the wake mints one nonce for the orphan", 1, minted.size)
+    assertEquals("bound to the gate's digest", afterCrash.planArtifactSha, minted[0].payloadDigest)
+    assertTrue("the minted nonce is announced", minted[0].nonce in f.lead.notifiedNonces)
+    assertFalse("the gate is NOT released", PLAN_GATE in f.lead.releasedGates)
+    assertTrue(
+      "the nonce-less release folded stale",
+      f.lead.staleReleases.any { it.second == PLAN_GATE },
+    )
+
+    val again = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    assertEquals("a second restart mints nothing more", minted, planNonces(again.lead))
+    store.close()
+  }
+
+  @Test
+  fun aCrashBetweenTheCommitGateOpenAndItsMintIsMintedAtTheNextWake() {
+    // The commit gate's evidence is the commit manifest's digest, not the plan artifact's.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val planNonce = planNonces(f1.lead).single().nonce
+    store.approveAndRelease(PLAN_GATE, f1.lead.planArtifactSha!!, planNonce)
+    val afterCrash = crashAfterGateOpened(dir, store, GateKinds.COMMIT_APPROVAL)
+    assertTrue("the commit gate opened before the crash", COMMIT_GATE in afterCrash.openGates)
+    assertTrue(
+      "the crash left the commit gate nonce-less",
+      afterCrash.issuedNonces.values.none { it.gateId == COMMIT_GATE },
+    )
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val minted = f.lead.issuedNonces.values.filter { it.gateId == COMMIT_GATE }
+    assertEquals("the wake mints one nonce for the commit gate", 1, minted.size)
+    assertEquals(
+      "bound to the commit manifest's digest",
+      afterCrash.commitManifestDigest,
+      minted[0].payloadDigest,
+    )
+    assertTrue("the minted nonce is announced", minted[0].nonce in f.lead.notifiedNonces)
+    store.close()
+  }
+
+  @Test
+  fun aGateWhoseNonceWasVoidedIsNotReMinted() {
+    // The gate is open with no usable nonce, but it was issued one: minting another for the
+    // same digest would re-authorize the payload the void withdrew.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val issued = planNonces(daemon(dir, store, ceremonyAuth()).driveUntilQuiescent().lead)
+    assertEquals("the gate-open minted one nonce", 1, issued.size)
+    store.append(
+      LeadKinds.NONCE_CONSUMED,
+      buildJsonObject {
+        put("nonce", issued[0].nonce)
+        put("reason", "voided")
+      },
+      ORIGIN_SUBSTRATE,
+    )
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    assertTrue("the void holds", issued[0].nonce in f.lead.consumedNonces)
+    assertEquals("no nonce is minted in its place", issued, planNonces(f.lead))
+    store.close()
+  }
+
+  @Test
+  fun aGateReleasedOnItsNonceIsNotReMinted() {
+    // An approved gate stays open until its ticket is done, and its release consumed its nonce,
+    // so every later wake sees it open with no usable nonce. It was issued one, so none is minted.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val issued = planNonces(f1.lead)
+    assertEquals("the gate-open minted one nonce", 1, issued.size)
+    store.approveAndRelease(PLAN_GATE, f1.lead.planArtifactSha!!, issued[0].nonce)
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    assertTrue("the plan gate is released", f.lead.approvedOnCurrentDigest(PLAN_GATE))
+    assertEquals("no nonce is minted for the released gate", issued, planNonces(f.lead))
+    store.close()
+  }
+
+  @Test
+  fun aDenyAllDaemonMintsNoNonceForAnOpenGateAtRestart() {
+    // Under DENY_ALL every open gate is nonce-less by design: its release path is the nonce-less
+    // one, and a minted nonce would need a quorum no approver can satisfy.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    daemon(dir, store, LeadAuth.DENY_ALL).driveUntilQuiescent()
+    val f = daemon(dir, store, LeadAuth.DENY_ALL).driveUntilQuiescent()
+    assertTrue("the plan gate is open", PLAN_GATE in f.lead.openGates)
+    assertTrue("a restart under DENY_ALL mints nothing", f.lead.issuedNonces.isEmpty())
+    store.close()
+  }
+
+  @Test
+  fun anOrphanWhoseEvidenceMovedGetsNoNonce() {
+    // A gate opens only on the digest the substrate records as evidence for its kind. The mint a
+    // wake owes an orphan finishes that gate-open, so it checks the same thing: a plan artifact
+    // recorded since the gate opened means the gate's digest is superseded, and gets no nonce.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val afterCrash = crashAfterGateOpened(dir, store, GateKinds.PLAN_APPROVAL)
+    store.planArtifactRecorded(afterCrash.planArtifactPath!!, OTHER_DIGEST)
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    assertEquals(
+      "the gate is still open on the digest it opened on",
+      afterCrash.planArtifactSha,
+      f.lead.openGates[PLAN_GATE]?.payloadDigest,
+    )
+    assertTrue("no nonce is minted for a superseded digest", f.lead.issuedNonces.isEmpty())
+    store.close()
+  }
+
+  @Test
+  fun aGateReOpenedOnANewDigestGetsANonceBoundToIt() {
+    // The daemon opens a gate at most once per ticket, so a gate re-opened on a new digest reaches
+    // the fold only from the journal. The nonce the first open got is bound to the old digest and
+    // cannot release the new one, so a nonce is minted for the new digest.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val first = planNonces(f1.lead)
+    assertEquals("the gate-open minted one nonce", 1, first.size)
+    store.planArtifactRecorded(f1.lead.planArtifactPath!!, OTHER_DIGEST)
+    store.append(
+      LeadKinds.GATE_OPENED,
+      buildJsonObject {
+        put("gateId", PLAN_GATE)
+        put("gateKind", GateKinds.PLAN_APPROVAL)
+        put("payloadDigest", OTHER_DIGEST)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+
+    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    val nonces = planNonces(f.lead)
+    assertEquals("the first open's nonce, then one for the new digest", 2, nonces.size)
+    assertEquals("the first is unchanged", first[0], nonces[0])
+    assertEquals("the second is bound to the new digest", OTHER_DIGEST, nonces[1].payloadDigest)
+    assertEquals(
+      "and it is the gate's usable nonce",
+      nonces[1],
+      f.lead.openNonceFor(f.lead.openGates.getValue(PLAN_GATE)),
+    )
+    store.close()
+  }
+
+  /**
+   * Runs a ceremony daemon until an injected crash lands between a [gateKind] gate's GATE_OPENED
+   * and its NONCE_ISSUED, two sequential appends, and returns the state the journal folds to then.
+   */
+  private fun crashAfterGateOpened(dir: File, store: SqliteStore, gateKind: String): LeadState {
     val crash =
       FaultInjector {
-        if (it == "after-gate-opened-${GateKinds.PLAN_APPROVAL}") {
+        if (it == "after-gate-opened-$gateKind") {
           throw RuntimeException("crash after gate-opened, before mint")
         }
       }
@@ -126,25 +295,65 @@ class NonceMintTest {
       threw = true
     }
     assertTrue("the injected crash fired at the post-gate-open seam", threw)
+    return d1.refold().lead
+  }
 
-    // The daemon reached the orphan state: gate open, NO nonce.
-    val afterCrash = d1.refold()
-    assertTrue("the gate opened before the crash", planGateId in afterCrash.lead.openGates)
-    assertTrue("the crash left the gate nonce-less", afterCrash.lead.issuedNonces.isEmpty())
+  /** The nonces issued for the plan gate, in issue order. */
+  private fun planNonces(lead: LeadState): List<IssuedNonce> =
+    lead.issuedNonces.values.filter { it.gateId == PLAN_GATE }.sortedBy { it.issuedSeq }
 
-    // A fresh process adopts the orphaned journal and a ceremony release is attempted. Two teeth
-    // hold: the seen-gate guard means the honest walk does NOT re-mint the orphan (it stays
-    // nonce-less — the liveness gap), and the release fold refuses a nonce-less release under a
-    // ceremony auth. Stuck, never bypassable.
-    val d2 = daemon(dir, store, ceremonyAuth())
-    d2.injectAuthRelease(planGateId, afterCrash.lead.planArtifactSha!!)
-    val f = d2.driveUntilQuiescent()
-    assertTrue("a restart does not re-mint the orphan", f.lead.issuedNonces.isEmpty())
-    assertFalse("the orphan gate is NOT released", planGateId in f.lead.releasedGates)
-    assertTrue(
-      "the nonce-less release folded stale",
-      f.lead.staleReleases.any { it.second == planGateId },
+  private fun SqliteStore.planArtifactRecorded(path: String, digest: String) =
+    append(
+      LeadKinds.PLAN_ARTIFACT_RECORDED,
+      buildJsonObject {
+        put("path", path)
+        put("sha256", digest)
+      },
+      ORIGIN_SUBSTRATE,
     )
-    store.close()
+
+  /** An approval by the ceremony auth's one principal that re-verifies under its accepting
+   * verifier, then the release naming [nonce], which that approval's quorum clears. */
+  private fun SqliteStore.approveAndRelease(gateId: String, digest: String, nonce: String) {
+    val publicKey = "pk-operator"
+    append(
+      LeadKinds.APPROVAL_RECORDED,
+      buildJsonObject {
+        put("gateId", gateId)
+        put("principalId", "operator")
+        put("nonce", nonce)
+        put("payloadDigest", digest)
+        put(
+          "evidence",
+          ApprovalEvidence(
+              schemeId = "test",
+              publicKey = publicKey,
+              signature = "sig-operator",
+              carrierArtifactId = "carrier-$nonce",
+              gateId = gateId,
+              payloadDigest = digest,
+              nonce = nonce,
+              signedPreimage = committedPreimage(publicKey, gateId, digest, nonce),
+            )
+            .toJson(),
+        )
+      },
+      ORIGIN_AUTH_LAYER,
+    )
+    append(
+      KIND_GATE_RELEASED,
+      buildJsonObject {
+        put("gateId", gateId)
+        put("payloadDigest", digest)
+        put("nonce", nonce)
+      },
+      ORIGIN_AUTH_LAYER,
+    )
+  }
+
+  private companion object {
+    val PLAN_GATE = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    val COMMIT_GATE = gateIdFor(GateKinds.COMMIT_APPROVAL, "t1")
+    val OTHER_DIGEST = "0".repeat(64)
   }
 }

@@ -689,11 +689,31 @@ class LeadDaemon(
     val lead = folded.lead
     val shared = folded.shared
 
+    // Recovery path for the gate-open mint. A ceremony gate-open is two appends, GATE_OPENED and
+    // then its NONCE_ISSUED, and the daemon never re-opens an open gate, so a crash between them
+    // leaves a gate nothing else mints for: no release can clear it, and no operator is told of
+    // it. This finishes that gate-open on the terms it started under: a ceremony auth, and a gate
+    // digest that is still the substrate's evidence for its kind. A gate issued a nonce on its
+    // current digest at any point gets no other, because a nonce voided or spent by a release
+    // stays withdrawn: a second one would authorize that payload again.
+    if (leadAuth.hasApprovers) {
+      for (gate in lead.openGates.values) {
+        val everIssued =
+          lead.issuedNonces.values.any {
+            it.gateId == gate.gateId && it.payloadDigest == gate.payloadDigest
+          }
+        if (everIssued || gate.payloadDigest != evidenceDigest(gate.gateKind, lead)) continue
+        mintNonce(gate.gateId, gate.payloadDigest)
+        return true
+      }
+    }
+
     // Recovery path for the gate-open announce: re-announce any ceremony gate that is open with a
     // nonce but not yet marked. The normal announce happens at gate-open in executeProposals; this
-    // catches a crash between the mint and its notify marker, because a restart's adopt runs this
-    // pass BEFORE cognition and so sees the already-open gate. openNonceFor yields a nonce only
-    // under a ceremony auth, so this is inert in deployment, exactly as the mint is.
+    // catches a crash between the mint and its notify marker, and announces a nonce the mint
+    // recovery above issued, because a restart's adopt runs this pass BEFORE cognition and so sees
+    // the already-open gate. openNonceFor yields a nonce only under a ceremony auth, so this is
+    // inert in deployment, exactly as the mint is.
     for (gate in lead.openGates.values) {
       val nonce = lead.openNonceFor(gate) ?: continue
       if (nonce.nonce in lead.notifiedNonces) continue
@@ -833,6 +853,33 @@ class LeadDaemon(
       // intent exists but no done entry: adopt's re-drive owns that window
     }
     return false
+  }
+
+  /** The digest the substrate recorded as the evidence a gate of [gateKind] binds to: the plan
+   * artifact's for the plan gate, the commit manifest's for the commit gate, none for any other
+   * kind. A gate opens only on this digest, and a gate-open's nonce is minted only while the
+   * gate's digest still equals it. */
+  private fun evidenceDigest(gateKind: String, lead: LeadState): String? =
+    when (gateKind) {
+      GateKinds.PLAN_APPROVAL -> lead.planArtifactSha
+      GateKinds.COMMIT_APPROVAL -> lead.commitManifestDigest
+      else -> null
+    }
+
+  /** Journal a fresh single-use nonce bound to ([gateId], [payloadDigest]), the pair the release
+   * fold checks it against, and return it. */
+  private fun mintNonce(gateId: String, payloadDigest: String): String {
+    val nonce = freshNonceHex()
+    store.append(
+      LeadKinds.NONCE_ISSUED,
+      buildJsonObject {
+        put("nonce", nonce)
+        put("gateId", gateId)
+        put("payloadDigest", payloadDigest)
+      },
+      origin = ORIGIN_SUBSTRATE,
+    )
+    return nonce
   }
 
   /**
@@ -1133,12 +1180,7 @@ class LeadDaemon(
           if (ticket == null) continue
           val gateId = gateIdFor(p.gateKind, ticket)
           if (gateId in leadAtDecision.openGates || !seenGateIds.add(gateId)) continue
-          val expected =
-            when (p.gateKind) {
-              GateKinds.PLAN_APPROVAL -> leadAtDecision.planArtifactSha
-              GateKinds.COMMIT_APPROVAL -> leadAtDecision.commitManifestDigest
-              else -> null
-            }
+          val expected = evidenceDigest(p.gateKind, leadAtDecision)
           if (expected == null || p.payloadDigest != expected) {
             escalate(
               "gate-open rejected for $gateId: proposed digest ${p.payloadDigest.take(16)} " +
@@ -1163,20 +1205,11 @@ class LeadDaemon(
           // minting under it would brick the pipeline, since an empty allow-list leaves the
           // quorum unsatisfiable and the gate could never release. Idempotent without a key:
           // the seen-gate guard above opens a gate at most once, so this append rides that
-          // guarantee; a crash between the two appends leaves the gate nonce-less and, by that
-          // same guard, un-re-minted at adopt — the release fold then refuses a nonce-less
-          // release under a ceremony auth, so the orphan is stuck, never bypassable.
+          // guarantee. A crash between the two appends leaves the gate open and nonce-less until
+          // the mechanical pass mints its nonce at the next wake; meanwhile the release fold
+          // refuses a nonce-less release under a ceremony auth, so the gap is never a bypass.
           if (leadAuth.hasApprovers) {
-            val nonce = freshNonceHex()
-            store.append(
-              LeadKinds.NONCE_ISSUED,
-              buildJsonObject {
-                put("nonce", nonce)
-                put("gateId", gateId)
-                put("payloadDigest", expected)
-              },
-              origin = ORIGIN_SUBSTRATE,
-            )
+            val nonce = mintNonce(gateId, expected)
             // Announce the gate-open in the same drive it opens. The mechanical pass runs BEFORE
             // cognition, so a gate opened here is not seen by that pass until a later wake — but the
             // pipeline now blocks on the gate, which an operator unblocks only once told, so the
