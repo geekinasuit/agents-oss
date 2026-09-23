@@ -21,7 +21,9 @@ import org.junit.Test
  * totality contract a hostile relay input relies on), that the shared-point primitive is point
  * multiplication and not the library's hashing ecdh (the trap, pinned in THIS module), that a
  * fresh nonce is drawn per message, that the 16-bit length ceiling is enforced at both ends, and
- * that the codec zeroes the key material it derives once it is done with it.
+ * that the helpers the codec zeroes its derived key material with do zero it. That the codec's
+ * own paths call those helpers is checked by reading: a test has no handle on an array the codec
+ * creates and drops inside one call.
  *
  * The vector file is agency/crypto/testdata/nip44.vectors.json — the spec's own file, shared
  * rather than copied so its published SHA-256 stays a single source of truth. It arrives via the
@@ -321,6 +323,13 @@ class Nip44Test {
             }
         }
         assertTrue("zeroed once the block throws", thrown!!.isZeroed())
+        // A round trip through the public API on the same key, so the check below also covers
+        // encrypt and decrypt leaving the caller's key alone, not only withMessageKeys.
+        assertEquals(
+            "the key round-trips a message",
+            "m",
+            Nip44.decrypt(Nip44.encrypt("m", conversationKey), conversationKey),
+        )
         assertEquals(
             "the caller's conversation key is left as it was",
             group.getString("conversation_key"),

@@ -49,8 +49,10 @@ import javax.crypto.spec.SecretKeySpec
  * once the conversation key is derived from them, and a message's derived keys, with the HKDF
  * output they were cut from, once that message is encrypted or decrypted. The conversation key is
  * the caller's to zero, since a caller may use one for many messages. The zeroing is best-effort
- * hygiene, not a guarantee: the JVM may have copied an array before it is zeroed, and the JDK's
- * HMAC and ChaCha20 keep internal copies of the keys they are given, which nothing here can reach.
+ * hygiene, not a guarantee: the JVM may have copied an array before it is zeroed, the JDK's HMAC
+ * and ChaCha20 keep internal copies of the keys they are given, and the native secp256k1 binding
+ * may leave copies of the shared point, and of the private key it multiplies by, in native memory
+ * it does not clear. Nothing here can reach any of those copies.
  */
 object Nip44 {
     private const val VERSION: Byte = 2
