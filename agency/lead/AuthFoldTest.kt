@@ -338,7 +338,8 @@ class AuthFoldTest {
     // Under a ceremony auth (a non-empty allow-list) every release must be nonce-bound and
     // quorum-satisfied — the pre-ceremony nonce-less path is refused outright. This is the
     // invariant that lets the substrate mint nonces safely: a crash between GATE_OPENED and
-    // NONCE_ISSUED leaves the gate stuck, never releasable off the un-quorumed nonce-less path.
+    // NONCE_ISSUED leaves the gate nonce-less until the next wake mints its nonce, and never
+    // releasable off the un-quorumed nonce-less path.
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.release("g1", "d1") // nonce-less, no nonce ever issued for this gate
