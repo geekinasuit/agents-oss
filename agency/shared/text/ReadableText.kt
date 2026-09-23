@@ -48,6 +48,10 @@ private val READABLE_CATEGORIES: Set<Int> =
  * Code points in those categories that fonts draw as blank space. The four Hangul fillers
  * (U+115F, U+1160, U+3164, U+FFA0) are the only letters, numbers, punctuation marks, or symbols
  * that Unicode lists as default-ignorable, which a renderer shows as nothing unless it supports
- * them; U+2800 BRAILLE PATTERN BLANK is a braille cell with no dots raised.
+ * them. The rest are graphic characters that the standard names or describes as blank, which that
+ * list does not include: U+2800 BRAILLE PATTERN BLANK, a braille cell with no dots raised;
+ * U+13441 EGYPTIAN HIEROGLYPH FULL BLANK and U+13442 EGYPTIAN HIEROGLYPH HALF BLANK; and U+1D159
+ * MUSICAL SYMBOL NULL NOTEHEAD, a notehead that is not drawn.
  */
-private val DRAWN_BLANK: Set<Int> = setOf(0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800)
+private val DRAWN_BLANK: Set<Int> =
+  setOf(0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x13441, 0x13442, 0x1D159)

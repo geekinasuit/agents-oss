@@ -78,6 +78,9 @@ class ReadableTextTest {
         "the Hangul filler" to text(0x3164),
         "the halfwidth Hangul filler" to text(0xFFA0),
         "the blank braille pattern" to text(0x2800),
+        "the Egyptian hieroglyph full blank" to text(0x13441),
+        "the Egyptian hieroglyph half blank" to text(0x13442),
+        "the musical null notehead" to text(0x1D159),
       )
     )
   }
@@ -96,13 +99,28 @@ class ReadableTextTest {
 
   @Test
   fun anyReadableCodePointIsSomethingToRead() {
+    // Each readable general category has a case of its own, so a rule that drops one fails here.
     val cases =
       mapOf(
-        "a letter" to "a",
-        "a digit" to "7",
-        "punctuation" to ".",
-        "a currency symbol" to "$",
-        "a replacement character" to text(0xFFFD),
+        "an uppercase letter (Lu)" to "A",
+        "a lowercase letter (Ll)" to "a",
+        "a titlecase letter (Lt)" to text(0x01C5),
+        "a modifier letter (Lm)" to text(0x02B0),
+        "a CJK ideograph (Lo)" to text(0x8A08),
+        "a digit (Nd)" to "7",
+        "a Roman numeral (Nl)" to text(0x2160),
+        "a vulgar fraction (No)" to text(0x00BD),
+        "a low line (Pc)" to "_",
+        "a hyphen-minus (Pd)" to "-",
+        "an opening parenthesis (Ps)" to "(",
+        "a closing parenthesis (Pe)" to ")",
+        "an opening guillemet (Pi)" to text(0x00AB),
+        "a closing guillemet (Pf)" to text(0x00BB),
+        "a full stop (Po)" to ".",
+        "a plus sign (Sm)" to "+",
+        "a currency symbol (Sc)" to "$",
+        "a circumflex accent (Sk)" to "^",
+        "a replacement character (So)" to text(0xFFFD),
         // One code point written as two surrogate chars, neither of which is readable alone.
         "an emoji alone, outside the Basic Multilingual Plane" to text(0x1F600),
         "a letter outside the Basic Multilingual Plane" to text(0x10400),

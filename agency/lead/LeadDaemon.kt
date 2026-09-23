@@ -911,11 +911,12 @@ class LeadDaemon(
    *
    * The artifact the operator reads is resolved from the gate's lead-owned bound copy first (a
    * [payloadDigest] match verified). An UNRESOLVED artifact — no bound path in the journal, the
-   * bound store disturbed after the gate opened, or an intact artifact that is blank or not valid
-   * UTF-8 — is a different failure from a sink fault: the gate is open and blocking and nothing
-   * reached the operator. It is escalated (so the stuck gate is visible, not a silent stall) and
-   * recorded failed WITHOUT calling the sink — a blank-artifact signal cannot build a notice — and
-   * the nonce is still marked, so the recovery arm does not re-read the bad file every pass.
+   * bound store disturbed after the gate opened, or an intact artifact that is not valid UTF-8 or
+   * has nothing to read ([hasReadableText]) — is a different failure from a sink fault: the gate is
+   * open and blocking and nothing reached the operator. It is escalated (so the stuck gate is
+   * visible, not a silent stall) and recorded failed WITHOUT calling the sink — a signal with
+   * nothing to read cannot be built — and the nonce is still marked, so the recovery arm does not
+   * re-read the bad file every pass.
    */
   private fun announceAndMark(
     gateId: String,
