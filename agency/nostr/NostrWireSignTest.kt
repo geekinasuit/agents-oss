@@ -4,6 +4,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -76,6 +78,18 @@ class NostrWireSignTest {
     val parsed = parseEvent(ev.serialize())
     assertEquals(ev, parsed)
     assertTrue(parsed!!.verify())
+  }
+
+  @Test
+  fun `a signed event whose question mark is re-spelled as a lone surrogate is refused at parse`() {
+    // Anyone who relays an event can re-spell a '?' in it as the JSON escape for U+D800, which parses
+    // to a lone surrogate: a different string. A lenient UTF-8 encoder writes '?' for that surrogate,
+    // so the re-spelled event would hash to the same id and carry the same valid signature.
+    val ev = signEvent(secretKey, 1700000000L, 1, emptyList(), "a?b", auxRand)
+    val respelled = ev.serialize().replace("a?b", "a" + "\\" + "ud800" + "b")
+    assertNotEquals(ev.serialize(), respelled)
+    val parsed = parseEvent(respelled)
+    assertNull("parsed, with content chars ${parsed?.content?.map { it.code }}", parsed)
   }
 
   // ---- #34: cross-implementation id vectors (external anchor) ----

@@ -247,6 +247,9 @@ fun closeMessage(subscriptionId: String): String =
  * deployment's configuration. `content` is empty by NIP-42 convention; the `relay` and `challenge`
  * tags carry the binding the relay checks. Signed exactly like any other event, so a relay verifies
  * it with the same [verify].
+ *
+ * THROWS [IllegalArgumentException] if [challenge] or [relayUrl] holds an unpaired surrogate, as
+ * [signEvent] does for any field. The challenge comes from the relay, so a relay can trigger this.
  */
 fun buildAuthEvent(
   secretKeyHex: String,
@@ -344,7 +347,8 @@ private fun NostrFilter.toJsonObject(): JsonObject =
 
 /** Structure a parsed JSON element into a [NostrEvent], or `null` if it is not a conformant event
  * object. Every field must be present and of the NIP-01 type; a missing field, a wrong type, a
- * `created_at` that is not an integer, or a `kind` outside 0..65535 all fold to `null`. */
+ * `created_at` that is not an integer, a `kind` outside 0..65535, or a string the id covers that
+ * holds an unpaired surrogate all fold to `null`. */
 private fun parseEventObject(element: JsonElement): NostrEvent? {
   val obj = element as? JsonObject ?: return null
   val id = obj["id"]?.stringValue() ?: return null
@@ -354,13 +358,17 @@ private fun parseEventObject(element: JsonElement): NostrEvent? {
 }
 
 /** The five fields an event carries besides its `id` and `sig` — exactly a NIP-59 [Rumor] — or `null`
- * if any is missing, of the wrong NIP-01 type, or (for `kind`) outside 0..65535. */
+ * if any is missing, of the wrong NIP-01 type, (for `kind`) outside 0..65535, or (for a string)
+ * holding an unpaired surrogate, which leaves the event without an id ([Nip01.eventId]). */
 private fun JsonObject.rumorFields(): Rumor? {
   val pubkey = this["pubkey"]?.stringValue() ?: return null
   val createdAt = this["created_at"]?.longValue() ?: return null
   val kind = this["kind"]?.intValue()?.takeIf { it in 0..65535 } ?: return null
   val tags = this["tags"]?.let { tagsValue(it) } ?: return null
   val content = this["content"]?.stringValue() ?: return null
+  // kotlinx turns a JSON unicode escape into the char it names without checking surrogate pairing,
+  // so a string here can hold an unpaired surrogate. Rumor refuses one by throwing; fold it to null.
+  if (!idStringsHaveUtf8Encoding(pubkey, tags, content)) return null
   return Rumor(pubkey, createdAt, kind, tags, content)
 }
 

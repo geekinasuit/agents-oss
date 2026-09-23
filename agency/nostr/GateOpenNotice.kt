@@ -28,6 +28,15 @@ data class GateOpenNotice(
     // The artifact is the whole point of A4-6 — the thing the operator reads instead of
     // blind-signing a digest — so a blank one is a caller bug, refused at construction.
     require(artifact.isNotBlank()) { "artifact must be non-blank — a notice with nothing to read defeats A4-6" }
+    // Every field rides in the rumor the notice travels as, whose id needs each string's UTF-8
+    // encoding, and a string holding an unpaired surrogate has none (Nip01.eventId). Refused here, so
+    // encodeGateOpenNotice never meets a notice it cannot encode.
+    require(hasUtf8Encoding(gateId)) { "gateId holds an unpaired surrogate, which has no UTF-8 encoding" }
+    require(hasUtf8Encoding(payloadDigest)) {
+      "payloadDigest holds an unpaired surrogate, which has no UTF-8 encoding"
+    }
+    require(hasUtf8Encoding(nonce)) { "nonce holds an unpaired surrogate, which has no UTF-8 encoding" }
+    require(hasUtf8Encoding(artifact)) { "artifact holds an unpaired surrogate, which has no UTF-8 encoding" }
   }
 }
 

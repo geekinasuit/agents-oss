@@ -2,6 +2,7 @@ package com.geekinasuit.agency.nostr
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -64,6 +65,28 @@ class NostrEventSignVerifyTest {
   }
 
   @Test
+  fun `an event holding an unpaired surrogate does not verify under the id of its lossy spelling`() {
+    // An unpaired surrogate has no UTF-8 encoding. The JDK's lenient encoder writes '?' for each one,
+    // so each copy below would hash to the id of the event signed over that spelling, and carry its
+    // valid signature. verify must refuse it, and fold to false rather than throw.
+    for (content in UNPAIRED) {
+      val lossy = String(content.toByteArray(Charsets.UTF_8), Charsets.UTF_8)
+      val signed = signEvent(secretKey, 1700000000L, 1, emptyList(), lossy, auxRand)
+      assertTrue("control: the lossy spelling verifies", signed.verify())
+      assertFalse(content.map { it.code }.toString(), signed.copy(content = content).verify())
+    }
+  }
+
+  @Test
+  fun `signing a string that holds an unpaired surrogate is refused as a local bug`() {
+    for (content in UNPAIRED) {
+      assertThrows(content.map { it.code }.toString(), IllegalArgumentException::class.java) {
+        signEvent(secretKey, 1700000000L, 1, emptyList(), content, auxRand)
+      }
+    }
+  }
+
+  @Test
   fun `signEvent over key bytes produces the identical event to the hex overload`() {
     // The #42 clearable-key path signs from bytes; it must produce the same event as the hex path,
     // proving the byte cores are a behaviour-preserving extract. The hex key is secret scalar 3, so
@@ -72,5 +95,17 @@ class NostrEventSignVerifyTest {
     val fromHex = signEvent(secretKey, 1700000000L, 1, listOf(listOf("e", "x")), "hello", auxRand)
     val fromBytes = signEvent(secretKeyBytes, 1700000000L, 1, listOf(listOf("e", "x")), "hello", auxRand)
     assertEquals(fromHex, fromBytes)
+  }
+
+  private companion object {
+    // Four ways a string can hold an unpaired surrogate: a high surrogate before an ordinary char or
+    // at the end, a low surrogate with no high one before it, and a pair in the wrong order.
+    val UNPAIRED =
+      listOf(
+        "a" + Char(0xD800) + "b",
+        "a" + Char(0xD800),
+        "a" + Char(0xDC00) + "b",
+        "a" + Char(0xDC00) + Char(0xD800) + "b",
+      )
   }
 }

@@ -87,6 +87,24 @@ class RelayConnectionAuthTest {
   }
 
   @Test
+  fun `authenticate fails closed on a challenge holding an unpaired surrogate`() {
+    // The challenge is relay-supplied text the client signs into its auth event. The JSON escape for
+    // U+D800 parses to a lone surrogate, which has no UTF-8 encoding and so no event id: signing
+    // refuses, and authenticate reports that as a classified failure rather than throwing.
+    FakeRelay().use { relay ->
+      relay.serve { session -> session.sendText("[\"AUTH\",\"a" + "\\" + "ud800b\"]") }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      assertEquals(
+        AuthResult.Failed("could not sign auth event: IllegalArgumentException"),
+        conn.authenticate(Duration.ofSeconds(3)),
+      )
+      relay.assertScriptClean()
+      conn.close()
+    }
+  }
+
+  @Test
   fun `authenticate ignores an OK for a different event id and fails closed`() {
     FakeRelay().use { relay ->
       relay.serve { session ->

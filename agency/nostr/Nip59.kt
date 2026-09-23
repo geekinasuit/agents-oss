@@ -8,9 +8,12 @@ import java.security.SecureRandom
  * so that a rumor leaked on its own proves nothing about who wrote it — only the seal around it is
  * signed. That deniability does not hold against the recipient, who can prove the authorship to anyone
  * by disclosing the seal and the conversation key that opens it. The [id] is COMPUTED from the fields,
- * never supplied, so it cannot disagree with them; and a
- * rumor has no `sig`, so it is not a [NostrEvent] and cannot be handed to [eventMessage] and
- * published bare.
+ * never supplied, so it cannot disagree with them, and a rumor that would have no id (a string holding
+ * an unpaired surrogate, see [Nip01.eventId]) cannot be constructed. The check runs on the lists
+ * the caller passes, which the rumor keeps rather than copies, so a caller must not change [tags]
+ * after construction: a tag changed to hold an unpaired surrogate leaves the rumor with no id, and
+ * [id], `serialize()` and [Nip59.wrap] then throw. A rumor has no `sig`, so it is not a
+ * [NostrEvent] and cannot be handed to [eventMessage] and published bare.
  */
 data class Rumor(
   val pubkey: String,
@@ -21,6 +24,9 @@ data class Rumor(
 ) {
   init {
     require(kind in 0..65535) { "a NIP-01 kind is 0..65535, was $kind" }
+    require(idStringsHaveUtf8Encoding(pubkey, tags, content)) {
+      "a rumor string holds an unpaired surrogate: it has no UTF-8 encoding, so the rumor has no NIP-01 id"
+    }
   }
 
   /** The NIP-01 event id of the fields. */

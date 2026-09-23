@@ -8,6 +8,7 @@ import kotlinx.serialization.json.addJsonArray
 import kotlinx.serialization.json.buildJsonArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 /**
@@ -90,6 +91,34 @@ class EventIdTest {
   }
 
   @Test
+  fun `a surrogate pair is one character and hashes as its four UTF-8 bytes`() {
+    // U+1F600 lies outside the BMP, so it is two UTF-16 chars in a String. The id must hash its one
+    // four-byte UTF-8 sequence, as the independent serializer's preimage does.
+    val content = "grin " + String(Character.toChars(0x1F600))
+    val independent = independentPreimage("pk", 1L, 1, emptyList(), content)
+    assertEquals(independent, Nip01.preimage("pk", 1L, 1, emptyList(), content))
+    assertEquals(sha256Hex(independent), Nip01.eventId("pk", 1L, 1, emptyList(), content))
+  }
+
+  @Test
+  fun `a string holding an unpaired surrogate has no id, wherever it sits in the preimage`() {
+    // An unpaired surrogate names no character, so the string has no UTF-8 encoding and the event no
+    // NIP-01 id. A lenient encoder would hash '?' in its place: the id of a different string.
+    for (bad in UNPAIRED) {
+      val codes = bad.map { it.code }.toString()
+      assertThrows(codes, IllegalArgumentException::class.java) {
+        Nip01.eventId(bad, 1L, 1, emptyList(), "hi")
+      }
+      assertThrows(codes, IllegalArgumentException::class.java) {
+        Nip01.eventId("pk", 1L, 1, listOf(listOf("e", bad)), "hi")
+      }
+      assertThrows(codes, IllegalArgumentException::class.java) {
+        Nip01.eventId("pk", 1L, 1, emptyList(), bad)
+      }
+    }
+  }
+
+  @Test
   fun `changing any field changes the id`() {
     val base = Nip01.eventId("pk", 1L, 1, listOf(listOf("e", "x")), "hi")
     assertNotEquals(base, Nip01.eventId("pk2", 1L, 1, listOf(listOf("e", "x")), "hi"))
@@ -97,5 +126,17 @@ class EventIdTest {
     assertNotEquals(base, Nip01.eventId("pk", 1L, 2, listOf(listOf("e", "x")), "hi"))
     assertNotEquals(base, Nip01.eventId("pk", 1L, 1, listOf(listOf("e", "y")), "hi"))
     assertNotEquals(base, Nip01.eventId("pk", 1L, 1, listOf(listOf("e", "x")), "ho"))
+  }
+
+  private companion object {
+    // Four ways a string can hold an unpaired surrogate: a high surrogate before an ordinary char or
+    // at the end, a low surrogate with no high one before it, and a pair in the wrong order.
+    val UNPAIRED =
+      listOf(
+        "a" + Char(0xD800) + "b",
+        "a" + Char(0xD800),
+        "a" + Char(0xDC00) + "b",
+        "a" + Char(0xDC00) + Char(0xD800) + "b",
+      )
   }
 }

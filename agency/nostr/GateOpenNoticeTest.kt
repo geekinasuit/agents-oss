@@ -118,6 +118,18 @@ class GateOpenNoticeTest {
   }
 
   @Test
+  fun refuses_a_notice_field_holding_an_unpaired_surrogate_at_construction() {
+    // Every field rides in the rumor, whose id needs each string's UTF-8 encoding, and a string
+    // holding an unpaired surrogate has none. Refusing it here keeps notifyGateOpen from meeting a
+    // notice it cannot encode.
+    val lone = "a" + Char(0xD800) + "b"
+    assertThrows("gateId", IllegalArgumentException::class.java) { GateOpenNotice(lone, "d", "n", "a") }
+    assertThrows("payloadDigest", IllegalArgumentException::class.java) { GateOpenNotice("g", lone, "n", "a") }
+    assertThrows("nonce", IllegalArgumentException::class.java) { GateOpenNotice("g", "d", lone, "a") }
+    assertThrows("artifact", IllegalArgumentException::class.java) { GateOpenNotice("g", "d", "n", lone) }
+  }
+
+  @Test
   fun rejects_an_off_curve_recipient_key() {
     // 64 valid hex characters, but 0xff…ff is beyond the secp256k1 field prime — not a curve point.
     // RecipientKey.of must refuse it here, at the config boundary, rather than let it abort the

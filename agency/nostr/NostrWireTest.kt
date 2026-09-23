@@ -4,6 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -148,6 +149,29 @@ class NostrWireTest {
     assertNull(parseEvent(withTags("[[\"e\"],null]"))) // a null tag
   }
 
+  @Test
+  fun `parseEvent refuses a field that parses to an unpaired surrogate`() {
+    // kotlinx turns a JSON unicode escape into the char it names without checking surrogate pairing.
+    // A lone surrogate has no UTF-8 encoding, so a string holding one cannot feed the id; the event
+    // is refused in each string field the id covers.
+    fun withFields(pubkey: String = "bb", tag: String = "x", content: String = "hi") =
+      """{"id":"aa","pubkey":"$pubkey","created_at":1,"kind":1,"tags":[["e","$tag"]],""" +
+        """"content":"$content","sig":"cc"}"""
+    val lone = "a" + ESCAPED_HIGH_SURROGATE + "b"
+    assertNotNull("control", parseEvent(withFields()))
+    assertNull("content", parseEvent(withFields(content = lone)))
+    assertNull("tag", parseEvent(withFields(tag = lone)))
+    assertNull("pubkey", parseEvent(withFields(pubkey = lone)))
+  }
+
+  @Test
+  fun `parseEvent reads an escaped surrogate pair as the one character it spells`() {
+    val pair = "\\" + "ud83d" + "\\" + "ude00"
+    val json =
+      """{"id":"aa","pubkey":"bb","created_at":1,"kind":1,"tags":[],"content":"$pair","sig":"cc"}"""
+    assertEquals(String(Character.toChars(0x1F600)), parseEvent(json)?.content)
+  }
+
   // ---- parseRelayMessage: the inbound envelopes ----
 
   @Test
@@ -206,6 +230,16 @@ class NostrWireTest {
     val badObj = """{"id":"aa","pubkey":"bb","created_at":1,"kind":1,"tags":[],"content":"hi"}"""
     assertNull(parseRelayMessage("""["EVENT","sub1",$badObj]"""))
     assertNull(parseRelayMessage("""["EVENT","sub1","not-an-object"]"""))
+  }
+
+  @Test
+  fun `parseRelayMessage refuses an EVENT whose event holds an unpaired surrogate, without throwing`() {
+    // The relay transport hands every inbound frame to parseRelayMessage and drops a null. A throw
+    // here would instead escape into the connection's listener.
+    val obj =
+      """{"id":"aa","pubkey":"bb","created_at":1,"kind":1,"tags":[],""" +
+        """"content":"a${ESCAPED_HIGH_SURROGATE}b","sig":"cc"}"""
+    assertNull(parseRelayMessage("""["EVENT","sub1",$obj]"""))
   }
 
   @Test
@@ -337,5 +371,11 @@ class NostrWireTest {
       """["REQ","s",{"kinds":[1],"#e":["evid"]}]""",
       reqMessage("s", listOf(filter)),
     )
+  }
+
+  private companion object {
+    // The six characters of the JSON escape for U+D800, a high surrogate, built from two parts so this
+    // source holds no escape sequence of its own.
+    val ESCAPED_HIGH_SURROGATE = "\\" + "ud800"
   }
 }
