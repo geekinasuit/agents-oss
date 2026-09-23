@@ -27,6 +27,7 @@ kt_jvm_library(
         "Bip340ApprovalVerifier.kt",
         "GateOpenNotice.kt",
         "Nip44.kt",
+        "Nip59.kt",
         "NostrEvent.kt",
         "NostrWire.kt",
     ],
@@ -123,6 +124,25 @@ java_test(
     ],
 )
 
+# The NIP-59 gift-wrap codec: the spec's own worked example as an external vector, the round-trip,
+# the three-layer structure, a fresh wrap key per wrap, TOTAL unwrap over hostile events (the
+# impersonation check and the nesting bound on decrypted plaintext included), and the double-wrap
+# size ceiling measured on both sides. The vector is inline in the test, so unlike nip44_test it needs
+# no data file and stays a kt_jvm_test. associates= makes it a friend of :nostr for the internal
+# rumor codec and the module's Hex codec. Signs, encrypts, and agrees keys, so it needs the native
+# runtime-only.
+kt_jvm_test(
+    name = "nip59_test",
+    size = "small",
+    srcs = ["Nip59Test.kt"],
+    associates = [":nostr"],
+    test_class = "com.geekinasuit.agency.nostr.Nip59Test",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        "@maven//:junit_junit",
+    ],
+)
+
 # The wire codec, native-free: serialization, TOTAL parsing of hostile relay JSON, and the
 # relay-message envelopes. Like event_id_test it needs only the JSON library and no crypto native —
 # parsing structures bytes and makes no signature check.
@@ -158,10 +178,11 @@ kt_jvm_test(
 
 # The relay TRANSPORT (step 3b): the socket that carries the wire format above. Kept out of :nostr
 # so the codec stays pure — this is the target that dials. It depends ONLY on :nostr's public
-# String-based API (it scans the raw text for JSON nesting depth and hands the text to parseRelayMessage),
-# so it carries NO JSON dependency of its own; and it is built on the JDK's java.net.http.WebSocket,
-# so it adds no @maven dependency at all. The lead key rides in as configuration — the -jni native
-# is a runtime dep of the CONSUMING test that signs, not of this library.
+# String-based API (it bounds the raw text's JSON nesting with jsonMayNestDeeperThan and hands the
+# text to parseRelayMessage), so it carries NO JSON dependency of its own; and it is built on the
+# JDK's java.net.http.WebSocket, so it adds no @maven dependency at all. The lead key rides in as
+# configuration — the -jni native is a runtime dep of the CONSUMING test that signs, not of this
+# library.
 kt_jvm_library(
     name = "relay",
     srcs = [

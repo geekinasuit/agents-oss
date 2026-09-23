@@ -5,6 +5,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonArray
@@ -37,6 +38,10 @@ import kotlinx.serialization.json.putJsonArray
 // the signature, and the authorization decision stays in the fold, which never sees a type from
 // this file. created_at is carried, never read as a clock (see NostrEvent).
 //
+// The NIP-59 rumor's JSON codec is here too, beside the event's: a rumor is an event object without
+// `sig`, so the two share every other field and the code that reads and writes them. A rumor never
+// crosses the wire in clear — it travels encrypted inside a seal (Nip59) — so its codec is internal.
+//
 // The subscription-control envelopes are HERE now: REQ, CLOSE, and the [NostrFilter] a REQ carries.
 // They earned their place when their consumer landed — the transport's subscribe() /
 // closeSubscription() in step 3b-2 (before that, a filter with no subscription to constrain it would
@@ -47,9 +52,10 @@ import kotlinx.serialization.json.putJsonArray
 // Pathologically nested JSON can exhaust the stack as the parser recurses, and that Error
 // propagates by design, as it does through the rest of this module. A byte cap on the inbound frame
 // does NOT bound nesting depth — each level costs as little as one byte, so a frame under any
-// realistic size limit still nests far deeper than the stack allows — so the transport must bound
-// the nesting depth of an inbound frame (agents-oss #38), separately from the byte-size cap
-// (agents-oss #36), before it reaches this codec; this codec assumes a depth-bounded string.
+// realistic size limit still nests far deeper than the stack allows — so untrusted text must have
+// its nesting depth bounded before it reaches this codec; this codec assumes a depth-bounded string.
+// [jsonMayNestDeeperThan] is that bound: the transport runs it on every inbound frame (agents-oss #38),
+// separately from the byte-size cap (agents-oss #36), and Nip59 runs it on decrypted plaintext.
 
 /** Serialize an event to its canonical wire object: the seven NIP-01 fields in a fixed key order,
  * with ordinary JSON escaping. Key order is not id-significant (only [Nip01]'s preimage array is),
@@ -140,6 +146,63 @@ fun parseRelayMessage(text: String): RelayMessage? {
     }
     else -> null
   }
+}
+
+/**
+ * False only when parsing [text] cannot open more than [maxDepth] levels of JSON arrays and objects at
+ * once — the check untrusted text must pass BEFORE [parseEvent], [parseRelayMessage], or any other
+ * parse here, because the parser recurses once per level and deep enough nesting overflows the stack.
+ * True refuses the text, and may refuse text that would not have nested that deep.
+ *
+ * STRING-AWARE: it tracks JSON string literals, escapes included, and counts only STRUCTURAL `[` and
+ * `{`. A bracket inside a string is content the parser reads without recursing, not nesting, which is
+ * what lets a wide-but-shallow message (thousands of sibling tags) pass while a deep one is refused.
+ *
+ * NOTHING BUT WHITESPACE, A COMMA, OR ANOTHER CLOSER MAY FOLLOW A CLOSER: anything else after a
+ * structural `]` or `}` refuses the text, whatever its depth. Valid JSON never has anything else
+ * there, but kotlinx's array reader keeps reading after a `]` when a value follows it, so the parser
+ * nests `[1][1][1]` three levels deep while its brackets nest one. Whitespace means JSON's four
+ * characters only, which are all kotlinx skips: it reads any other character — U+00A0 included — as
+ * the start of a value, one that continues the array just the same.
+ *
+ * With that rule, every closer the parser consumes ends the array or object it is reading, so up to
+ * the point where malformed input stops the parser, the scan's depth is the parser's. Past that point
+ * the scan may count on, which can only refuse more. The parser it agrees with is kotlinx's default
+ * `Json`, the configuration every parse in this file uses, and `NostrWireTest` checks the scan
+ * against that parser. The default is not strict JSON — it reads `[abc]` and `[01]`, for example —
+ * but switching to a configured `Json` (comments allowed, lenient mode), or to a kotlinx that read
+ * arrays differently, would need the scan and that test revisited. A closer at depth zero is ignored,
+ * never banked, so stray closers cannot pre-pay for the nesting that follows them.
+ *
+ * Iterative, so the check cannot overflow the stack it protects.
+ */
+fun jsonMayNestDeeperThan(text: String, maxDepth: Int): Boolean {
+  var depth = 0
+  var inString = false
+  var escaped = false
+  var afterCloser = false
+  for (c in text) {
+    when {
+      escaped -> escaped = false
+      inString ->
+        when (c) {
+          '\\' -> escaped = true
+          '"' -> inString = false
+        }
+      c == ' ' || c == '\t' || c == '\n' || c == '\r' -> {}
+      c == ']' || c == '}' -> {
+        if (depth > 0) depth--
+        afterCloser = true
+      }
+      afterCloser && c != ',' -> return true
+      else -> {
+        afterCloser = false
+        if (c == '"') inString = true
+        if ((c == '[' || c == '{') && ++depth > maxDepth) return true
+      }
+    }
+  }
+  return false
 }
 
 /** The client-to-relay publish envelope: `["EVENT", <event>]`. */
@@ -271,23 +334,57 @@ fun buildAuthEvent(
     auxRandHex = auxRandHex,
   )
 
+/** Serialize a NIP-59 rumor to its JSON object: the event object's fields and key order without
+ * `sig`, the id computed from the fields ([Rumor.id]). */
+internal fun Rumor.serialize(): String =
+  buildJsonObject { putEventFields(id, pubkey, createdAt, kind, tags, content) }.toString()
+
+/** Parse a NIP-59 rumor from decrypted seal plaintext. TOTAL like [parseEvent]: `null` on any
+ * malformed input. The object must carry the six rumor fields with their NIP-01 types, and its
+ * claimed `id` must be the NIP-01 id of the other five — checked, never trusted. A `sig` or any other
+ * extra key is ignored, as [parseEvent] ignores unknown keys. Like [parseEvent] it assumes
+ * depth-bounded text; [Nip59.unwrap] bounds decrypted plaintext before it gets here. */
+internal fun parseRumor(text: String): Rumor? {
+  val element =
+    try {
+      Json.parseToJsonElement(text)
+    } catch (_: SerializationException) {
+      return null
+    }
+  val obj = element as? JsonObject ?: return null
+  val claimedId = obj["id"]?.stringValue() ?: return null
+  return obj.rumorFields()?.takeIf { it.id == claimedId }
+}
+
 /** The seven fields as a JSON object in canonical key order. */
 private fun NostrEvent.toJsonObject(): JsonObject =
   buildJsonObject {
-    put("id", id)
-    put("pubkey", pubkey)
-    put("created_at", createdAt)
-    put("kind", kind)
-    putJsonArray("tags") {
-      for (tag in tags) {
-        addJsonArray {
-          for (element in tag) add(element)
-        }
-      }
-    }
-    put("content", content)
+    putEventFields(id, pubkey, createdAt, kind, tags, content)
     put("sig", sig)
   }
+
+/** The six fields an event and a rumor share, in canonical key order; an event then adds `sig`. */
+private fun JsonObjectBuilder.putEventFields(
+  id: String,
+  pubkey: String,
+  createdAt: Long,
+  kind: Int,
+  tags: List<List<String>>,
+  content: String,
+) {
+  put("id", id)
+  put("pubkey", pubkey)
+  put("created_at", createdAt)
+  put("kind", kind)
+  putJsonArray("tags") {
+    for (tag in tags) {
+      addJsonArray {
+        for (element in tag) add(element)
+      }
+    }
+  }
+  put("content", content)
+}
 
 /** The filter as a NIP-01 JSON object, in a fixed key order (kinds, then tag filters by letter) so
  * the output is deterministic. An empty [kinds] is OMITTED, never emitted as `[]` — an absent
@@ -307,13 +404,20 @@ private fun NostrFilter.toJsonObject(): JsonObject =
 private fun parseEventObject(element: JsonElement): NostrEvent? {
   val obj = element as? JsonObject ?: return null
   val id = obj["id"]?.stringValue() ?: return null
-  val pubkey = obj["pubkey"]?.stringValue() ?: return null
-  val createdAt = obj["created_at"]?.longValue() ?: return null
-  val kind = obj["kind"]?.intValue()?.takeIf { it in 0..65535 } ?: return null
-  val tags = obj["tags"]?.let { tagsValue(it) } ?: return null
-  val content = obj["content"]?.stringValue() ?: return null
+  val fields = obj.rumorFields() ?: return null
   val sig = obj["sig"]?.stringValue() ?: return null
-  return NostrEvent(id, pubkey, createdAt, kind, tags, content, sig)
+  return NostrEvent(id, fields.pubkey, fields.createdAt, fields.kind, fields.tags, fields.content, sig)
+}
+
+/** The five fields an event carries besides its `id` and `sig` — exactly a NIP-59 [Rumor] — or `null`
+ * if any is missing, of the wrong NIP-01 type, or (for `kind`) outside 0..65535. */
+private fun JsonObject.rumorFields(): Rumor? {
+  val pubkey = this["pubkey"]?.stringValue() ?: return null
+  val createdAt = this["created_at"]?.longValue() ?: return null
+  val kind = this["kind"]?.intValue()?.takeIf { it in 0..65535 } ?: return null
+  val tags = this["tags"]?.let { tagsValue(it) } ?: return null
+  val content = this["content"]?.stringValue() ?: return null
+  return Rumor(pubkey, createdAt, kind, tags, content)
 }
 
 /** A tags value: an array of arrays of strings, or `null` if any element has the wrong shape. */

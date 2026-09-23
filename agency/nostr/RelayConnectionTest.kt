@@ -216,8 +216,8 @@ class RelayConnectionTest {
         "connection should have failed on the size bound",
         waitUntil(5_000) { conn.hasFailed() },
       )
-      // "characters", not "exceeded": all three bound breaches say "exceeded", so only the char unit
-      // distinguishes the SIZE bound from the DEPTH ("depth") and COUNT ("unconsumed") breaches.
+      // "characters", not "exceeded": the SIZE and COUNT breaches both say "exceeded", so only the char
+      // unit distinguishes the SIZE bound from the DEPTH ("depth") and COUNT ("unconsumed") breaches.
       assertTrue(conn.failureReason()!!.contains("characters"))
       conn.close()
     }
@@ -408,6 +408,31 @@ class RelayConnectionTest {
         waitUntil(5_000) { conn.hasFailed() },
       )
       assertTrue(conn.failureReason()!!.contains("depth"))
+      conn.close()
+    }
+  }
+
+  @Test
+  fun `a frame that continues past its closers breaches before the parser can overflow`() {
+    FakeRelay().use { relay ->
+      // kotlinx's array reader keeps reading after a `]` when a value follows it, so this frame nests
+      // one level per `[1]` in the parser although its brackets never nest past one: far deeper than
+      // the listener thread's stack holds, yet under the SIZE bound. The depth guard must refuse it
+      // before the parse. Had the parser overflowed instead, the connection would still fail, but as
+      // a transport error naming StackOverflowError — so the reason is what tells the two apart.
+      val continued = "[1]".repeat(349_525)
+      relay.serve { session ->
+        try {
+          session.sendText(continued)
+        } catch (_: Exception) {}
+      }
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      assertTrue(
+        "a frame that continues past its closers must breach",
+        waitUntil(5_000) { conn.hasFailed() },
+      )
+      assertTrue(conn.failureReason()!!, conn.failureReason()!!.contains("depth"))
       conn.close()
     }
   }
