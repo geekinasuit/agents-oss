@@ -83,6 +83,28 @@ class Bip340ApprovalVerifierTest {
   }
 
   @Test
+  fun `a preimage holding an unpaired surrogate does not verify under its question-mark spelling`() {
+    // An unpaired surrogate has no UTF-8 encoding. A lenient encoder writes '?' in its place, so a
+    // signature over the '?' spelling would verify for the preimage holding the surrogate: a
+    // different string from the one the approver signed. A preimage can hold one when it arrives
+    // inside JSON, because kotlinx parses a unicode escape without checking surrogate pairing.
+    val pubkey = Bip340.xonlyPubkeyHex(secretKey)
+    val signed = committedPreimage(pubkey, "gate-1", "digest-1", "nonce-?")
+    val sig = signOver(signed, secretKey)
+    assertTrue(
+      "control: the signed spelling verifies",
+      Bip340ApprovalVerifier.verifies("bip340", pubkey, sig, signed),
+    )
+    for (lone in listOf(Char(0xD800), Char(0xDC00))) {
+      val respelled = signed.replace('?', lone)
+      assertFalse(
+        "U+${lone.code.toString(16)}",
+        Bip340ApprovalVerifier.verifies("bip340", pubkey, sig, respelled),
+      )
+    }
+  }
+
+  @Test
   fun `a hex-valid key or signature of the wrong length is refused, not thrown`() {
     val pubkey = Bip340.xonlyPubkeyHex(secretKey)
     val preimage = committedPreimage(pubkey, "gate-1", "digest-1", "nonce-1")
