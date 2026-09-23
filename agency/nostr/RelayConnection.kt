@@ -26,9 +26,9 @@ import java.util.concurrent.atomic.AtomicReference
 // dials a relay, receives its messages, and answers a NIP-42 challenge — the part of step 3 that
 // binds and connects, kept OUT of :nostr so that module stays pure and hermetic. This class is
 // still substrate MECHANISM: it takes the relay URL and the lead key as required configuration
-// (§REPO_SEAM — which relay and which key are policy that lives in coach, never defaulted here),
-// and it never makes an authorization decision. What arrives from the relay is DATA: it is parsed
-// by NostrWire's TOTAL codec, never trusted, and never reaches the fold as a nostr type (A4-3).
+// (which relay and which key are the deployment's policy, never defaulted here), and it never
+// makes an authorization decision. What arrives from the relay is DATA: it is parsed by
+// NostrWire's TOTAL codec, never trusted, and never reaches the fold as a nostr type (A4-3).
 //
 // LISTENING NEVER AUTHORIZES. authenticate() proves WHO we are TO THE RELAY (a NIP-42 event signed
 // with the lead key), which is a transport concern — it gates what the relay will carry, not what
@@ -61,11 +61,12 @@ import java.util.concurrent.atomic.AtomicReference
  * custody of the key, and [RelayConnection.close] zeroes it (#42) — the key does not outlive the
  * connection it authenticated. A reconnect builds a fresh RelayConfig from fresh key material;
  * handing a closed connection's config to a new [RelayConnection] decodes a zeroed key and fails
- * closed at authenticate(). Both fields are REQUIRED and carry NO default: §REPO_SEAM keeps the
- * relay URL and the keypair in coach, and a default here is exactly how this mechanism would quietly
- * acquire a relay or a key it was never configured with. The key is taken CONCRETELY as secret-key hex, not behind an injectable signer
- * interface: A4-7 forbids a daemon-side remote-signer seam, so there is deliberately no place to
- * slot a NIP-46 remote signer into this transport.
+ * closed at authenticate(). Both fields are REQUIRED and carry NO default: the relay URL and the
+ * keypair are the deployment's configuration, and a default here is exactly how this mechanism
+ * would quietly acquire a relay or a key it was never configured with. The key is taken CONCRETELY
+ * as secret-key hex, not behind an injectable signer interface: A4-7 forbids a daemon-side
+ * remote-signer seam, so there is deliberately no place to slot a NIP-46 remote signer into this
+ * transport.
  *
  * Plaintext `ws://` is permitted alongside `wss://`, and that is a confidentiality/deployment
  * choice left to the caller, NOT a hole in this gate. Plaintext lets a network observer SEE the
@@ -74,8 +75,8 @@ import java.util.concurrent.atomic.AtomicReference
  * approval forged or tampered on the wire is rejected regardless of scheme; and NIP-42 only gates
  * what the relay agrees to serve back to us. `ws://` is what a loopback relay and the test doubles
  * speak, so refusing it here would buy no integrity and break legitimate local deployments. The
- * confidentiality call (must this link be encrypted in transit?) belongs with the relay URL in
- * coach, which is where the scheme is chosen.
+ * confidentiality call (must this link be encrypted in transit?) belongs with the relay URL in the
+ * deployment's configuration, which is where the scheme is chosen.
  */
 class RelayConfig(
   val relayUrl: String,
@@ -363,10 +364,11 @@ class RelayConnection(
    * cannot ack our event by acknowledging another), or a dropped socket all yield
    * [PublishResult.Failed], never a hopeful assumption the event landed. Never throws.
    *
-   * MECHANISM, not policy: the caller builds and signs [event] — WHAT to publish is coach-side
-   * (§REPO_SEAM); this only carries it and reports the relay's answer, making no authorization
-   * decision. It does not require [authenticate] first: whether a relay demands NIP-42 before it
-   * accepts an event is the relay's policy, surfaced here as a [PublishResult.Rejected] if so.
+   * MECHANISM, not policy: the caller builds and signs [event] — WHAT to publish is the
+   * deployment's choice; this only carries it and reports the relay's answer, making no
+   * authorization decision. It does not require [authenticate] first: whether a relay demands
+   * NIP-42 before it accepts an event is the relay's policy, surfaced here as a
+   * [PublishResult.Rejected] if so.
    */
   fun publish(event: NostrEvent, timeout: Duration): PublishResult {
     val ws = webSocket ?: return PublishResult.Failed("not connected")
@@ -403,8 +405,8 @@ class RelayConnection(
    * adding no dedup or ordering of its own: a replay is rejected by the single-use nonce in the
    * mechanical layer, not papered over here.
    *
-   * MECHANISM, not policy (§REPO_SEAM): WHICH events to ask for — the [filters]' kinds and tag
-   * references — is coach-side; this only carries the request. Fail-closed: not connected, a send
+   * MECHANISM, not policy: WHICH events to ask for — the [filters]' kinds and tag references — is
+   * the deployment's choice; this only carries the request. Fail-closed: not connected, a send
    * fault, or a dropped socket all yield [SubscribeResult.Failed]. Never throws for a remote fault; a
    * malformed [subscriptionId] or an empty [filters] is a caller error and throws.
    */

@@ -4,9 +4,10 @@ package com.geekinasuit.agency.lead
  * The lead-facing seam for announcing that a ceremony gate opened with a single-use nonce, so an
  * operator can be told what to authorize. TRANSPORT-NEUTRAL by construction: no relay, recipient,
  * or nostr type appears here, because the substrate does not depend on the transport — which
- * custodians and which relay a notice reaches are coach-side wiring (§REPO_SEAM). Coach adapts this
- * seam to the relay notifier, supplying the recipient set and the socket timeout; the artifact the
- * operator reads is carried on the signal, read daemon-side from the gate's lead-owned bound copy.
+ * custodians and which relay a notice reaches are the deployment's wiring. A deployment that
+ * notifies over nostr adapts this seam to the relay notifier, supplying the recipient set and the
+ * socket timeout; the artifact the operator reads is carried on the signal, read daemon-side from
+ * the gate's lead-owned bound copy.
  *
  * NEVER THROWS: [announce] runs on the single-writer loop thread, so a throw would sink the whole
  * drive. A delivery fault is a value ([AnnounceOutcome.Failed]) the daemon journals, not an
@@ -60,6 +61,6 @@ sealed interface AnnounceOutcome {
 /**
  * The default [GateOpenSink]: announces nothing, reports [AnnounceOutcome.NoSink]. Every in-tree
  * daemon runs with this, so a ceremony gate is marked announced and never re-announced, keeping the
- * notify arm inert until coach wires a sink that reaches an operator.
+ * notify arm inert until the deployment wires a sink that reaches an operator.
  */
 val NoOpGateOpenSink = GateOpenSink { AnnounceOutcome.NoSink }

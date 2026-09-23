@@ -29,7 +29,7 @@ fun interface EventPublisher {
  * not defects in this codec; [RecipientKey] says which key a deployment lists, so that what the relay
  * learns is a notification key rather than an approval identity.
  *
- * Mechanism, not policy — WHICH custodians and WHICH relay live in coach (§REPO_SEAM).
+ * Mechanism, not policy — WHICH custodians and WHICH relay are the deployment's configuration.
  */
 interface Notifier {
   /**
@@ -187,7 +187,7 @@ class RelayNotifier(
    * `Closeable`/`AutoCloseable` either.
    *
    * Nothing forces this call: a `RelayNotifier` is not `AutoCloseable`, so whatever owns its lifecycle
-   * (coach's step-5 wiring) must invoke [close] at end-of-life. Until it does, the held key is retained,
+   * in the deployment must invoke [close] at end-of-life. Until it does, the held key is retained,
    * not zeroed — no worse than the prior String-typed field, but the hardening stays inert until wired.
    */
   fun close() = leadSecretKey.clear()

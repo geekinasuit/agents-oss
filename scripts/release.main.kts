@@ -117,9 +117,9 @@ fun runStreaming(dir: File, vararg cmd: String): Int =
  *
  * This checks the module is consumable under a MINIMAL consumer config — a JDK 21 runtime
  * pin, which agency's test launcher needs (a 24+ runtime rejects the security-manager flag
- * its tests set) — NOT that any particular downstream's config works: coach, for one,
- * carries a --config=ci for a sandbox issue agents-oss does not have. It is a consumability
- * floor, not a promise about a named consumer.
+ * its tests set) — NOT that any particular downstream's config works: a consumer may carry
+ * flags of its own, such as a sandbox workaround this repository does not need. It is a
+ * consumability floor, not a promise about a named consumer.
  */
 fun consumerSmoke(asset: File, moduleName: String, version: String) {
     val probeRoot = createTempDirectory("release-consumer-$moduleName").toFile()
@@ -136,7 +136,7 @@ fun consumerSmoke(asset: File, moduleName: String, version: String) {
     File(workspace, "MODULE.bazel")
         .writeText(ReleaseCore.consumerProbeModule(moduleName, version, moduleDir.absolutePath))
     File(workspace, ".bazelversion").writeText(bazelVersionFile.readText().trim() + "\n")
-    // Minimal consumer config, NOT coach's: only the JDK 21 runtime pin agency's test
+    // Minimal consumer config, not any real consumer's: only the JDK 21 runtime pin agency's test
     // launcher needs. Mirrors agents-oss's own .bazelrc, under which its CI is green.
     File(workspace, ".bazelrc").writeText(
         "common --java_runtime_version=21\ncommon --tool_java_runtime_version=21\ntest --test_output=errors\n"

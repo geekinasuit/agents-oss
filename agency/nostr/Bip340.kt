@@ -10,7 +10,7 @@ import fr.acinq.secp256k1.Secp256k1
  * [Bip340ApprovalVerifier] (a 32-byte authorization digest); nostr never signs a variable-length
  * message, so no other signing surface exists. And two VALIDITY predicates let a config boundary
  * refuse a malformed public or secret key up front rather than let it throw out of the crypto phase
- * later: [isXonlyPubkey] for a recipient pubkey (which arrives as coach-config hex at
+ * later: [isXonlyPubkey] for a recipient pubkey (which arrives as configured hex at
  * `RecipientKey.of`) and [isValidSecretKeyBytes] for the lead secret key (which arrives as the bytes
  * a #42 `SecretKeyHex` yields at `RelayNotifier`'s init). The two take different forms — hex vs.
  * bytes — because their keys do: the lead key is deliberately no longer a String (#42).
