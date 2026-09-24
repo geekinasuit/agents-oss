@@ -321,7 +321,17 @@ class LeadDaemon(
   fun runLoop() {
     check(active.compareAndSet(false, true)) { "lead daemon is already running (single loop rule)" }
     try {
-      adopt()
+      try {
+        adopt()
+      } catch (t: Throwable) {
+        // A fault in adopt (folding the journal, re-arming a timer, re-driving an effect, a journal
+        // append) stops the loop before its first wake. A restart folds the same journal to the
+        // same step, so a fault that persists there recurs on every start, and the escalation
+        // records why the lead does not run. When the fold itself refuses the journal (a broken
+        // chain, an epoch rule, an unknown version), the escalation is still appended, but a
+        // verified read stops at the entry it refused and never reaches it.
+        escalateThenRethrow("adopt-fault", t)
+      }
       while (true) {
         val ev = queue.take()
         if (ev is WakeEvent.Shutdown) return
@@ -339,24 +349,27 @@ class LeadDaemon(
           // other kill boundary does. We deliberately do NOT self-heal in place: re-adopting
           // here would re-enqueue Adopted and, on a persistent fault, spin the full pipeline
           // (and real model turns) in a tight loop.
-          try {
-            escalate(
-              "wake-fault on ${ev::class.simpleName}: " +
-                (t.message ?: t::class.qualifiedName ?: "unknown") +
-                " — stopping loop for restart"
-            )
-          } catch (journalFailure: Throwable) {
-            // The store itself is unwritable, so the fault can't be recorded. Attach it and
-            // let the ORIGINAL cause propagate — a dead journal has no honest recovery, and
-            // the triggering fault is the one worth surfacing.
-            t.addSuppressed(journalFailure)
-          }
-          throw t
+          escalateThenRethrow("wake-fault on ${ev::class.simpleName}", t)
         }
       }
     } finally {
       active.set(false)
     }
+  }
+
+  // Journal [t] as an escalation that names [where], then rethrow it so the loop stops for a
+  // supervisor to restart. When the store cannot take the escalation either, the journal's failure
+  // is attached to [t] as suppressed and [t] still propagates: a dead journal has no honest
+  // recovery, and the triggering fault is the one worth surfacing.
+  private fun escalateThenRethrow(where: String, t: Throwable): Nothing {
+    try {
+      escalate(
+        "$where: " + (t.message ?: t::class.qualifiedName ?: "unknown") + " — stopping loop for restart"
+      )
+    } catch (journalFailure: Throwable) {
+      t.addSuppressed(journalFailure)
+    }
+    throw t
   }
 
   /**
