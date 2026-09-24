@@ -95,6 +95,7 @@ object LeadFixture {
         // pre-ceremony path quorum does not gate — so DENY_ALL is the honest auth here: no
         // ceremony release is wired for it to clear.
         leadAuth = LeadAuth.DENY_ALL,
+        timers = TimerService.NOOP,
         faults = ExitFault(a.opt("fault")),
         dedupEffects = !a.has("no-dedup"),
       )

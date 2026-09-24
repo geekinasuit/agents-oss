@@ -69,6 +69,7 @@ class ClaudeCognitionSmokeTest {
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
         leadAuth = LeadAuth.DENY_ALL, // model-wake smoke; releases nothing
+        timers = TimerService.NOOP,
       )
 
     val folded = daemon.driveUntilQuiescent()

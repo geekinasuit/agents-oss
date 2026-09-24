@@ -78,10 +78,12 @@ class LeadDaemon(
    * nonce-less path only under a ceremony auth ([LeadAuth.hasApprovers]), never under DENY_ALL. */
   private val leadAuth: LeadAuth,
   /** Fires the daemon's timers, such as the one a failed gate-open announce waits on before it is
-   * sent again. Defaults to [TimerService.NOOP], which fires nothing: under it a failed announce is
-   * neither sent again nor escalated. A deployment that wires a real [gateOpenSink] passes a
-   * service that fires, such as [ThreadTimerService]. */
-  private val timers: TimerService = TimerService.NOOP,
+   * sent again. REQUIRED, no default, for the same reason [podSpec] is: under a service that fires
+   * nothing, a failed announce is marked for a retry that never comes and is never escalated, and a
+   * silently-defaulted service would hide that. A deployment passes a service that fires, such as
+   * [ThreadTimerService]. A test passes a service it controls: most pass [TimerService.NOOP] and
+   * fire timers with [injectTimerDue], and some pass one that records or fires timers itself. */
+  private val timers: TimerService,
   private val faults: FaultInjector = FaultInjector.NONE,
   /** Where a ceremony gate-open is announced so an operator can authorize it ([GateOpenSink]).
    * Defaults to [NoOpGateOpenSink]: an un-wired daemon marks the gate announced (so the arm fires

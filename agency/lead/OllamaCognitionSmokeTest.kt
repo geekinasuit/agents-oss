@@ -102,6 +102,7 @@ class OllamaCognitionSmokeTest {
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
         leadAuth = LeadAuth.DENY_ALL, // model-wake gate; releases nothing
+        timers = TimerService.NOOP,
         maxCognitionAttempts = OpenAiCompatCognition.MAX_ATTEMPTS_PER_WAKE,
       )
 
@@ -145,6 +146,7 @@ class OllamaCognitionSmokeTest {
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
         leadAuth = LeadAuth.DENY_ALL, // model-wake gate; releases nothing
+        timers = TimerService.NOOP,
         maxCognitionAttempts = OpenAiCompatCognition.MAX_ATTEMPTS_PER_WAKE,
       )
     val thread = Thread { daemon.runLoop() }
