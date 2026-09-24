@@ -567,16 +567,6 @@ class RelayConnection(
     return SubscribeResult.Sent
   }
 
-  // A caller-supplied subscription id must be non-empty and within NIP-01's 64-char cap. A bad id is
-  // a caller bug, not a remote fault, so it throws (like RelayConfig's structural checks) rather than
-  // returning a fail-closed result.
-  private fun requireValidSubscriptionId(subscriptionId: String) {
-    require(subscriptionId.isNotEmpty()) { "subscription id must not be empty" }
-    require(subscriptionId.length <= 64) {
-      "subscription id must be at most 64 characters (NIP-01), was ${subscriptionId.length}"
-    }
-  }
-
   private fun failedDetail(default: String): String =
     failure.get()?.let { "connection failed: $it" } ?: default
 
@@ -784,4 +774,14 @@ class RelayConnection(
 internal fun preparationBudget(now: Instant, deadline: Instant): Duration? {
   val remaining = Duration.between(now, deadline)
   return if (remaining.toMillis() <= 0L) null else remaining
+}
+
+// A caller-supplied subscription id must be non-empty and within NIP-01's 64-char cap. A bad id is
+// a caller bug, not a remote fault, so it throws (like RelayConfig's structural checks) rather than
+// returning a fail-closed result.
+internal fun requireValidSubscriptionId(subscriptionId: String) {
+  require(subscriptionId.isNotEmpty()) { "subscription id must not be empty" }
+  require(subscriptionId.length <= 64) {
+    "subscription id must be at most 64 characters (NIP-01), was ${subscriptionId.length}"
+  }
 }

@@ -43,20 +43,8 @@ class ReconnectingPublisher(
   private val newConnection: () -> RelayConnection,
   private val connectTimeout: Duration,
   // Required, with no default: whether the relay needs NIP-42 is the deployment's to say.
-  private val auth: Auth,
+  private val auth: RelayAuth,
 ) : EventPublisher {
-  /** Whether a new connection authenticates before its first publish. */
-  sealed interface Auth {
-    /** Publish without authenticating. A relay that requires NIP-42 rejects each publish. */
-    object None : Auth
-
-    /**
-     * Answer the relay's NIP-42 challenge on each new connection, within [timeout]. A connection
-     * that does not authenticate is closed with nothing published on it.
-     */
-    data class Nip42(val timeout: Duration) : Auth
-  }
-
   private val lock = Any()
   private var connection: RelayConnection? = null
   private var closed = false
@@ -67,9 +55,9 @@ class ReconnectingPublisher(
       if (connection?.hasFailed() == true) discard()
       val conn =
         connection
-          ?: when (val opened = open()) {
-            is Opened.Ready -> opened.connection.also { connection = it }
-            is Opened.Unavailable -> return PublishResult.Failed(opened.detail)
+          ?: when (val opened = openConnection(newConnection, connectTimeout, auth)) {
+            is OpenedConnection.Ready -> opened.connection.also { connection = it }
+            is OpenedConnection.Unavailable -> return PublishResult.Failed(opened.detail)
           }
       conn.publish(event, timeout).also { if (it is PublishResult.Failed) discard() }
     }
@@ -85,38 +73,5 @@ class ReconnectingPublisher(
   private fun discard() {
     connection?.close()
     connection = null
-  }
-
-  private fun open(): Opened {
-    val conn =
-      try {
-        newConnection()
-      } catch (e: Exception) {
-        return Opened.Unavailable("could not create a connection: ${e.javaClass.simpleName}")
-      }
-    val connected = conn.connect(connectTimeout)
-    if (connected is ConnectResult.Failed) {
-      conn.close()
-      return Opened.Unavailable("could not connect: ${connected.detail}")
-    }
-    if (auth is Auth.Nip42) {
-      val refusal =
-        when (val result = conn.authenticate(auth.timeout)) {
-          AuthResult.Authenticated -> null
-          is AuthResult.Refused -> "relay refused authentication: ${result.message}"
-          is AuthResult.Failed -> "could not authenticate: ${result.detail}"
-        }
-      if (refusal != null) {
-        conn.close()
-        return Opened.Unavailable(refusal)
-      }
-    }
-    return Opened.Ready(conn)
-  }
-
-  private sealed interface Opened {
-    class Ready(val connection: RelayConnection) : Opened
-
-    class Unavailable(val detail: String) : Opened
   }
 }
