@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.nostr
 
+import java.lang.management.ManagementFactory
 import java.time.Duration
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -59,6 +60,38 @@ class RelayCeilingTest {
     assertParsedOnTheListenerThread(OBJECTS_AROUND_AN_ARRAY)
   }
 
+  @Test
+  fun `the exclusion check passes only the form it reads, naming a method its class declares`() {
+    // Each argument must be selected from among others. HotSpot honours some that the check
+    // refuses, such as the `::` form, but the check cannot tell what those exclude. The `:=` form
+    // sets the list of commands instead of adding to it, so it can drop the exclusion in BUILD.
+    // A value after the method, as in `,false`, can turn an exclusion off. The rows spell both
+    // flags with `=` and with `:=`.
+    val reader = "kotlinx/serialization/json/internal/JsonTreeReader"
+    val dotted = "kotlinx.serialization.json.internal.JsonTreeReader"
+    val cases =
+      listOf(
+        "-XX:CompileCommand=exclude,$reader.readArray" to null,
+        "-XX:CompileCommand=exclude,$reader.readArrayGone" to NAMES_NO_METHOD,
+        "-XX:CompileCommand=exclude,kotlinx/serialization/json/JsonTreeReader.readArray" to
+          NAMES_NO_METHOD,
+        "-XX:CompileCommand=exclude,$dotted.readArray" to UNREADABLE_FORM,
+        "-XX:CompileCommand=exclude,$dotted::readArray" to UNREADABLE_FORM,
+        "-XX:CompileCommand=Exclude,$reader.readArray" to UNREADABLE_FORM,
+        "-XX:CompileCommand=exclude $reader readArray" to UNREADABLE_FORM,
+        "-XX:CompileCommand:=exclude,$reader.readArray" to UNREADABLE_FORM,
+        "-XX:CompileCommand=exclude,$reader.readArray,false" to UNREADABLE_FORM,
+        "-XX:CompileCommandFile=compile-commands" to UNREADABLE_FORM,
+        "-XX:CompileCommandFile:=compile-commands" to UNREADABLE_FORM,
+      )
+    val loader = RelayCeilingTest::class.java.classLoader
+    for ((argument, problem) in cases) {
+      val arguments = listOf("-Xbatch", argument, "-XX:TieredStopAtLevel=3")
+      assertEquals("$argument is selected", listOf(argument), compileCommandArguments(arguments))
+      assertEquals(argument, problem, exclusionProblem(argument, loader))
+    }
+  }
+
   private fun assertParsedOnTheListenerThread(frame: String) {
     FakeRelay().use { relay ->
       relay.serve { session ->
@@ -93,6 +126,14 @@ class RelayCeilingTest {
 
     private const val ROOMY_STACK_BYTES = 64L * 1024 * 1024
 
+    // The one form the exclusion check reads: a slash-separated class name, a dot, and a method.
+    private val EXCLUSION = Regex("""-XX:CompileCommand=exclude,([\w$]+(?:/[\w$]+)*)\.([\w$]+)""")
+
+    private const val NAMES_NO_METHOD = "names no method, so it excludes nothing from compilation"
+
+    private const val UNREADABLE_FORM =
+      "is not in the -XX:CompileCommand=exclude,package/Class.method form the check reads"
+
     /** [n] objects, each the value of the one before it, around [value]. */
     private fun objects(n: Int, value: String): String = "{\"a\":".repeat(n) + value + "}".repeat(n)
 
@@ -107,9 +148,51 @@ class RelayCeilingTest {
     @BeforeClass
     @JvmStatic
     fun warmUp() {
+      // First, so that an exclusion that may exclude nothing fails the class before the warm-ups.
+      checkCompileExclusions()
       for (frame in listOf(ARRAYS, OBJECTS, OBJECTS_AROUND_AN_ARRAY)) {
         repeat(WARM_UPS) { parseOnRoomyStack(frame) }
       }
+    }
+
+    /**
+     * Fails the class if a `CompileCommand` argument the JVM was started with may exclude nothing.
+     * HotSpot checks a pattern's syntax, but not whether it matches a method in a loaded class, and
+     * on a syntax error it prints the error and runs on. Either way it excludes nothing, so
+     * relay_ceiling_c1_split_test would run at tier 3 throughout, the state relay_ceiling_c1_test
+     * already pins, and still pass. That target is the only one with such a flag. The check reads
+     * every argument whose name starts with `-XX:CompileCommand`, and passes only
+     * `-XX:CompileCommand=exclude,package/Class.method` naming a method the class declares. Any
+     * other form fails, though HotSpot may honour it, because the check cannot tell what it
+     * excludes. The check does not read compiler directives: a directive, or the diagnostic
+     * `-XX:+CompilerDirectivesIgnoreCompileCommands`, can turn off an exclusion the check passes.
+     */
+    private fun checkCompileExclusions() {
+      val loader = RelayCeilingTest::class.java.classLoader
+      val arguments = ManagementFactory.getRuntimeMXBean().inputArguments
+      val problems =
+        compileCommandArguments(arguments).mapNotNull { argument ->
+          exclusionProblem(argument, loader)?.let { "$argument $it" }
+        }
+      assertEquals("compile exclusions that may exclude nothing", emptyList<String>(), problems)
+    }
+
+    /** The arguments among [jvmArguments] whose name starts with `-XX:CompileCommand`. */
+    private fun compileCommandArguments(jvmArguments: List<String>): List<String> =
+      jvmArguments.filter { it.startsWith("-XX:CompileCommand") }
+
+    /**
+     * Why [argument] may exclude nothing, or null if it names a method its class declares. An error
+     * from listing a loaded class's methods is rethrown: it does not show the method is missing.
+     */
+    private fun exclusionProblem(argument: String, loader: ClassLoader): String? {
+      val (classPath, methodName) =
+        EXCLUSION.matchEntire(argument)?.destructured ?: return UNREADABLE_FORM
+      val declared =
+        runCatching { Class.forName(classPath.replace('/', '.'), false, loader) }
+          .map { cls -> cls.declaredMethods.any { it.name == methodName } }
+          .getOrDefault(false)
+      return if (declared) null else NAMES_NO_METHOD
     }
 
     private fun parseOnRoomyStack(frame: String) {
