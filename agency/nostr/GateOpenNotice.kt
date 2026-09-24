@@ -1,6 +1,7 @@
 package com.geekinasuit.agency.nostr
 
 import com.geekinasuit.agency.shared.text.hasReadableText
+import com.geekinasuit.agency.shared.text.hasUtf8Encoding
 
 /**
  * A gate-open notice (A4-6): what the lead tells the operator the moment a gate opens, so the

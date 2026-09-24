@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.shared.journal
 
+import com.geekinasuit.agency.shared.text.hasUtf8Encoding
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.attribute.PosixFilePermissions
@@ -74,7 +75,7 @@ class SqliteStore(
   }
 
   override fun append(kind: String, payload: JsonObject, origin: String, idempotencyKey: String?): JournalEntry =
-    appendBuilt(kind, payload.toString(), origin, idempotencyKey)
+    appendBuilt(kind, storedPayloadJson(payload), origin, idempotencyKey)
 
   private fun appendBuilt(kind: String, payloadJson: String, origin: String, idempotencyKey: String?): JournalEntry = synchronized(ioLock) {
     val (lastSeq, lastHash) = chainHead()
@@ -96,6 +97,7 @@ class SqliteStore(
   }
 
   override fun appendRaw(entry: JournalEntry): Unit = synchronized(ioLock) {
+    requireUtf8Fields(entry)
     conn.prepareStatement(
       """INSERT INTO journal(seq, schema_version, kind, chain_context, origin, key_epoch,
            salt, payload_commitment, payload, idempotency_key, prev_hash, hash, sig)
@@ -117,6 +119,29 @@ class SqliteStore(
       ps.executeUpdate()
     }
     conn.commit()
+  }
+
+  /** Each text field must have a UTF-8 encoding: the driver writes `?` for an unpaired surrogate,
+   * so the stored field would not be the one the entry was hashed over. */
+  private fun requireUtf8Fields(entry: JournalEntry) {
+    val fields =
+      listOf(
+        "kind" to entry.kind,
+        "chainContext" to entry.chainContext,
+        "origin" to entry.origin,
+        "salt" to entry.salt,
+        "payloadCommitment" to entry.payloadCommitment,
+        "payloadJson" to entry.payloadJson,
+        "idempotencyKey" to entry.idempotencyKey,
+        "prevHash" to entry.prevHash,
+        "hash" to entry.hash,
+        "sig" to entry.sig,
+      )
+    for ((name, value) in fields) {
+      require(value == null || hasUtf8Encoding(value)) {
+        "$name holds an unpaired surrogate, which has no UTF-8 encoding"
+      }
+    }
   }
 
   override fun readRaw(): List<JournalEntry> = synchronized(ioLock) {

@@ -709,11 +709,10 @@ class LeadDaemon(
     // spent and would only announce a decided gate again.
     //
     // So the id and digest a nonce is bound to here are never blank, which the fold refuses, and
-    // are ASCII: the id is a kind [evidenceDigest] knows and a ticket ref in the charset the claim
-    // accepts, and the digest is in the hex form the substrate records. The pass needs ASCII to
-    // converge. The journal does not hand every string back as written (a lone surrogate reads back
-    // as '?'), and a nonce whose id or digest reads back changed never matches its gate, so the
-    // gate would be minted for again on every pass.
+    // are in the forms the lead itself writes: the id is a kind [evidenceDigest] knows and a ticket
+    // ref in the charset the claim accepts, and the digest is in the hex form the substrate records.
+    // A gate under any other id or digest came from a journal the lead did not write, or was opened
+    // for a claim that came from one, and the mint does not act on it.
     val wellFormedTicket = lead.currentTicket?.takeIf { TICKET_REF_RE.matches(it) }
     if (leadAuth.hasApprovers && wellFormedTicket != null) {
       for (gate in lead.openGates.values) {
@@ -890,9 +889,8 @@ class LeadDaemon(
    * artifact's for the plan gate, the commit manifest's for the commit gate, none for any other
    * kind. A gate opens only on this digest, and a gate-open's nonce is minted only while the
    * gate's digest still equals it. A recorded digest counts only in the form the substrate records
-   * one, and any other counts as none: a nonce bound to a blank digest would make every later fold
-   * of the journal fail, and one bound to a digest the journal does not hand back as written would
-   * never match its gate. */
+   * one, and any other counts as none: a digest in another form was not recorded by the substrate,
+   * and a nonce bound to a blank one would make every later fold of the journal fail. */
   private fun evidenceDigest(gateKind: String, lead: LeadState): String? =
     when (gateKind) {
       GateKinds.PLAN_APPROVAL -> lead.planArtifactSha

@@ -33,6 +33,11 @@ interface JournalStore : AutoCloseable {
    * the epoch seam); durable on return. [origin] is required, not defaulted — it is the
    * provenance a fold's gate-release check keys on, and a silently-defaulted provenance is
    * a footgun.
+   *
+   * The payload is stored as [storedPayloadJson] prints it, so it reads back equal to [payload],
+   * except for a `JsonUnquotedLiteral`, which reads back as whatever its raw text parses to.
+   * THROWS [IllegalArgumentException], writing nothing, if [storedPayloadJson] refuses [payload],
+   * or if [kind], [origin] or [idempotencyKey] holds an unpaired surrogate ([appendRaw]).
    */
   fun append(kind: String, payload: JsonObject, origin: String, idempotencyKey: String? = null): JournalEntry
 
@@ -47,7 +52,14 @@ interface JournalStore : AutoCloseable {
   /** Raw read without verify/upcast — fixture generation and chain checks only. */
   fun readRaw(): List<JournalEntry>
 
-  /** Appends a pre-built entry verbatim (legacy/fixture writer only — no salting, no epoch logic). */
+  /**
+   * Appends a pre-built entry verbatim (legacy/fixture writer only — no salting, no epoch logic).
+   *
+   * THROWS [IllegalArgumentException], writing nothing, if a text field holds an unpaired
+   * surrogate. Such a field has no UTF-8 encoding: a UTF-8 store would keep a different string
+   * from the one the entry was hashed over, and the hash's lenient encoding gives it the bytes of
+   * the same field with `?` in its place.
+   */
   fun appendRaw(entry: JournalEntry)
 
   /**

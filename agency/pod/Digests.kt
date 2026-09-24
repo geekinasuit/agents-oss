@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.pod
 
+import com.geekinasuit.agency.shared.text.utf8OrNull
 import java.security.MessageDigest
 
 /**
@@ -22,5 +23,10 @@ fun sha256HexBytes(bytes: ByteArray): String =
 
 /** SHA-256 of a string's UTF-8 encoding — a convenience over [sha256HexBytes] for known-text
  * content (the scripted fake pod's artifacts). Equal to the raw-byte digest of that same text
- * written UTF-8, so text pods and the lead's byte-recompute agree. */
-fun sha256Hex(content: String): String = sha256HexBytes(content.toByteArray(Charsets.UTF_8))
+ * written UTF-8, so text pods and the lead's byte-recompute agree. THROWS
+ * [IllegalArgumentException] if [content] holds an unpaired surrogate: it has no UTF-8 encoding,
+ * and the lenient one would give it the digest of the same text with `?` in its place. */
+fun sha256Hex(content: String): String =
+  sha256HexBytes(
+    requireNotNull(utf8OrNull(content)) { "content holds an unpaired surrogate, which has no UTF-8 encoding" }
+  )

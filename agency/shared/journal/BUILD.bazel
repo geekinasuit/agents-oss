@@ -26,6 +26,8 @@ kt_jvm_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        # The strict UTF-8 check a stored field passes.
+        "//agency/shared/text",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
