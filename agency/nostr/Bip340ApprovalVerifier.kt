@@ -1,6 +1,7 @@
 package com.geekinasuit.agency.nostr
 
 import com.geekinasuit.agency.shared.auth.ApprovalVerifier
+import com.geekinasuit.agency.shared.text.utf8OrNull
 import java.security.MessageDigest
 
 /**

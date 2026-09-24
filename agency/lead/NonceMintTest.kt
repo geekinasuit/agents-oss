@@ -36,7 +36,7 @@ import org.junit.rules.TemporaryFolder
  * auth. The honest [ScriptedCognition] walk drives a real plan-gate-open, so these cells
  * exercise the write path end to end; the journal states the daemon does not produce on its
  * own (a voided nonce, a release, a re-open on a new or blank digest, a blank recorded digest, a
- * gate under a blank id or another ticket's, a digest or claimed ticket ref holding a lone
+ * gate under a blank id or another ticket's, a digest, claimed ticket ref or nonce holding a lone
  * surrogate) are hand-appended on top of it.
  */
 class NonceMintTest {
@@ -63,6 +63,7 @@ class NonceMintTest {
     cognition: CognitionStrategy = ScriptedCognition(),
     runner: PodRunner = FakePodRunner(),
     faults: FaultInjector = FaultInjector.NONE,
+    sink: GateOpenSink = NoOpGateOpenSink,
   ): LeadDaemon {
     File(dir, "ticket.txt").also { if (!it.exists()) it.writeText("t1\n") }
     return LeadDaemon(
@@ -76,6 +77,7 @@ class NonceMintTest {
       leadAuth = auth,
       timers = TimerService.NOOP,
       faults = faults,
+      gateOpenSink = sink,
     )
   }
 
@@ -422,9 +424,8 @@ class NonceMintTest {
   @Test
   fun aGateReOpenedOnADigestHoldingALoneSurrogateGetsNoNonceAndTheWakeConverges() {
     // The substrate records a digest as hex, so a digest holding a lone surrogate reaches the fold
-    // only from a journal that wrote the surrogate as a JSON escape. A nonce minted on it would be
-    // stored with '?' in the surrogate's place, never match the gate, and be minted again on every
-    // pass until the pass gives up. The digest is not in the recorded form, so it gets no nonce.
+    // only from a journal that wrote the surrogate as a JSON escape. The digest is not in the form
+    // the substrate records, so it is not the gate's evidence, and the gate gets no nonce.
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
@@ -461,10 +462,9 @@ class NonceMintTest {
   @Test
   fun aGateUnderAClaimHoldingALoneSurrogateGetsNoNonceAndTheWakeConverges() {
     // The claim accepts only ticket refs in an ASCII charset, so a claimed ref holding a lone
-    // surrogate reaches the fold only from a journal that wrote the surrogate as a JSON escape, and
-    // so does a gate under the id derived from it. A nonce minted for that gate would be stored with
-    // '?' in the surrogate's place, never match the gate, and be minted again on every pass until
-    // the pass gives up. The ref is not one the claim accepts, so the gate gets no nonce.
+    // surrogate reaches the fold only from a journal the lead did not write. A gate under the id
+    // derived from it can come from that journal, or from the lead's own gate-open for the claim.
+    // The ref is not one the claim accepts, so the gate gets no nonce.
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
@@ -496,6 +496,42 @@ class NonceMintTest {
     store.close()
   }
 
+  @Test
+  fun aNonceHoldingALoneSurrogateIsAnnouncedOnceAndEveryWakeConverges() {
+    // The daemon mints a nonce as hex, so a nonce holding a lone surrogate reaches the fold only
+    // from a journal that wrote the surrogate as a JSON escape. The journal stores the notify marker
+    // for it in the same escaped form and reads it back as written, so the marker matches the
+    // nonce: it is announced once, and no later pass or wake announces it again.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    store.append(
+      LeadKinds.NONCE_ISSUED,
+      buildJsonObject {
+        put("nonce", escapedLoneSurrogateAfter("n"))
+        put("gateId", PLAN_GATE)
+        put("payloadDigest", f1.lead.planArtifactSha!!)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    val announced = mutableListOf<String>()
+    val sink = GateOpenSink { signal ->
+      announced += signal.nonce
+      AnnounceOutcome.Announced("delivered")
+    }
+
+    repeat(3) { daemon(dir, store, ceremonyAuth(), sink = sink).driveUntilQuiescent() }
+    val nonce = "n$LONE_SURROGATE"
+    assertEquals("announced once across three wakes", listOf(nonce), announced)
+    val markers = store.readAll().filter { it.kind == LeadKinds.GATE_OPEN_NOTIFIED }
+    assertEquals("a marker for the walk's own nonce, then one for this one", 2, markers.size)
+    assertTrue(
+      "its marker reads back as written",
+      nonce in leadFold(store.readAll(), ceremonyAuth()).notifiedNonces,
+    )
+    store.close()
+  }
+
   /**
    * Runs a ceremony daemon until an injected crash lands between a [gateKind] gate's GATE_OPENED
    * and its NONCE_ISSUED, two sequential appends, and returns the state the journal folds to then.
@@ -522,9 +558,10 @@ class NonceMintTest {
   private fun planNonces(lead: LeadState): List<IssuedNonce> =
     lead.issuedNonces.values.filter { it.gateId == PLAN_GATE }.sortedBy { it.issuedSeq }
 
-  /** A JSON string of [prefix] then a lone surrogate, written as the escape a JSON writer may use
-   * for one, which the fold reads back as the surrogate. A plain [String] value would carry the
-   * surrogate raw, and the journal stores a raw one as '?'. */
+  /** A JSON string of [prefix] then a lone surrogate, spelled as the escape a JSON writer may use
+   * for one. It is appended as raw JSON text, so the cell holds the form a journal the lead did not
+   * write can have, whatever this store does with a lone surrogate it is given. The fold reads it
+   * back as the surrogate. */
   @OptIn(ExperimentalSerializationApi::class)
   private fun escapedLoneSurrogateAfter(prefix: String) =
     JsonUnquotedLiteral("\"" + prefix + LONE_SURROGATE_ESCAPE + "\"")

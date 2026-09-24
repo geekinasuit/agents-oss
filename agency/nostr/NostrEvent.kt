@@ -1,8 +1,7 @@
 package com.geekinasuit.agency.nostr
 
-import java.nio.CharBuffer
-import java.nio.charset.CharacterCodingException
-import java.nio.charset.CodingErrorAction
+import com.geekinasuit.agency.shared.text.hasUtf8Encoding
+import com.geekinasuit.agency.shared.text.utf8OrNull
 import java.security.MessageDigest
 
 /**
@@ -127,26 +126,6 @@ object Nip01 {
     sb.append('"')
   }
 }
-
-/**
- * The UTF-8 encoding of [s], or `null` if [s] holds an unpaired surrogate and so has none. Encoded
- * strictly, because `String.toByteArray` would write `?` for the surrogate, and two different strings
- * would then encode to the same bytes. A fresh encoder per call: a CharsetEncoder is not thread-safe.
- */
-internal fun utf8OrNull(s: String): ByteArray? =
-  try {
-    val encoded =
-      Charsets.UTF_8.newEncoder()
-        .onMalformedInput(CodingErrorAction.REPORT)
-        .onUnmappableCharacter(CodingErrorAction.REPORT)
-        .encode(CharBuffer.wrap(s))
-    ByteArray(encoded.remaining()).also { encoded.get(it) }
-  } catch (_: CharacterCodingException) {
-    null
-  }
-
-/** Whether [s] has a UTF-8 encoding, that is, holds no unpaired surrogate ([utf8OrNull]). */
-internal fun hasUtf8Encoding(s: String): Boolean = utf8OrNull(s) != null
 
 /** Whether every string an event's id covers ([pubkey], each tag element, [content]) has a UTF-8
  * encoding, so that the event has a NIP-01 id ([Nip01.eventId]). */

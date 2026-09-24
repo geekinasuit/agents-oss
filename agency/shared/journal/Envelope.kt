@@ -1,7 +1,12 @@
 package com.geekinasuit.agency.shared.journal
 
+import com.geekinasuit.agency.shared.text.hasUtf8Encoding
 import java.security.MessageDigest
 import java.security.SecureRandom
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * Journal entry envelope, v3: schema + salted payload-commitment are active; signing is
@@ -72,6 +77,10 @@ object NoopSigner : EntrySigner {
  * boundaries can never shift (a separator inside payloadJson or idempotencyKey cannot
  * re-partition into a different-but-colliding stored form), and null encodes distinctly
  * from any literal string.
+ *
+ * Injective only over strings that have a UTF-8 encoding. The hashes encode the canonical string
+ * with the lenient encoder, which writes `?` for an unpaired surrogate, so a field holding one
+ * hashes as that field with `?` in its place. [JournalStore.appendRaw] refuses such a field.
  */
 private fun enc(s: String?): String =
   if (s == null) "null;" else "${s.toByteArray(Charsets.UTF_8).size}:$s;"
@@ -132,6 +141,51 @@ fun entryHashFor(e: JournalEntry): String =
   } else {
     entryHashV2(e.seq, e.schemaVersion, e.kind, e.payloadJson, e.idempotencyKey, e.prevHash)
   }
+
+/**
+ * The form a payload is stored, committed to and hashed in: [payload]'s JSON text, with each
+ * unpaired surrogate in a string written as a JSON escape (a backslash, `u` and the char's four
+ * hex digits). A stored field must have a UTF-8 encoding ([JournalStore.appendRaw]); the escape is
+ * ASCII and parses back to the same char, so the payload read back equals [payload], except for a
+ * `JsonUnquotedLiteral`, which is printed as its raw text and reads back as whatever that text
+ * parses to. A surrogate pair has an encoding and stays as it is.
+ *
+ * THROWS [IllegalArgumentException] if an unquoted literal, such as a number, holds an unpaired
+ * surrogate. JSON has no escape outside a string, and kotlinx parses a bare token holding one from
+ * malformed input as such a literal.
+ *
+ * The escaping works on the printed text: once no literal holds an unpaired surrogate, one can
+ * appear only inside a string, where an escape stands for exactly the char it replaces.
+ */
+fun storedPayloadJson(payload: JsonObject): String {
+  requireLiteralsHaveUtf8Encoding(payload)
+  val json = payload.toString()
+  if (hasUtf8Encoding(json)) return json
+  return buildString(json.length + 5) {
+    var i = 0
+    while (i < json.length) {
+      val c = json[i]
+      if (c.isHighSurrogate() && i + 1 < json.length && json[i + 1].isLowSurrogate()) {
+        append(c).append(json[i + 1])
+        i += 2
+        continue
+      }
+      if (c.isSurrogate()) append('\\').append('u').append(Integer.toHexString(c.code)) else append(c)
+      i++
+    }
+  }
+}
+
+private fun requireLiteralsHaveUtf8Encoding(element: JsonElement) {
+  when (element) {
+    is JsonObject -> element.values.forEach(::requireLiteralsHaveUtf8Encoding)
+    is JsonArray -> element.forEach(::requireLiteralsHaveUtf8Encoding)
+    is JsonPrimitive ->
+      require(element.isString || hasUtf8Encoding(element.content)) {
+        "payload holds an unquoted literal with an unpaired surrogate, which no JSON escape can stand for"
+      }
+  }
+}
 
 /** 32 random bytes, hex — one fresh salt per entry. */
 fun newSaltHex(rng: SecureRandom = SecureRandom()): String {

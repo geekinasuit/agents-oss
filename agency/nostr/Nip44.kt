@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.nostr
 
+import com.geekinasuit.agency.shared.text.utf8OrNull
 import fr.acinq.secp256k1.Secp256k1
 import java.security.MessageDigest
 import java.security.SecureRandom

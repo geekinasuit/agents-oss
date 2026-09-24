@@ -20,6 +20,8 @@ kt_jvm_library(
         "PodSpec.kt",
     ],
     visibility = ["//visibility:public"],
+    # The strict UTF-8 encoder a text digest encodes with.
+    deps = ["//agency/shared/text"],
 )
 
 kt_jvm_test(
@@ -27,6 +29,17 @@ kt_jvm_test(
     size = "small",
     srcs = ["PodSpecTest.kt"],
     test_class = "com.geekinasuit.agency.pod.PodSpecTest",
+    deps = [
+        ":pod",
+        "@maven//:junit_junit",
+    ],
+)
+
+kt_jvm_test(
+    name = "digests_test",
+    size = "small",
+    srcs = ["DigestsTest.kt"],
+    test_class = "com.geekinasuit.agency.pod.DigestsTest",
     deps = [
         ":pod",
         "@maven//:junit_junit",
