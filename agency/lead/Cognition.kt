@@ -5,9 +5,14 @@ import com.geekinasuit.agency.shared.journal.JournalState
 /**
  * The cognition seam: the model-bearing layer is a
  * strategy the model-free substrate HOSTS. Per wake the substrate renders a [WakeContext]
- * view, calls [CognitionStrategy.decide] exactly once, journals the output verbatim with
- * origin = cognition (the audit record), then executes the proposals itself — the
- * substrate is the sole journal writer and the sole actor.
+ * view, calls [CognitionStrategy.decide], journals a usable output with origin = cognition (the
+ * audit record) unless it has neither proposals nor call meta, as a scripted idle turn does, then
+ * executes the proposals itself — the substrate is the sole journal writer and the sole actor.
+ * While the output is unusable, the substrate calls [CognitionStrategy.decide] again, a bounded
+ * number of times, and journals each unusable attempt with substrate origin and without the
+ * model's text. A gate-open retry timer's wake does not call it while the timer's nonce is still
+ * the one its gate waits on and no mail waits: the substrate sends the failed announce again
+ * itself, and the gate still blocks the pipeline.
  *
  * The proposal vocabulary is deliberately narrow: cognition supplies JUDGMENT (when a
  * plan is ready to gate, what task a pod should run, what status to report, when to give
