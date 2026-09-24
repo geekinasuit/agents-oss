@@ -158,10 +158,11 @@ const val GATE_OPEN_NOTICE_RUMOR_KIND = 14
  * rumor's kind to be [GATE_OPEN_NOTICE_RUMOR_KIND] and its pubkey to be the lead's. It requires
  * exactly one of each `agency-` tag, and treats a rumor missing one or repeating one as no notice.
  * One gate-open can then arrive more than once: the same rumor in another wrap, or, when the lead
- * re-announces after a restart, a new rumor with a later date and so a new [Rumor.id]. Every copy
- * carries the same `agency-nonce`, which is single-use and bound to one gate and one digest, so a
- * reader deduplicates on that nonce, among notices that passed the checks above, and not on the
- * rumor's id or the wrap's. It shows the artifact as inert text and fetches nothing it names.
+ * announces it again after a restart or a failed delivery, a new rumor with a later date and so a
+ * new [Rumor.id]. Every copy carries the same `agency-nonce`, which is single-use and bound to one
+ * gate and one digest, so a reader deduplicates on that nonce, among notices that passed the checks
+ * above, and not on the rumor's id or the wrap's. It shows the artifact as inert text and fetches
+ * nothing it names.
  *
  * A reader can check the content against [GateOpenNotice.payloadDigest]: the lead's digest is the
  * SHA-256 of the artifact's bytes in lowercase hex, so hashing the content's UTF-8 bytes reproduces
