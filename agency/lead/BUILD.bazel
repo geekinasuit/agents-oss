@@ -131,6 +131,18 @@ kt_jvm_test(
 )
 
 kt_jvm_test(
+    name = "thread_timer_service_test",
+    size = "small",
+    srcs = ["ThreadTimerServiceTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.ThreadTimerServiceTest",
+    deps = [
+        ":lead",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+    ],
+)
+
+kt_jvm_test(
     name = "guards_test",
     size = "small",
     srcs = ["GuardsTest.kt"],
