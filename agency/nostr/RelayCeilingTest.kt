@@ -65,6 +65,8 @@ class RelayCeilingTest {
     // Each argument must be selected from among others. HotSpot honours some that the check
     // refuses, such as the `::` form, but the check cannot tell what those exclude. The `:=` form
     // sets the list of commands instead of adding to it, so it can drop the exclusion in BUILD.
+    // A value after the method, as in `,false`, can turn an exclusion off. The rows spell both
+    // flags with `=` and with `:=`.
     val reader = "kotlinx/serialization/json/internal/JsonTreeReader"
     val dotted = "kotlinx.serialization.json.internal.JsonTreeReader"
     val cases =
@@ -78,7 +80,9 @@ class RelayCeilingTest {
         "-XX:CompileCommand=Exclude,$reader.readArray" to UNREADABLE_FORM,
         "-XX:CompileCommand=exclude $reader readArray" to UNREADABLE_FORM,
         "-XX:CompileCommand:=exclude,$reader.readArray" to UNREADABLE_FORM,
+        "-XX:CompileCommand=exclude,$reader.readArray,false" to UNREADABLE_FORM,
         "-XX:CompileCommandFile=compile-commands" to UNREADABLE_FORM,
+        "-XX:CompileCommandFile:=compile-commands" to UNREADABLE_FORM,
       )
     val loader = RelayCeilingTest::class.java.classLoader
     for ((argument, problem) in cases) {
