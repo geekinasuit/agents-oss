@@ -193,6 +193,9 @@ kt_jvm_library(
     name = "relay",
     srcs = [
         "RelayConnection.kt",
+        # The publisher that replaces a connection it can no longer trust before its next publish,
+        # so one fault does not fail every later publish. It opens connections, so it lives here.
+        "ReconnectingPublisher.kt",
         # The gate-open notifier (step 4): fans the notice codec out over a recipient set and
         # publishes each via RelayConnection. Lives here, with the target that dials, because it
         # publishes; the codec itself is hermetic and stays in :nostr.
@@ -353,6 +356,26 @@ kt_jvm_test(
         ":fake_relay",
         ":nostr",
         ":relay",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# The reconnecting publisher against fake relays: when it replaces its connection, what it reports
+# when it cannot connect or authenticate, and the notifier's fan-out over it. Some cells sign (the
+# NIP-42 handshake, and the notifier's gift wraps), so it needs the native runtime-only, like
+# relay_connection_auth_test, and reads JSON directly to pull an event's id out of a client frame.
+# associates (not deps) on :relay so the cells can check that a closed connection's key is zeroed.
+kt_jvm_test(
+    name = "reconnecting_publisher_test",
+    size = "small",
+    srcs = ["ReconnectingPublisherTest.kt"],
+    associates = [":relay"],
+    test_class = "com.geekinasuit.agency.nostr.ReconnectingPublisherTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":fake_relay",
+        ":nostr",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],

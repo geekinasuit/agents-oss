@@ -27,15 +27,6 @@ class RelayConnectionTest {
 
   private fun config(url: String) = RelayConfig(relayUrl = url, leadSecretKey = SecretKeyHex.ofHexString(key))
 
-  private fun waitUntil(timeoutMillis: Long, cond: () -> Boolean): Boolean {
-    val deadline = System.currentTimeMillis() + timeoutMillis
-    while (System.currentTimeMillis() < deadline) {
-      if (cond()) return true
-      Thread.sleep(20)
-    }
-    return cond()
-  }
-
   // preparationBudget is the pure deadline-budget arithmetic authenticate() uses after signing to
   // tell "the client ran out of time preparing the frame" from "the relay never answered". Native-
   // free (Duration math), so its boundary is unit-testable here rather than by trying to reproduce a

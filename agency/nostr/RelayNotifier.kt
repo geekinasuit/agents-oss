@@ -10,6 +10,9 @@ import java.time.Instant
  * fake satisfies it in a test — which lets [RelayNotifier]'s fan-out (recipient dedup, per-recipient
  * result mapping, crypto-before-deadline) be tested without a socket, the same seam
  * [RelayConnection] uses to inject its HTTP client.
+ *
+ * A method reference to one connection fails every publish after that connection's first fault.
+ * [ReconnectingPublisher] replaces the connection instead.
  */
 fun interface EventPublisher {
   fun publish(event: NostrEvent, timeout: Duration): PublishResult

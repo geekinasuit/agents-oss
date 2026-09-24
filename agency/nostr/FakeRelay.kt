@@ -115,6 +115,10 @@ class FakeRelay : AutoCloseable {
 
     fun sendBinary(payload: ByteArray) = sendFrame(OPCODE_BINARY, payload, fin = true)
 
+    /** A CLOSE frame carrying [statusCode], as a relay sends when it ends the connection. */
+    fun sendClose(statusCode: Int = 1000) =
+      sendFrame(OPCODE_CLOSE, byteArrayOf((statusCode ushr 8).toByte(), statusCode.toByte()), fin = true)
+
     @Synchronized
     fun sendFrame(opcode: Int, payload: ByteArray, fin: Boolean) {
       val header = ByteArrayOutputStream()
@@ -202,4 +206,15 @@ class FakeRelay : AutoCloseable {
     const val OPCODE_PING = 0x9
     const val OPCODE_PONG = 0xA
   }
+}
+
+/** Poll [cond] until it holds or [timeoutMillis] passes, and return whether it held. What a [FakeRelay]
+ * script sends lands on the client's listener thread, so a cell waits for its effect this way. */
+fun waitUntil(timeoutMillis: Long, cond: () -> Boolean): Boolean {
+  val deadline = System.currentTimeMillis() + timeoutMillis
+  while (System.currentTimeMillis() < deadline) {
+    if (cond()) return true
+    Thread.sleep(20)
+  }
+  return cond()
 }
