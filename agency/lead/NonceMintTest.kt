@@ -74,6 +74,7 @@ class NonceMintTest {
       workdir = dir,
       effects = EffectReceiver(dir.absolutePath),
       leadAuth = auth,
+      timers = TimerService.NOOP,
       faults = faults,
     )
   }

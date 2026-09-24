@@ -483,6 +483,7 @@ class WakeLoopTest {
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
         leadAuth = LeadAuth.DENY_ALL, // wake-loop mechanics; releases are nonce-less
+        timers = TimerService.NOOP,
       )
     val folded = daemon.driveUntilQuiescent()
     assertTrue(
@@ -554,6 +555,7 @@ class WakeLoopTest {
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
         leadAuth = LeadAuth.DENY_ALL, // wake-loop mechanics; releases are nonce-less
+        timers = TimerService.NOOP,
       )
     val loop = Thread { daemon.runLoop() }
     loop.start()
@@ -651,6 +653,7 @@ class WakeLoopTest {
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
         leadAuth = LeadAuth.DENY_ALL, // wake-loop mechanics; releases are nonce-less
+        timers = TimerService.NOOP,
       )
     // runLoop adopts → claims t1 → the scripted playbook proposes the planner pod → boom.spawn
     // throws → the loop journals the fault and rethrows, ending the thread.
@@ -709,6 +712,7 @@ class WakeLoopTest {
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
         leadAuth = LeadAuth.DENY_ALL, // wake-loop mechanics; releases are nonce-less
+        timers = TimerService.NOOP,
       )
     val folded = daemon.driveUntilQuiescent()
     val result = store.readAll().first { it.kind == LeadKinds.POD_RESULT_RECORDED }
@@ -764,6 +768,7 @@ class WakeLoopTest {
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
         leadAuth = LeadAuth.DENY_ALL, // wake-loop mechanics; releases are nonce-less
+        timers = TimerService.NOOP,
       )
     val folded = daemon.driveUntilQuiescent()
     val result = store.readAll().first { it.kind == LeadKinds.POD_RESULT_RECORDED }

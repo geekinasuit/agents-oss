@@ -24,9 +24,8 @@ import com.geekinasuit.agency.shared.text.hasReadableText
  * may receive the same signal again; the nonce is single-use, so a repeat cannot authorize twice. A
  * sink that reached some recipients and not others chooses: [AnnounceOutcome.Announced] if what it
  * delivered lets the operator act, or [AnnounceOutcome.Failed] to have the whole signal sent again.
- * The retry and the escalation need the daemon's timer service to fire. Its default,
- * [TimerService.NOOP], fires nothing, and under it a failed announce is neither sent again nor
- * escalated.
+ * The retry and the escalation need the daemon's timer service to fire: under
+ * [TimerService.NOOP], which fires nothing, a failed announce is neither sent again nor escalated.
  */
 fun interface GateOpenSink {
   fun announce(signal: GateOpenSignal): AnnounceOutcome
