@@ -677,6 +677,42 @@ class WakeLoopTest {
   }
 
   @Test
+  fun aFaultInAdoptIsJournaledBeforeTheLoopStops() {
+    val dir = tmp.newFolder()
+    // adopt runs before the loop's first wake, so a fault there never reaches the per-wake catch.
+    // A restart folds the same journal to the same step, so the escalation is the record of why
+    // the lead does not run.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val daemon =
+      LeadDaemon(
+        store = store,
+        cognition = ScriptedCognition(),
+        podRunner = FakePodRunner(),
+        podSpec = PodSpec.fixture(),
+        ticketSource = FileTicketSource(File(dir, "ticket.txt")),
+        workdir = dir,
+        effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL,
+        timers = TimerService.NOOP,
+        faults = { boundary -> if (boundary == "mid-adopt") throw IllegalStateException("adopt blew up") },
+      )
+    val thrown = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+    val loop = Thread { try { daemon.runLoop() } catch (t: Throwable) { thrown.set(t) } }
+    loop.start()
+    loop.join(5_000)
+    assertTrue("the loop terminated rather than hanging", !loop.isAlive)
+    val escalations = store.readAll().filter { it.kind == LeadKinds.ESCALATED }
+    assertEquals("exactly one escalation", 1, escalations.size)
+    assertTrue(
+      "the escalation names the adopt fault, got ${escalations.single().payloadJson}",
+      escalations.single().payloadJson.contains("adopt-fault: adopt blew up"),
+    )
+    assertEquals("the original fault propagated out of the loop", "adopt blew up", thrown.get()?.message)
+    store.close()
+  }
+
+  @Test
   fun unmeasuredPodCostJournalsAsAbsentAndFoldsAsNullNotZero() {
     val dir = tmp.newFolder()
     // A pod whose transport surfaces no cost measurement: the completion carries
