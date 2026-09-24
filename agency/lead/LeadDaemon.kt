@@ -488,6 +488,23 @@ class LeadDaemon(
       check(++guard < 25) { "mechanical pipeline did not reach fixpoint" }
     }
 
+    // A gate-open retry timer wakes the loop to send a failed announce again, and the pass above
+    // sends it while the timer's nonce is still the one its gate waits on. That gate still blocks
+    // the pipeline, so the timer is no evidence for cognition to judge, and under a model-backed
+    // strategy the turn would be paid for, once per retry: the wake ends here. A retry timer's
+    // wake still reaches cognition in two cases. With mail an earlier wake left undelivered, there
+    // is work to judge. And a timer that outlived its nonce, spent or superseded before it fired,
+    // had no announce to send, while the change that spent the nonce can leave work an earlier
+    // unusable turn did not get to. Whether some other gate waits cannot decide that: a gate from
+    // a journal the lead did not write can wait forever.
+    if (
+      ev is WakeEvent.TimerDue &&
+        folded.lead.isRetryTimerOfAnOpenNonce(ev.timerId) &&
+        folded.shared.undeliveredMail.isEmpty()
+    ) {
+      return
+    }
+
     // The decision and the state it is executed against come from ONE fold, even when a
     // retry re-folded mid-wake: executing a proposal against a state cognition never saw
     // would judge it on different evidence than the judgment was made on.
@@ -1658,6 +1675,14 @@ private const val ANNOUNCE_RETRY_ACTION = "gate-open-announce-retry"
 /** The id of the timer that the retry after [failures] failed announces of [nonce] waits on. */
 private fun announceRetryTimerId(nonce: String, failures: Int): String =
   "gate-open-retry:$nonce:$failures"
+
+/** Whether [timerId] is the retry timer of a failed announce of a nonce some open gate still waits
+ * on: that gate's [LeadState.openNonceFor], on the digest it is open on and not consumed. */
+private fun LeadState.isRetryTimerOfAnOpenNonce(timerId: String): Boolean =
+  openGates.values.any { gate ->
+    val nonce = openNonceFor(gate)?.nonce ?: return@any false
+    (1..(failedAnnounces[nonce] ?: 0)).any { announceRetryTimerId(nonce, it) == timerId }
+  }
 
 /** Lead-tier attempt cap (see [LeadDaemon] failureAbandons): failure-abandons per taskRef
  * per PROCESS before the spawn site stops re-proposing and escalates. Three genuine
