@@ -1648,19 +1648,65 @@ fun interface TimerService {
   }
 }
 
-/** Wall-clock timer service for real runs: schedules the wake at fireAtEpochMs. */
-class ThreadTimerService : TimerService {
-  private val wallTimer = java.util.Timer("lead-timers", true)
+/** Runs a task once, after a delay in milliseconds: the seam through which a test sees the delay
+ * [ThreadTimerService] schedules, without waiting for it. */
+fun interface TimerScheduler {
+  fun schedule(delayMs: Long, task: () -> Unit)
 
+  companion object {
+    /** Runs every task on one daemon thread named [name], so the thread never keeps a process
+     * running. It waits on the wall clock. A task that throws ends the thread, and every later
+     * schedule then throws, so a task given here must not throw. */
+    fun daemonThread(name: String): TimerScheduler {
+      val timer = java.util.Timer(name, true)
+      return TimerScheduler { delayMs, task ->
+        timer.schedule(
+          object : java.util.TimerTask() {
+            override fun run() = task()
+          },
+          delayMs,
+        )
+      }
+    }
+  }
+}
+
+/**
+ * Wall-clock timer service for real runs: schedules the wake at fireAtEpochMs, on [scheduler].
+ *
+ * A deployment keeps one service for the lead's lifetime and arms every later gate-open retry on
+ * it, and the default scheduler runs every timer on one thread that a throwing task would end. So
+ * each callback runs inside a catch: an `onDue` that throws is reported to [onError], and later
+ * timers still fire. The default [onError] hands the error to the thread's uncaught-exception
+ * handler, which prints it, and the thread keeps running. An [onError] that throws is ignored, for
+ * the same reason.
+ */
+class ThreadTimerService(
+  private val onError: (timerId: String, error: Throwable) -> Unit = ::reportToUncaughtHandler,
+  private val scheduler: TimerScheduler = TimerScheduler.daemonThread("lead-timers"),
+) : TimerService {
   override fun arm(timer: ArmedTimer, onDue: (String) -> Unit) {
     val delay = (timer.fireAtEpochMs - System.currentTimeMillis()).coerceAtLeast(0)
-    wallTimer.schedule(
-      object : java.util.TimerTask() {
-        override fun run() = onDue(timer.id)
-      },
-      delay,
-    )
+    scheduler.schedule(delay) {
+      try {
+        onDue(timer.id)
+      } catch (t: Throwable) {
+        try {
+          onError(timer.id, t)
+        } catch (_: Throwable) {
+          // Nothing is left to report to, and the thread has to keep running.
+        }
+      }
+    }
   }
+}
+
+private fun reportToUncaughtHandler(timerId: String, error: Throwable) {
+  val thread = Thread.currentThread()
+  thread.uncaughtExceptionHandler.uncaughtException(
+    thread,
+    RuntimeException("onDue for timer $timerId threw", error),
+  )
 }
 
 /** Well-formed task refs: kind:name in a conservative charset ('/' excluded, so a
