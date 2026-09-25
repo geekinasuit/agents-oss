@@ -99,7 +99,37 @@ class GuardsTest {
     val rig = Rig(dir, script)
     val folded = rig.daemon.driveUntilQuiescent()
     assertTrue("no gate should have opened", folded.lead.openGates.isEmpty())
-    assertTrue(folded.lead.escalations.any { it.contains("gate-open rejected") })
+    // The refused digest is the proposal's own text, so the reason gives its length alone.
+    assertEquals(
+      "gate-open rejected for plan-approval:t1: a proposed digest of 64 chars " +
+        "does not match substrate evidence (none recorded)",
+      folded.lead.escalations.single { it.startsWith("gate-open rejected") },
+    )
+    assertTrue(folded.lead.escalations.none { "deadbeef" in it })
+    rig.store.close()
+  }
+
+  @Test
+  fun gateOpenOfAKindThePipelineDoesNotHaveIsRejectedWithoutQuotingIt() {
+    val dir = tmp.newFolder()
+    // The parser refuses an unknown gate kind, but a strategy can hand the daemon a proposal the
+    // parser never saw, as this one does. The kind is the proposal's own text, and a gate id
+    // built from it would carry that text into the reason.
+    val script =
+      mutableListOf(
+        CognitionOutput(
+          listOf(Proposal.ProposeGateOpen("Qx7-kind", "0".repeat(64))),
+          "hostile: open a gate of a kind the pipeline does not have",
+        )
+      )
+    val rig = Rig(dir, script)
+    val folded = rig.daemon.driveUntilQuiescent()
+    assertTrue("no gate should have opened", folded.lead.openGates.isEmpty())
+    assertEquals(
+      "gate-open rejected: a proposed gate kind of 8 chars is not one the lead opens",
+      folded.lead.escalations.single { it.startsWith("gate-open rejected") },
+    )
+    assertTrue(folded.lead.escalations.none { "Qx7" in it })
     rig.store.close()
   }
 
@@ -118,9 +148,15 @@ class GuardsTest {
       )
     val rig = Rig(dir, script, hold = false)
     val folded = rig.daemon.driveUntilQuiescent()
-    assertTrue("a real plan sha was recorded", folded.lead.planArtifactSha != null)
+    val recorded = folded.lead.planArtifactSha
+    assertTrue("a real plan sha was recorded", recorded != null)
     assertTrue("no gate should have opened on the wrong digest", folded.lead.openGates.isEmpty())
-    assertTrue(folded.lead.escalations.any { it.contains("gate-open rejected") })
+    assertEquals(
+      "gate-open rejected for plan-approval:t1: a proposed digest of 64 chars " +
+        "does not match substrate evidence ${recorded!!.take(16)}",
+      folded.lead.escalations.single { it.startsWith("gate-open rejected") },
+    )
+    assertTrue(folded.lead.escalations.none { "0".repeat(16) in it })
     rig.store.close()
   }
 
@@ -137,7 +173,12 @@ class GuardsTest {
     val rig = Rig(dir, script)
     val folded = rig.daemon.driveUntilQuiescent()
     assertTrue("never launched", rig.runner.spawnedTaskRefs.isEmpty())
-    assertTrue(folded.lead.escalations.any { it.contains("pod-spawn rejected") })
+    assertEquals(
+      "pod-spawn rejected: a proposed taskRef of 26 chars is not plan:/execute: " +
+        "for the current ticket 't1'",
+      folded.lead.escalations.single { it.startsWith("pod-spawn rejected") },
+    )
+    assertTrue(folded.lead.escalations.none { "../" in it })
     assertFalse(File("/etc/pwned").exists())
     rig.store.close()
   }
@@ -389,7 +430,12 @@ class GuardsTest {
     // The plan was recorded on the RECOMPUTED digest, not the lie, and the mismatch is visible.
     val realDigest = sha256Hex("real plan content\n")
     assertEquals(realDigest, folded.lead.planArtifactSha)
-    assertTrue(folded.lead.escalations.any { it.contains("digest mismatch") })
+    assertEquals(
+      "pod-completion digest mismatch for pod 'pod-x': the runner reported a digest of 60 chars, " +
+        "and the snapshot hashes to ${realDigest.take(16)} — binding the recomputed digest",
+      folded.lead.escalations.single { "digest mismatch" in it },
+    )
+    assertTrue("the overridden digest is not quoted", folded.lead.escalations.none { "a-lie" in it })
     // And the gate that opened binds to the real digest.
     assertEquals(realDigest, folded.lead.pendingGates.single().payloadDigest)
     store.close()
@@ -666,8 +712,8 @@ class GuardsTest {
       mutableListOf(
         CognitionOutput(
           listOf(
-            Proposal.ProposePodSpawn("plan:other"),
-            Proposal.ProposePodSpawn("execute:other"),
+            Proposal.ProposePodSpawn("plan:Qx7"),
+            Proposal.ProposePodSpawn("execute:Qx7"),
             Proposal.ProposePodSpawn("research:t1"),
           ),
           "hostile: fan out spawns across a task namespace",
@@ -676,7 +722,15 @@ class GuardsTest {
     val rig = Rig(dir, script) // current ticket is t1
     val folded = rig.daemon.driveUntilQuiescent()
     assertTrue("nothing launched", rig.runner.spawnedTaskRefs.isEmpty())
-    assertTrue(folded.lead.escalations.any { it.contains("pod-spawn rejected") })
+    // Each reason names the refused ref by its length and quotes the ticket the lead claimed.
+    assertEquals(
+      listOf(8, 11, 11).map {
+        "pod-spawn rejected: a proposed taskRef of $it chars is not plan:/execute: " +
+          "for the current ticket 't1'"
+      },
+      folded.lead.escalations.filter { it.startsWith("pod-spawn rejected") },
+    )
+    assertTrue(folded.lead.escalations.none { "Qx7" in it || "research" in it })
     rig.store.close()
   }
 
@@ -762,7 +816,11 @@ class GuardsTest {
     val folded = rig.daemon.driveUntilQuiescent()
     assertEquals(null, folded.lead.currentTicket)
     assertTrue("nothing was claimed", folded.lead.doneTickets.isEmpty())
-    assertTrue(folded.lead.escalations.any { it.contains("ticket claim rejected") })
+    assertEquals(
+      "ticket claim rejected: an offered ref of 14 chars is malformed (charset/length)",
+      folded.lead.escalations.single { it.startsWith("ticket claim rejected") },
+    )
+    assertTrue(folded.lead.escalations.none { "../" in it })
     rig.store.close()
   }
 

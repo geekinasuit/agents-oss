@@ -124,7 +124,7 @@ object CognitionProtocol {
             }
             "gate-open" -> {
               val kind = p.required("gateKind")
-              if (kind != GateKinds.PLAN_APPROVAL && kind != GateKinds.COMMIT_APPROVAL)
+              if (kind !in GateKinds.ALL)
                 return CognitionOutput.malformed("gate-open names an unknown gate kind", meta)
               proposals += Proposal.ProposeGateOpen(kind, p.required("payloadDigest"))
             }
