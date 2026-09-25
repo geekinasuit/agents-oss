@@ -6,6 +6,7 @@ import com.geekinasuit.agency.pod.PodSpawned
 import com.geekinasuit.agency.pod.PodSpec
 import com.geekinasuit.agency.pod.sha256Hex
 import com.geekinasuit.agency.shared.journal.ArmedTimer
+import com.geekinasuit.agency.shared.journal.ChainBrokenException
 import com.geekinasuit.agency.shared.journal.EffectReceiver
 import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.JournalStore
@@ -14,10 +15,12 @@ import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
+import java.sql.DriverManager
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -38,9 +41,11 @@ class WakeLoopTest {
   @get:Rule val tmp = TemporaryFolder()
 
   /** Delegates to [inner], refusing appends whose kind the [refuse] predicate matches —
-   * the accept convention's failure mode (append throws) made deterministic per kind. */
+   * the accept convention's failure mode (append throws) made deterministic per kind.
+   * Each refusal it throws is kept in [refusals], in order. */
   private class RefusingStore(private val inner: JournalStore) : JournalStore by inner {
     @Volatile var refuse: (kind: String) -> Boolean = { false }
+    val refusals = java.util.concurrent.CopyOnWriteArrayList<RuntimeException>()
 
     override fun append(
       kind: String,
@@ -48,7 +53,9 @@ class WakeLoopTest {
       origin: String,
       idempotencyKey: String?,
     ): JournalEntry {
-      if (refuse(kind)) throw RuntimeException("store refused append of kind '$kind' (test fault)")
+      if (refuse(kind)) {
+        throw RuntimeException("store refused append of kind '$kind' (test fault)").also { refusals += it }
+      }
       return inner.append(kind, payload, origin, idempotencyKey)
     }
   }
@@ -657,11 +664,7 @@ class WakeLoopTest {
       )
     // runLoop adopts → claims t1 → the scripted playbook proposes the planner pod → boom.spawn
     // throws → the loop journals the fault and rethrows, ending the thread.
-    val thrown = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
-    val loop = Thread { try { daemon.runLoop() } catch (t: Throwable) { thrown.set(t) } }
-    loop.start()
-    loop.join(5_000)
-    assertTrue("the loop terminated rather than hanging", !loop.isAlive)
+    val thrown = runLoopUntilItStops(daemon)
     val escalations = store.readAll().filter { it.kind == LeadKinds.ESCALATED }
     assertTrue(
       "the wake fault is journaled before the loop stops",
@@ -671,9 +674,36 @@ class WakeLoopTest {
     )
     assertTrue(
       "the original fault propagated out of the loop",
-      thrown.get()?.message?.contains("pod launcher blew up") == true,
+      thrown?.message?.contains("pod launcher blew up") == true,
     )
     store.close()
+  }
+
+  /** Runs [daemon]'s loop on its own thread until the loop stops, and returns what it threw. */
+  private fun runLoopUntilItStops(daemon: LeadDaemon): Throwable? {
+    val thrown = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+    val loop = Thread { try { daemon.runLoop() } catch (t: Throwable) { thrown.set(t) } }
+    loop.start()
+    loop.join(5_000)
+    assertTrue("the loop terminated rather than hanging", !loop.isAlive)
+    return thrown.get()
+  }
+
+  /** A daemon over [store] with a ticket to claim, no timers and no releases: enough to adopt. */
+  private fun adoptingDaemon(dir: File, store: JournalStore, faults: FaultInjector = FaultInjector.NONE): LeadDaemon {
+    File(dir, "ticket.txt").writeText("t1\n")
+    return LeadDaemon(
+      store = store,
+      cognition = ScriptedCognition(),
+      podRunner = FakePodRunner(),
+      podSpec = PodSpec.fixture(),
+      ticketSource = FileTicketSource(File(dir, "ticket.txt")),
+      workdir = dir,
+      effects = EffectReceiver(dir.absolutePath),
+      leadAuth = LeadAuth.DENY_ALL,
+      timers = TimerService.NOOP,
+      faults = faults,
+    )
   }
 
   @Test
@@ -683,32 +713,73 @@ class WakeLoopTest {
     // A restart folds the same journal to the same step, so the escalation is the record of why
     // the lead does not run.
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
-    File(dir, "ticket.txt").writeText("t1\n")
-    val daemon =
-      LeadDaemon(
-        store = store,
-        cognition = ScriptedCognition(),
-        podRunner = FakePodRunner(),
-        podSpec = PodSpec.fixture(),
-        ticketSource = FileTicketSource(File(dir, "ticket.txt")),
-        workdir = dir,
-        effects = EffectReceiver(dir.absolutePath),
-        leadAuth = LeadAuth.DENY_ALL,
-        timers = TimerService.NOOP,
-        faults = { boundary -> if (boundary == "mid-adopt") throw IllegalStateException("adopt blew up") },
+    val boom = IllegalStateException("adopt blew up")
+    val thrown =
+      runLoopUntilItStops(
+        adoptingDaemon(dir, store, FaultInjector { boundary -> if (boundary == "mid-adopt") throw boom })
       )
-    val thrown = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
-    val loop = Thread { try { daemon.runLoop() } catch (t: Throwable) { thrown.set(t) } }
-    loop.start()
-    loop.join(5_000)
-    assertTrue("the loop terminated rather than hanging", !loop.isAlive)
     val escalations = store.readAll().filter { it.kind == LeadKinds.ESCALATED }
     assertEquals("exactly one escalation", 1, escalations.size)
     assertTrue(
       "the escalation names the adopt fault, got ${escalations.single().payloadJson}",
       escalations.single().payloadJson.contains("adopt-fault: adopt blew up"),
     )
-    assertEquals("the original fault propagated out of the loop", "adopt blew up", thrown.get()?.message)
+    assertSame("the adopt fault propagated out of the loop as it was thrown", boom, thrown)
+    store.close()
+  }
+
+  @Test
+  fun anAdoptFaultWhoseEscalationIsRefusedPropagatesWithTheRefusalAttached() {
+    val dir = tmp.newFolder()
+    // When the store refuses the escalation as well, the adopt fault still propagates as it was
+    // thrown, and the refusal travels with it as a suppressed exception.
+    val sqlite = SqliteStore(dir.absolutePath, componentId = "lead")
+    val store = RefusingStore(sqlite).apply { refuse = { it == LeadKinds.ESCALATED } }
+    val boom = IllegalStateException("adopt blew up")
+    val thrown =
+      runLoopUntilItStops(
+        adoptingDaemon(dir, store, FaultInjector { boundary -> if (boundary == "mid-adopt") throw boom })
+      )
+    assertSame("the adopt fault propagated out of the loop as it was thrown", boom, thrown)
+    assertEquals("the escalation was tried once, and refused", 1, store.refusals.size)
+    assertSame(
+      "the store's refusal is attached to the adopt fault",
+      store.refusals.single(),
+      boom.suppressed.singleOrNull(),
+    )
+    assertEquals(0, sqlite.readAll().count { it.kind == LeadKinds.ESCALATED })
+    sqlite.close()
+  }
+
+  @Test
+  fun aJournalWhoseChainDoesNotVerifyStopsTheLoopWithNothingAppended() {
+    val dir = tmp.newFolder()
+    SqliteStore(dir.absolutePath, componentId = "lead").use { store ->
+      store.append("note", buildJsonObject { put("n", 1) }, origin = ORIGIN_SUBSTRATE)
+      store.append("note", buildJsonObject { put("n", 2) }, origin = ORIGIN_SUBSTRATE)
+    }
+    // Rewrite the first note's payload in place: its entry no longer matches its hash.
+    DriverManager.getConnection("jdbc:sqlite:${dir.absolutePath}/journal.db").use { c ->
+      c.createStatement().use { st -> st.executeUpdate("UPDATE journal SET payload='{\"n\":99}' WHERE seq=2") }
+    }
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val rows = store.readRaw().size
+    val thrown = runLoopUntilItStops(adoptingDaemon(dir, store))
+    assertTrue("the chain check's refusal propagated, got $thrown", thrown is ChainBrokenException)
+    assertEquals("the lead appended nothing to the journal", rows, store.readRaw().size)
+    store.close()
+  }
+
+  @Test
+  fun aJournalTheLeadFoldRefusesStopsTheLoopWithNothingAppended() {
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    // A ticket claim with no ticket reference: the chain verifies, and the lead's fold refuses it.
+    store.append(LeadKinds.TICKET_CLAIMED, buildJsonObject {}, origin = ORIGIN_SUBSTRATE)
+    val rows = store.readRaw().size
+    val thrown = runLoopUntilItStops(adoptingDaemon(dir, store))
+    assertTrue("the lead fold's refusal propagated, got $thrown", thrown is LeadFoldException)
+    assertEquals("the lead appended nothing to the journal", rows, store.readRaw().size)
     store.close()
   }
 
