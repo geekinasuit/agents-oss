@@ -660,13 +660,13 @@ private fun syncOkClient(okId: String, accepted: Boolean): HttpClient =
 // newWebSocketBuilder(), and buildAsync hands the captured listener to [makeSocket] and returns the
 // socket in an already-completed future — so connect() resolves with no live handshake, and every
 // other HttpClient/Builder method is unreachable on the paths these cells drive. Parameterizing on
-// [makeSocket] is what lets one scaffold serve both the OK-delivering double and the stalled-send
-// double below, rather than a second copy of all this boilerplate per double.
+// [makeSocket] is what lets one scaffold serve every WebSocket double below, rather than a copy of
+// all this boilerplate per double.
 private fun webSocketClient(makeSocket: (WebSocket.Listener) -> WebSocket): HttpClient =
   DoubleHttpClient(makeSocket)
 
 private fun notUsed(): Nothing =
-  throw UnsupportedOperationException("test double: only newWebSocketBuilder() is exercised")
+  throw UnsupportedOperationException("this test double does not model this member")
 
 private class DoubleHttpClient(private val makeSocket: (WebSocket.Listener) -> WebSocket) :
   HttpClient() {
@@ -714,26 +714,18 @@ private class DoubleWebSocketBuilder(private val makeSocket: (WebSocket.Listener
     CompletableFuture.completedFuture<WebSocket>(makeSocket(listener))
 }
 
-private class SyncOkWebSocket(
-  private val okId: String,
-  private val accepted: Boolean,
-  private val listener: WebSocket.Listener,
-) : WebSocket {
-  // The whole point: hand the listener the solicited OK synchronously, then complete the send. The
-  // event frame we "send" is ignored — the double's job is to make the OK arrive at the earliest
-  // instant, on the caller's thread, so a missing slot would be observable as a dropped OK.
-  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> {
-    val flag = if (accepted) "true" else "false"
-    listener.onText(this, "[\"OK\",\"$okId\",$flag,\"\"]", true)
-    return CompletableFuture.completedFuture<WebSocket>(this)
-  }
-
-  // close() calls sendClose then abort on failure; a completed future means no abort. request() is
-  // called by the listener on delivery. Nothing else is reached on the publish/close path.
+// What the WebSocket doubles below share, so each overrides only sendText and the members its
+// cells use. sendText is not here, so the compiler makes each double say what a send does:
+// RelayConnection catches a send that throws and reports an ordinary failed publish, which a cell
+// that asserts only the failure cannot tell from the path it means to drive. sendBinary, sendPing
+// and sendPong are never reached. close() calls sendClose, and aborts only when the close frame is
+// not sent: here it is sent at once, so close() never aborts. request() is called by the listener
+// on each delivery.
+private abstract class DoubleWebSocket : WebSocket {
   override fun sendClose(statusCode: Int, reason: String): CompletableFuture<WebSocket> =
     CompletableFuture.completedFuture<WebSocket>(this)
-  override fun request(n: Long) {}
   override fun abort() {}
+  override fun request(n: Long) {}
   override fun sendBinary(data: java.nio.ByteBuffer, last: Boolean): CompletableFuture<WebSocket> =
     notUsed()
   override fun sendPing(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
@@ -743,6 +735,21 @@ private class SyncOkWebSocket(
   override fun isInputClosed(): Boolean = false
 }
 
+private class SyncOkWebSocket(
+  private val okId: String,
+  private val accepted: Boolean,
+  private val listener: WebSocket.Listener,
+) : DoubleWebSocket() {
+  // The whole point: hand the listener the solicited OK synchronously, then complete the send. The
+  // event frame we "send" is ignored — the double's job is to make the OK arrive at the earliest
+  // instant, on the caller's thread, so a missing slot would be observable as a dropped OK.
+  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> {
+    val flag = if (accepted) "true" else "false"
+    listener.onText(this, "[\"OK\",\"$okId\",$flag,\"\"]", true)
+    return CompletableFuture.completedFuture<WebSocket>(this)
+  }
+}
+
 // A WebSocket double whose sendText NEVER completes: it returns a CompletableFuture that is never
 // completed, so a RelayConnection send waiting on .get(budget) always hits its timeout. It also
 // enforces the JDK's one-outstanding-send contract — a second sendText while the first is still
@@ -750,8 +757,9 @@ private class SyncOkWebSocket(
 // what makes the pending-send hazard REAL: a send left outstanding by a timed-out .get() poisons the
 // socket, so the next send throws. [abort] clears the outstanding flag (and counts the call), which
 // is how the fix makes the connection safe — after a breach the failure guard refuses the next send
-// before it reaches sendText at all.
-private class StalledSendWebSocket : WebSocket {
+// before it reaches sendText at all. The close frame is sent at once, as in [DoubleWebSocket], which
+// keeps close() off the abort path, so abortCount counts breaches alone.
+private class StalledSendWebSocket : DoubleWebSocket() {
   private var sendOutstanding = false
   var sendTextCount = 0
     private set
@@ -769,26 +777,15 @@ private class StalledSendWebSocket : WebSocket {
     abortCount++
     sendOutstanding = false
   }
-
-  // close() calls sendClose then aborts only on failure; a completed future keeps close() off the
-  // abort path, so abortCount reflects breaches alone.
-  override fun sendClose(statusCode: Int, reason: String): CompletableFuture<WebSocket> =
-    CompletableFuture.completedFuture<WebSocket>(this)
-  override fun request(n: Long) {}
-  override fun sendBinary(data: java.nio.ByteBuffer, last: Boolean): CompletableFuture<WebSocket> =
-    notUsed()
-  override fun sendPing(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
-  override fun sendPong(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
-  override fun getSubprotocol(): String = ""
-  override fun isOutputClosed(): Boolean = false
-  override fun isInputClosed(): Boolean = false
 }
 
 // A WebSocket double whose close frame is never sent: sendClose returns a future that is never
 // completed, so close() never sees the frame sent. [abort] counts its calls.
-private class UnsentCloseWebSocket : WebSocket {
+private class UnsentCloseWebSocket : DoubleWebSocket() {
   var abortCount = 0
     private set
+
+  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> = notUsed()
 
   override fun sendClose(statusCode: Int, reason: String): CompletableFuture<WebSocket> =
     CompletableFuture()
@@ -796,14 +793,4 @@ private class UnsentCloseWebSocket : WebSocket {
   override fun abort() {
     abortCount++
   }
-
-  override fun request(n: Long) {}
-  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> = notUsed()
-  override fun sendBinary(data: java.nio.ByteBuffer, last: Boolean): CompletableFuture<WebSocket> =
-    notUsed()
-  override fun sendPing(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
-  override fun sendPong(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
-  override fun getSubprotocol(): String = ""
-  override fun isOutputClosed(): Boolean = false
-  override fun isInputClosed(): Boolean = false
 }
