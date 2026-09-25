@@ -586,6 +586,76 @@ class RelayConnectionTest {
     conn.close()
   }
 
+  // The deadline each interrupt cell gives its call. A wait that ran on to its deadline would return
+  // the same result as one that ended at once, so each cell also checks that its call came back in
+  // less than half of it.
+  private val interruptCellDeadline = Duration.ofSeconds(10)
+
+  private fun assertCameBackWellInsideTheDeadline(millis: Long) =
+    assertTrue(
+      "came back after $millis ms, not well inside its ${interruptCellDeadline.toMillis()} ms deadline",
+      millis < interruptCellDeadline.toMillis() / 2,
+    )
+
+  // The synchronous double completes the send at once, and a completed send's wait returns without
+  // looking at the interrupt, so the pending interrupt ends the wait for the OK instead. The OK the
+  // double hands back is for another id, so that wait could only end by the interrupt or the deadline.
+  @Test
+  fun `publish on an interrupted thread says its wait for the OK was interrupted`() {
+    val conn =
+      RelayConnection(config("ws://127.0.0.1:1"), syncOkClient(okId = "ee".repeat(32), accepted = true))
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+
+    Thread.currentThread().interrupt()
+    val started = System.nanoTime()
+    val result = conn.publish(testEvent("99".repeat(32)), interruptCellDeadline)
+    val millis = (System.nanoTime() - started) / 1_000_000
+    // Thread.interrupted() reads the status and clears it, so no later cell runs interrupted.
+    val stillInterrupted = Thread.interrupted()
+    assertEquals(PublishResult.Failed("interrupted while awaiting OK for published event"), result)
+    assertTrue("the interrupt is still set when publish returns", stillInterrupted)
+    assertCameBackWellInsideTheDeadline(millis)
+    conn.close()
+  }
+
+  // The double sends no AUTH challenge, so the pending interrupt ends authenticate's first wait.
+  @Test
+  fun `authenticate on an interrupted thread says its wait for the challenge was interrupted`() {
+    val conn =
+      RelayConnection(config("ws://127.0.0.1:1"), syncOkClient(okId = "ee".repeat(32), accepted = true))
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+
+    Thread.currentThread().interrupt()
+    val started = System.nanoTime()
+    val result = conn.authenticate(interruptCellDeadline)
+    val millis = (System.nanoTime() - started) / 1_000_000
+    val stillInterrupted = Thread.interrupted()
+    assertEquals(AuthResult.Failed("interrupted while awaiting AUTH challenge"), result)
+    assertTrue("the interrupt is still set when authenticate returns", stillInterrupted)
+    assertCameBackWellInsideTheDeadline(millis)
+    conn.close()
+  }
+
+  // The double reports the relay's close during the send, so the connection has failed before
+  // publish waits for the OK, and that wait ends on the fault without reading the interrupt. Both
+  // are true when the detail is built, and the detail names the fault.
+  @Test
+  fun `publish on an interrupted thread whose connection failed names the failure`() {
+    val conn =
+      RelayConnection(config("ws://127.0.0.1:1"), webSocketClient { CloseOnSendWebSocket(it) })
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+
+    Thread.currentThread().interrupt()
+    val started = System.nanoTime()
+    val result = conn.publish(testEvent("99".repeat(32)), interruptCellDeadline)
+    val millis = (System.nanoTime() - started) / 1_000_000
+    val stillInterrupted = Thread.interrupted()
+    assertEquals(PublishResult.Failed("connection failed: relay closed: 1000 'bye'"), result)
+    assertTrue("the interrupt is still set when publish returns", stillInterrupted)
+    assertCameBackWellInsideTheDeadline(millis)
+    conn.close()
+  }
+
   // #53 — the pending-send hazard. A send whose future never completes leaves the send OUTSTANDING
   // when .get(budget) times out. Returning a plain Failed would let the caller reuse a socket whose
   // NEXT send throws IllegalStateException (the JDK's one-outstanding-send contract). The fix breaches
@@ -792,5 +862,14 @@ private class UnsentCloseWebSocket : DoubleWebSocket() {
 
   override fun abort() {
     abortCount++
+  }
+}
+
+// A WebSocket double whose send reports the relay's close to the listener before it completes, so
+// the connection has failed by the time the send returns.
+private class CloseOnSendWebSocket(private val listener: WebSocket.Listener) : DoubleWebSocket() {
+  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> {
+    listener.onClose(this, WebSocket.NORMAL_CLOSURE, "bye")
+    return CompletableFuture.completedFuture<WebSocket>(this)
   }
 }
