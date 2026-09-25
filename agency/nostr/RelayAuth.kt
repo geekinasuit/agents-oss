@@ -25,7 +25,8 @@ internal sealed interface OpenedConnection {
  * Take a new connection from [newConnection], connect it within [connectTimeout], and authenticate
  * it as [auth] says. A connection that fails either step is closed, which zeroes its key. An
  * exception from [newConnection] is reported by the exception's class alone, because the factory
- * handles key material and its message could carry some.
+ * handles key material and its message could carry some. An [InterruptedException] from it also
+ * sets the thread's interrupt status again, so the caller still sees the interrupt.
  */
 internal fun openConnection(
   newConnection: () -> RelayConnection,
@@ -36,6 +37,7 @@ internal fun openConnection(
     try {
       newConnection()
     } catch (e: Exception) {
+      if (e is InterruptedException) Thread.currentThread().interrupt()
       return OpenedConnection.Unavailable("could not create a connection: ${e.javaClass.simpleName}")
     }
   val connected = conn.connect(connectTimeout)

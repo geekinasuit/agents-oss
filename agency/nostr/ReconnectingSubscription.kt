@@ -36,7 +36,8 @@ import java.util.concurrent.TimeUnit
  *
  * [newConnection] belongs to the deployment and has the contract [ReconnectingPublisher] states: a new
  * [RelayConnection], around a new [RelayConfig] and a new [SecretKeyHex], on every call. An exception
- * from it is reported by the exception's class alone.
+ * from it is reported by the exception's class alone. An [InterruptedException] from it also leaves
+ * the thread's interrupt status set, so a later [next] on that thread makes no attempt.
  *
  * [next] and [close] run one at a time, but [close] does not wait out a [next] that is waiting for a
  * message or for the delay: those waits check for [close] about every 100 ms. It does wait for a

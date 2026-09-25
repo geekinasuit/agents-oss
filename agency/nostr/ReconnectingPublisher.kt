@@ -24,7 +24,10 @@ import java.time.Duration
  * [RelayConfig] and a new [SecretKeyHex], on every call: closing a connection zeroes its config's
  * key, so a factory that hands back one config, or one key holder, fails every reconnect at
  * authentication. An exception from it is reported as [PublishResult.Failed] naming only the
- * exception's class, because the factory handles key material and its message could carry some.
+ * exception's class, because the factory handles key material and its message could carry some. An
+ * [InterruptedException] from it also leaves the thread's interrupt status set, so a later publish
+ * on that thread calls [newConnection] again and then fails at the connect. The rest of a
+ * [RelayNotifier] fan-out on that thread fails the same way.
  *
  * The bound: a publish that opens a connection can block for [connectTimeout], the auth timeout
  * and its own timeout, plus [RelayConnection]'s fixed allowances for the handshake and for up to
