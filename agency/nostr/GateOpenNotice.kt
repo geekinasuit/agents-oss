@@ -178,10 +178,14 @@ const val GATE_OPEN_NOTICE_RUMOR_KIND = 14
  *
  * TIMESTAMPS are caller-supplied and never read as a clock (A4-3). [createdAt] is the notice time: it
  * dates the rumor, and the wrap. NIP-17 asks that the seal and the wrap both be dated up to two days
- * in the past, so that grouping wraps by `created_at` reveals nothing. But a relay may refuse any
- * event dated earlier than a lower limit it sets — NIP-11's `limitation.created_at_lower_limit` —
- * and under a limit shorter than two days, a wrap backdated as NIP-17 asks is refused: a notice
- * that never reaches the operator. So the wrap carries the notice time. Only the seal is backdated
+ * in the past, so that grouping wraps by `created_at` reveals nothing. But a relay can refuse any
+ * event dated too far before or after its own clock — NIP-11 names the bounds
+ * `limitation.created_at_lower_limit` and `limitation.created_at_upper_limit` — and under a lower
+ * bound shorter than two days, a wrap backdated as NIP-17 asks can be refused: a notice that never
+ * reaches the operator. NIP-11 lets a relay omit both fields, so no NIP-11 read shows that a relay
+ * enforces no such bound. So the wrap carries the notice time. A caller whose clock runs behind
+ * the relay's by more than the lower bound, or ahead of it by more than the upper bound, still has
+ * every wrap refused. Only the seal is backdated
  * (the caller passes [sealCreatedAt] already backdated): it travels encrypted, so no relay checks
  * its date. That follows NIP-59 at no cost to delivery, though it hides the notice time only from
  * someone shown the seal who cannot open it. The cost of the un-backdated wrap is that every wrap
