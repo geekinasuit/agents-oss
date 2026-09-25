@@ -15,6 +15,10 @@ import kotlinx.serialization.json.JsonPrimitive
  * would otherwise surface as kotlinx's own exception text rather than this module's; and
  * a non-string scalar (`"principalId": 123` names a principal nobody wrote — this
  * module's own writers emit strings here, so hostile-data readers parse strictly).
+ *
+ * A refusal names the field and the check, never the value. The value is text the
+ * document's writer chose, and a caller may keep a refusal's message with its own records.
+ * [reqInt] and [optStr] refuse the same way.
  */
 internal fun JsonObject.req(k: String, voice: String): String {
   val el = this[k] ?: throw IllegalArgumentException("$voice is missing '$k'")
@@ -22,7 +26,7 @@ internal fun JsonObject.req(k: String, voice: String): String {
   val prim =
     el as? JsonPrimitive
       ?: throw IllegalArgumentException("$voice '$k' is not a scalar value")
-  require(prim.isString) { "$voice '$k' must be a JSON string, got '${prim.content}'" }
+  require(prim.isString) { "$voice '$k' must be a JSON string" }
   return prim.content
 }
 
@@ -40,7 +44,7 @@ internal fun JsonObject.reqInt(k: String, voice: String): Int {
       ?: throw IllegalArgumentException("$voice '$k' is not a scalar value")
   require(!prim.isString) { "$voice '$k' must be a JSON number, got a string" }
   return prim.content.toIntOrNull()
-    ?: throw IllegalArgumentException("$voice '$k' ('${prim.content}') is not an integer")
+    ?: throw IllegalArgumentException("$voice '$k' is not an integer in Int range")
 }
 
 /**

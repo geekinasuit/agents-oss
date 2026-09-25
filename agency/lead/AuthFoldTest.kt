@@ -17,6 +17,8 @@ import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -859,6 +861,37 @@ class AuthFoldTest {
     assertTrue(st.unverifiedApprovals.any { "no signed preimage" in it.second })
     assertFalse("g1" in st.releasedGates)
     assertEquals(1, st.staleReleases.size)
+  }
+
+  @Test
+  fun anApprovalWithMalformedEvidenceIsUnverifiedWithoutRepeatingTheEvidence() {
+    // The evidence sub-object is text its carrier chose. The reason kept for the refused approval
+    // names the field and the check, not the value.
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    val evidence =
+      ApprovalEvidence("test", pubKeyFor("operator"), "sig", "carrier", "g1", "d1", "n1").toJson()
+    val approval =
+      s.append(
+        LeadKinds.APPROVAL_RECORDED,
+        buildJsonObject {
+          put("gateId", "g1")
+          put("principalId", "operator")
+          put("nonce", "n1")
+          put("payloadDigest", "d1")
+          put("evidence", JsonObject(evidence + ("publicKey" to JsonPrimitive(90210))))
+        },
+        ORIGIN_AUTH_LAYER,
+      )
+    assertEquals(
+      listOf(
+        approval.seq to
+          "approval at seq=${approval.seq} has malformed evidence: " +
+            "approval evidence 'publicKey' must be a JSON string"
+      ),
+      s.lead().unverifiedApprovals,
+    )
   }
 
   @Test
