@@ -479,7 +479,8 @@ class RelayConnection(
   fun failureReason(): String? = failure.get()
 
   /** Close the socket. Idempotent and bounded: a graceful close that does not complete in time is
-   * dropped with an abort. Never throws. */
+   * dropped with an abort, and so is one whose wait is interrupted. An interrupt pending when close
+   * is called, or arriving while it waits, is still pending when it returns. Never throws. */
   fun close() {
     if (!closed.compareAndSet(false, true)) return
     // Wipe the lead key first: the connection is finished with it, and the clearable holder exists
@@ -489,6 +490,10 @@ class RelayConnection(
     val ws = webSocket ?: return
     try {
       ws.sendClose(WebSocket.NORMAL_CLOSURE, "").get(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+    } catch (e: InterruptedException) {
+      // The wait clears the interrupt status when it throws this, so set it again for the caller.
+      ws.abort()
+      Thread.currentThread().interrupt()
     } catch (e: Exception) {
       ws.abort()
     }

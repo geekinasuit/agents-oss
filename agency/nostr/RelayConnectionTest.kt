@@ -624,6 +624,26 @@ class RelayConnectionTest {
     assertTrue("a stalled REQ send must fail closed, not Sent, got $result", result is SubscribeResult.Failed)
     assertEquals("a stalled control-frame send must abort the stuck socket", 1, ws.abortCount)
   }
+
+  // close() waits for its close frame to be sent. On an interrupted thread that wait throws at once
+  // if the frame is not sent yet, and the throw clears the thread's interrupt status. This double
+  // never sends the frame, so close() always takes that path here.
+  @Test
+  fun `close on an interrupted thread aborts the unsent close and leaves the interrupt set`() {
+    val ws = UnsentCloseWebSocket()
+    val conn = RelayConnection(config("ws://127.0.0.1:1"), webSocketClient { ws })
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+
+    Thread.currentThread().interrupt()
+    conn.close()
+    // Thread.interrupted() reads the status and clears it, so no later cell runs interrupted.
+    val stillInterrupted = Thread.interrupted()
+    assertTrue(
+      "the interrupt pending when close was called is still set after it",
+      stillInterrupted,
+    )
+    assertEquals("the unsent close is aborted", 1, ws.abortCount)
+  }
 }
 
 // A WebSocket-level test double reached through RelayConnection's injectable httpClient seam
@@ -755,6 +775,30 @@ private class StalledSendWebSocket : WebSocket {
   override fun sendClose(statusCode: Int, reason: String): CompletableFuture<WebSocket> =
     CompletableFuture.completedFuture<WebSocket>(this)
   override fun request(n: Long) {}
+  override fun sendBinary(data: java.nio.ByteBuffer, last: Boolean): CompletableFuture<WebSocket> =
+    notUsed()
+  override fun sendPing(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
+  override fun sendPong(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
+  override fun getSubprotocol(): String = ""
+  override fun isOutputClosed(): Boolean = false
+  override fun isInputClosed(): Boolean = false
+}
+
+// A WebSocket double whose close frame is never sent: sendClose returns a future that is never
+// completed, so close() never sees the frame sent. [abort] counts its calls.
+private class UnsentCloseWebSocket : WebSocket {
+  var abortCount = 0
+    private set
+
+  override fun sendClose(statusCode: Int, reason: String): CompletableFuture<WebSocket> =
+    CompletableFuture()
+
+  override fun abort() {
+    abortCount++
+  }
+
+  override fun request(n: Long) {}
+  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> = notUsed()
   override fun sendBinary(data: java.nio.ByteBuffer, last: Boolean): CompletableFuture<WebSocket> =
     notUsed()
   override fun sendPing(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
