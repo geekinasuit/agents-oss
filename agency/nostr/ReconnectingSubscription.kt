@@ -16,12 +16,19 @@ import java.util.concurrent.TimeUnit
  * passed, and sends the same REQ on it.
  *
  * The REQ is the same on every connection and carries no `since`, so the relay sends again every
- * stored event that matches [filters], up to its own cap on stored events. That covers the events it
- * stored while no connection was open, and a consumer sees each earlier event again after a
- * reconnect: it must treat such a repeat as nothing new. A cursor taken from the events' `created_at`
- * would ask for less, but `created_at` is whatever an event's author wrote. One matching event
- * stamped far in the future would move such a cursor past every event the relay stored after it, and
- * every later reconnect would ask for none of them.
+ * stored event that matches [filters], up to its own cap on stored events and any
+ * [NostrFilter.limit] a filter carries. Within those caps, that covers the events it stored while
+ * no connection was open, and a consumer sees each earlier event again after a reconnect: it must
+ * treat such a repeat as nothing new. A cursor taken from the events' `created_at` would ask for
+ * less, but `created_at` is whatever an event's author wrote. One matching event stamped far in the
+ * future would move such a cursor past every event the relay stored after it, and every later
+ * reconnect would ask for none of them.
+ *
+ * The connection breaks when the relay sends more messages than it queues
+ * ([RelayConnection.MAX_QUEUED_MESSAGES]) before [next] takes them, and the next connection is sent
+ * the same replay. A caller whose stored matching set can grow that large can set a
+ * [NostrFilter.limit] on every filter. A limit of zero asks for no stored events, so that filter
+ * gets no replay at all. The KDoc of [NostrFilter] says how to size the limits and what they cost.
  *
  * Messages from the relay are passed on as they arrive, in [Delivery.Received], with no dedup and no
  * reordering, as [RelayConnection.receive] delivers them. A CLOSED or EOSE for another subscription
