@@ -110,10 +110,15 @@ class ReconnectingSubscription(
    * It can block for [timeout], or, when a connection attempt is due, for the attempt instead:
    * [connectTimeout], the auth timeout and the REQ's send, plus [RelayConnection]'s fixed allowances
    * for the handshake and for closing a connection that fails, plus however long [newConnection]
-   * takes.
+   * takes. A negative [timeout] counts as zero, and one longer than about 146 years is cut to that.
+   *
+   * On a thread whose interrupt status is set, it makes no connection attempt. It reports only a
+   * message or a fault the open connection already holds, and otherwise returns null, leaving the
+   * status set.
    */
   fun next(timeout: Duration): Delivery? {
-    val deadline = System.nanoTime() + timeout.toNanos()
+    val deadline =
+      System.nanoTime() + TimeUnit.NANOSECONDS.convert(timeout).coerceIn(0L, MAX_WAIT_NANOS)
     synchronized(lock) {
       if (closed) return Delivery.Stopped
       val conn = connection
@@ -194,11 +199,12 @@ class ReconnectingSubscription(
     return Duration.ofMillis(delay)
   }
 
-  // Wait in slices until the next attempt is due, and return whether it is. False at [deadline],
-  // after close(), or when the thread is interrupted.
+  // Wait in slices until the next attempt is due, and return whether it is. False after close() or
+  // when the thread is interrupted, even if the attempt is already due; otherwise false at
+  // [deadline] if the attempt is not yet due.
   private fun awaitAttemptTime(deadline: Long): Boolean {
     while (true) {
-      if (closed) return false
+      if (closed || Thread.currentThread().isInterrupted) return false
       val now = System.nanoTime()
       if (now - nextAttemptNanos >= 0) return true
       if (now - deadline >= 0) return false
@@ -230,5 +236,9 @@ class ReconnectingSubscription(
   private companion object {
     // How often a wait checks for a fault or close(): 100 ms.
     const val SLICE_NANOS: Long = 100_000_000L
+
+    // The longest wait next() counts: about 146 years, half the span over which a subtraction of
+    // System.nanoTime() values comes out right. Every wait here compares the deadline that way.
+    const val MAX_WAIT_NANOS: Long = Long.MAX_VALUE / 2
   }
 }
