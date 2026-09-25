@@ -57,6 +57,11 @@ class NonceMintTest {
       quorum = oneOfOne("operator"),
     )
 
+  /** A timer service that fires nothing, since no cell here needs a timer to fire. A daemon under a
+   * ceremony auth refuses [TimerService.NOOP], which is the service a deployment could pick up by
+   * mistake, so the helper passes this one, built here. */
+  private val timersNoCellFires = TimerService { _, _ -> }
+
   private fun daemon(
     dir: File,
     store: SqliteStore,
@@ -76,7 +81,7 @@ class NonceMintTest {
       workdir = dir,
       effects = EffectReceiver(dir.absolutePath),
       leadAuth = auth,
-      timers = TimerService.NOOP,
+      timers = timersNoCellFires,
       faults = faults,
       gateOpenSink = sink,
     )

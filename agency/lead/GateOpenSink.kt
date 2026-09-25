@@ -26,8 +26,10 @@ import com.geekinasuit.agency.shared.text.hasReadableText
  * delivered lets the operator act, or [AnnounceOutcome.Failed] to have the whole signal sent again.
  * A sink with nowhere to announce to, such as one wired with no recipient, returns
  * [AnnounceOutcome.NoSink] instead: sending again cannot change that, so the daemon escalates at
- * once. The retry and the escalation need the daemon's timer service to fire: under
- * [TimerService.NOOP], which fires nothing, a failed announce is neither sent again nor escalated.
+ * once. The retry and the escalation need the daemon's timer service to fire. A daemon under a
+ * ceremony auth therefore refuses [TimerService.NOOP], which fires nothing. One under a non-ceremony
+ * auth still takes it, and there a failed announce of a nonce the journal already holds is neither
+ * sent again nor escalated.
  */
 fun interface GateOpenSink {
   fun announce(signal: GateOpenSignal): AnnounceOutcome
