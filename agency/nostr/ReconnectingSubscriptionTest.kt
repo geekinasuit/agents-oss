@@ -12,6 +12,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Test
@@ -399,6 +400,28 @@ class ReconnectingSubscriptionTest {
       Delivery.Unavailable("could not create a connection: IllegalStateException", Duration.ofMillis(50)),
       subscription.next(wait),
     )
+    // Thread.interrupted() clears the status as it reads it, so a failure here reaches no later cell.
+    assertFalse("the thread is not interrupted", Thread.interrupted())
+    subscription.close()
+  }
+
+  @Test
+  fun `a factory that throws InterruptedException leaves the thread interrupted, and next makes no further attempt`() {
+    val attempts = AtomicInteger()
+    val subscription =
+      subscription({ attempts.incrementAndGet(); throw InterruptedException() }, RelayAuth.None)
+    try {
+      assertEquals(
+        Delivery.Unavailable("could not create a connection: InterruptedException", Duration.ofMillis(50)),
+        subscription.next(wait),
+      )
+      assertTrue("the thread is interrupted again", Thread.currentThread().isInterrupted)
+      assertEquals("an attempt is due after 50 ms, but nothing is reported", null, subscription.next(wait))
+    } finally {
+      // Clear the status, so it does not reach the next cell on this thread.
+      Thread.interrupted()
+    }
+    assertEquals("no attempt after the interrupted one", 1, attempts.get())
     subscription.close()
   }
 

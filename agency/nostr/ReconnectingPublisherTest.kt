@@ -10,6 +10,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Test
@@ -266,6 +267,24 @@ class ReconnectingPublisherTest {
       PublishResult.Failed("could not create a connection: IllegalStateException"),
       publisher.publish(event(1), publishTimeout),
     )
+    // Thread.interrupted() clears the status as it reads it, so a failure here reaches no later cell.
+    assertFalse("the thread is not interrupted", Thread.interrupted())
+    publisher.close()
+  }
+
+  @Test
+  fun `a factory that throws InterruptedException leaves the thread interrupted`() {
+    val publisher = ReconnectingPublisher({ throw InterruptedException() }, connectTimeout, RelayAuth.None)
+    try {
+      assertEquals(
+        PublishResult.Failed("could not create a connection: InterruptedException"),
+        publisher.publish(event(1), publishTimeout),
+      )
+      assertTrue("the thread is interrupted again", Thread.currentThread().isInterrupted)
+    } finally {
+      // Clear the status, so it does not reach the next cell on this thread.
+      Thread.interrupted()
+    }
     publisher.close()
   }
 
