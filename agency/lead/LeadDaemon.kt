@@ -651,8 +651,8 @@ class LeadDaemon(
         val digest = sha256HexBytes(c.snapshot)
         if (digest != c.resultDigest) {
           escalate(
-            "pod-completion digest mismatch for pod '${c.podId.take(80)}': runner reported " +
-              "${c.resultDigest.take(16)}, snapshot hashes to ${digest.take(16)} — binding the recomputed digest"
+            "pod-completion digest mismatch for pod '${c.podId.take(80)}': the runner reported a digest of " +
+              "${c.resultDigest.length} chars, and the snapshot hashes to ${digest.take(16)} — binding the recomputed digest"
           )
         }
         // Persist the snapshot to the LEAD's own bound-artifact store BEFORE the journal
@@ -798,7 +798,7 @@ class LeadDaemon(
         // than silently wedging every later plan/execute spawn against TASK_REF_RE. Returns
         // false (not true): the pass makes no progress on a bad ref instead of re-looping on it.
         if (!isClaimableTicketRef(offered)) {
-          escalate("ticket claim rejected: malformed ticket ref '${offered.take(80)}' (charset/length)")
+          escalate("ticket claim rejected: an offered ref of ${offered.length} chars is malformed (charset/length)")
           return false
         }
         store.append(
@@ -1322,8 +1322,11 @@ class LeadDaemon(
           val expected = evidenceDigest(p.gateKind, leadAtDecision)
           if (expected == null || p.payloadDigest != expected) {
             escalate(
-              "gate-open rejected for $gateId: proposed digest ${p.payloadDigest.take(16)} " +
-                "does not match substrate evidence ${expected?.take(16) ?: "(none recorded)"}"
+              if (p.gateKind !in GateKinds.ALL)
+                "gate-open rejected: a proposed gate kind of ${p.gateKind.length} chars is not one the lead opens"
+              else
+                "gate-open rejected for $gateId: a proposed digest of ${p.payloadDigest.length} chars " +
+                  "does not match substrate evidence ${expected?.take(16) ?: "(none recorded)"}"
             )
             continue
           }
@@ -1366,7 +1369,7 @@ class LeadDaemon(
           // amplify into unbounded distinct spawns.
           if (p.taskRef != "plan:$ticket" && p.taskRef != "execute:$ticket") {
             escalate(
-              "pod-spawn rejected: taskRef '${p.taskRef.take(80)}' is not plan:/execute: " +
+              "pod-spawn rejected: a proposed taskRef of ${p.taskRef.length} chars is not plan:/execute: " +
                 "for the current ticket '$ticket'"
             )
             continue
@@ -1603,6 +1606,26 @@ class LeadDaemon(
       is PodEvent.CompletionDiscarded -> null
     }
 
+  /**
+   * Journal an escalation under the substrate's origin, with [reason] cut to
+   * [MAX_JOURNALED_STRING] chars.
+   *
+   * A reason this class writes never quotes text a sender chose that failed the check that would
+   * vouch for it: a ticket ref the claim refuses, a gate kind, digest or task ref of a proposal
+   * that the check on that value rejects, or a digest a pod runner reports that the snapshot's
+   * hash contradicts. Nothing vouches for what such text holds, so the reason gives its length and
+   * names the check instead. A proposal's own text is on the record already, in the
+   * cognition-origin row journaled before the proposals execute.
+   *
+   * A reason may quote what the lead wrote or accepted: a claimed ticket ref, the gate ids and
+   * task refs built from it, a digest or path the lead computed or recorded, and a pod's id as the
+   * lead's own pod runner reports it. A proposed task ref that passed its check equals one the
+   * lead builds from the claimed ticket, so a reason may quote it even when a later check refuses
+   * the spawn. Some reasons carry text as its author wrote it, cut to a bound: the reason
+   * cognition gives when it proposes an escalation, and the detail a collaborator or an exception
+   * reports, such as a sink's failure, a pod event's reason, or the message of a fault that stops
+   * the loop.
+   */
   private fun escalate(reason: String) {
     store.append(
       LeadKinds.ESCALATED,

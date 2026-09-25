@@ -166,6 +166,9 @@ object LeadKinds {
 object GateKinds {
   const val PLAN_APPROVAL = "plan-approval"
   const val COMMIT_APPROVAL = "commit-approval"
+
+  /** Every kind above: a gate of any other kind is never opened. */
+  val ALL: Set<String> = setOf(PLAN_APPROVAL, COMMIT_APPROVAL)
 }
 
 /** Where the current ticket stands — derived progressively by the fold, one hop per entry. */
