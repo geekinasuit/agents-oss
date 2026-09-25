@@ -51,8 +51,8 @@ class RunningProc(val process: Process, val startedAtMs: Long) {
    */
   fun killTreeNow(): Long {
     val t0 = System.nanoTime()
-    // Collectors.toList(), not Stream.toList() (Java 16+): the compile JDK is the
-    // consuming root module's choice, so these sources stay on pre-16 APIs.
+    // Collectors.toList(), not Stream.toList() (Java 16+): these sources stay on JDK 11 APIs,
+    // the class library a consumer on Bazel's default tool runtime compiles them against.
     val snapshot = process.toHandle().descendants().collect(Collectors.toList())
     snapshot.forEach { it.destroyForcibly() }
     process.destroyForcibly()
@@ -98,8 +98,8 @@ object Subprocess {
 
   /** Kill a process and all its descendants (grandchildren etc.), then the root. */
   fun killTree(process: Process) {
-    // Collectors.toList(), not Stream.toList() (Java 16+): the compile JDK is the
-    // consuming root module's choice, so these sources stay on pre-16 APIs.
+    // Collectors.toList(), not Stream.toList() (Java 16+): these sources stay on JDK 11 APIs,
+    // the class library a consumer on Bazel's default tool runtime compiles them against.
     process.toHandle().descendants().collect(Collectors.toList()).forEach { it.destroyForcibly() }
     process.destroyForcibly()
   }

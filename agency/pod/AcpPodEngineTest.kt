@@ -975,8 +975,8 @@ class AcpPodEngineTest {
 
   private fun descendantPidsOf(pid: Long): List<Long> =
     ProcessHandle.of(pid)
-      // Collectors.toList(), not Stream.toList() (Java 16+): the compile JDK is the
-      // consuming root module's choice, so these sources stay on pre-16 APIs.
+      // Collectors.toList(), not Stream.toList() (Java 16+): these sources stay on JDK 11 APIs,
+      // the class library a consumer on Bazel's default tool runtime compiles them against.
       .map { h -> h.descendants().collect(Collectors.toList()).map { d -> d.pid() } }
       .orElse(emptyList())
 

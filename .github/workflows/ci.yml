@@ -20,6 +20,38 @@ jobs:
       - name: script tests
         run: scripts/run-script-tests.sh
 
+  # Build and test this module the way a consumer does: as an external repo under a root module of
+  # its own. The job above cannot see this class of defect: a label that resolves only when this
+  # module is the main repo, a runfiles path that assumes it is, or a JDK API newer than the
+  # consumer's JDK. A consumer does not inherit this repo's .bazelrc, so every JDK choice below is
+  # explicit. A fresh checkout holds no bazel-* convenience links, so this job does not check that
+  # REPO.bazel keeps a consumer's @agency//... from loading them as packages.
+  consumer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: consumer module
+        run: |
+          mkdir "$RUNNER_TEMP/consumer"
+          cp .bazelversion "$RUNNER_TEMP/consumer/"
+          printf 'bazel_dep(name = "agency")\nlocal_path_override(module_name = "agency", path = "%s")\n' \
+            "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/consumer/MODULE.bazel"
+      - name: bazel test @agency//... (JDK 21)
+        working-directory: ${{ runner.temp }}/consumer
+        run: >-
+          bazel test --keep_going --test_output=errors
+          --java_runtime_version=21 --tool_java_runtime_version=21 @agency//...
+      # The sources stay on JDK 11 APIs: Bazel's default tool runtime is remotejdk_11, and kotlinc
+      # compiles against the class library of the JDK it runs on, so a consumer that sets nothing
+      # compiles them on JDK 11. This build runs the tools on JDK 11 as that consumer does, so it
+      # also fails if a build tool stops running there; a kotlinc flag could at most check the APIs.
+      # Build only: the Kotlin toolchain emits JVM 17 bytecode, which a JDK 11 runtime cannot load.
+      - name: bazel build @agency//... (JDK 11)
+        working-directory: ${{ runner.temp }}/consumer
+        run: >-
+          bazel build --keep_going
+          --java_runtime_version=remotejdk_11 --tool_java_runtime_version=remotejdk_11 @agency//...
+
   # Enforce the CONTRIBUTING sign-off (Developer Certificate of Origin). PRs only — the
   # per-PR commit range is a pull_request concept, and the post-merge push to main carries
   # only the squashed result.
