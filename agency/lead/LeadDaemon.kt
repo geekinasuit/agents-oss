@@ -17,6 +17,11 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
+import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.LinkedBlockingQueue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -90,7 +95,9 @@ class LeadDaemon(
    * relay it needs, are the deployment's wiring. A daemon whose sink reports
    * [AnnounceOutcome.NoSink] marks the gate announced, so the arm fires at most once, and escalates
    * it, since the gate then waits for an approval no operator was asked for. Under a non-ceremony
-   * auth no nonce is minted, so this is consulted only for a nonce the journal already holds. */
+   * auth no nonce is minted, so this is consulted only for a nonce the journal already holds. The
+   * capacity it declares ([GateOpenSink.maxArtifactBytes]) bounds how much of a gate's bound copy
+   * the daemon reads to announce it. */
   private val gateOpenSink: GateOpenSink = NoOpGateOpenSink,
   private val dedupEffects: Boolean = true,
   private val capabilityDesc: String = "scripted/none",
@@ -119,6 +126,17 @@ class LeadDaemon(
         "was $maxCognitionAttempts"
     }
   }
+
+  /** The largest bound copy the daemon announces: the capacity [gateOpenSink] declares, read once
+   * here. The read takes one byte more, to see a copy that grew past it. One out of range is a
+   * wiring mistake, refused now rather than at the first gate. */
+  private val artifactReadCap: Int =
+    gateOpenSink.maxArtifactBytes.also {
+      require(it in 1..GateOpenSink.MAX_ARTIFACT_BYTES) {
+        "the gate-open sink's maxArtifactBytes must be in 1..${GateOpenSink.MAX_ARTIFACT_BYTES}, " +
+          "was $it"
+      }
+    }
 
   sealed interface WakeEvent {
     data object Adopted : WakeEvent
@@ -970,12 +988,12 @@ class LeadDaemon(
    *
    * The artifact the operator reads is resolved from the gate's lead-owned bound copy first (a
    * [payloadDigest] match verified). An UNRESOLVED artifact — no bound path in the journal, the
-   * bound store disturbed after the gate opened, or an intact artifact that is not valid UTF-8 or
-   * has nothing to read ([hasReadableText]) — is a different failure from a sink fault: the gate is
-   * open and blocking and nothing reached the operator. It is escalated at once (so the stuck gate
-   * is visible, not a silent stall) and recorded failed WITHOUT calling the sink — a signal with
-   * nothing to read cannot be built — and its marker is final, so the recovery arm does not re-read
-   * the bad file every pass.
+   * bound store disturbed after the gate opened, a copy larger than the sink carries, or an intact
+   * artifact that is not valid UTF-8 or has nothing to read ([hasReadableText]) — is a different
+   * failure from a sink fault: the gate is open and blocking and nothing reached the operator. It
+   * is escalated at once (so the stuck gate is visible, not a silent stall) and recorded failed
+   * WITHOUT calling the sink — a signal with nothing to read cannot be built — and its marker is
+   * final, so the recovery arm does not re-read the bad file every pass.
    */
   private fun announceAndMark(
     gateId: String,
@@ -1105,13 +1123,30 @@ class LeadDaemon(
    * The bytes must hash to [payloadDigest] — the correctness property that the operator reads
    * EXACTLY what the nonce authorizes, not merely a check that the store is intact. A well-formed
    * open gate always has a bound path (path and digest fold from one event), so a null path means
-   * the journal is malformed, and a missing file, a read fault, or a mismatch means the bound store
-   * was disturbed after the gate opened. Two intact artifacts are refused as well, though each is
-   * exactly what the nonce authorizes: bytes that are not valid UTF-8, because the notice carries
-   * text and no decoding of them would show the operator exactly those bytes; and an artifact with
-   * nothing to read ([hasReadableText]), because a notice with nothing to read cannot be built. A
-   * blank one is reported as `empty-artifact`, and any other with nothing to read, such as one made
-   * only of zero-width characters, as `unreadable-artifact`.
+   * the journal is malformed, and a missing file, anything but a regular file, a read fault, a copy
+   * that changes while it is read, or a mismatch means the bound store was disturbed after the gate
+   * opened. Three more refusals can meet an artifact that is exactly what the nonce authorizes: one
+   * larger than the sink carries, because no notice could hold it; bytes that are not valid UTF-8,
+   * because the notice carries text and no decoding of them would show the operator exactly those
+   * bytes; and an artifact with nothing to read ([hasReadableText]), because a notice with nothing
+   * to read cannot be built. A blank one is reported as `empty-artifact`, and any other with nothing
+   * to read, such as one made only of zero-width characters, as `unreadable-artifact`. The last two
+   * are judged after the digest matches, so what they refuse is intact. The size is judged first,
+   * from the file alone, so `artifact-too-large` is also what a disturbed copy of that size gets.
+   *
+   * The read runs on the single-writer loop thread, so a disturbed copy must not make it block or
+   * throw: a fault is an Unresolved value, never a throw that would escape and skip the marker. The
+   * lead wrote the bound copy as a regular file, so it opens nothing else: a link, a directory, a
+   * FIFO or a device at the path is refused unopened as a `read-fault`, since opening a FIFO blocks
+   * and a device can be read without end. Only the path's last name is checked that way; a link
+   * among the directories above it is followed, and the digest still decides what the operator
+   * reads. A copy larger than the capacity the sink declares ([artifactReadCap]) is refused from its
+   * size, unopened, as `artifact-too-large`. The read takes at most one byte past that capacity, so
+   * a copy that grows after the size check is never read whole: it is refused as
+   * `bound-artifact-changed`. The open does not follow a link at the last name either, so a link
+   * swapped in there after the check is refused as a `read-fault`. The path can still be swapped for
+   * a FIFO between the check and the open, at its last name or through a directory above it, and
+   * the open then blocks, as the pod engine's own artifact read can.
    */
   private fun resolveGateArtifact(
     gateKind: String,
@@ -1124,17 +1159,34 @@ class LeadDaemon(
         GateKinds.COMMIT_APPROVAL -> lead.commitManifestPath
         else -> null
       } ?: return ArtifactResolution.Unresolved("no-bound-path")
-    // The read runs on the single-writer loop thread: a read fault (bound copy replaced by a
-    // directory, a revoked permission, a hard I/O error) becomes an Unresolved value, never a throw
-    // that would escape and skip the marker — the never-throws contract the announce holds.
-    val bytes =
+    val attrs =
       try {
-        val file = File(path)
-        if (!file.exists()) return ArtifactResolution.Unresolved("bound-artifact-missing")
-        file.readBytes()
+        Files.readAttributes(Path.of(path), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+      } catch (e: NoSuchFileException) {
+        return ArtifactResolution.Unresolved("bound-artifact-missing")
       } catch (e: Exception) {
         return ArtifactResolution.Unresolved("read-fault:${e.message}")
       }
+    if (!attrs.isRegularFile) return ArtifactResolution.Unresolved("read-fault:not a regular file")
+    if (attrs.size() > artifactReadCap) {
+      return ArtifactResolution.Unresolved(
+        "artifact-too-large:${attrs.size()} bytes, over the $artifactReadCap the sink carries"
+      )
+    }
+    faults.at("before-gate-artifact-read")
+    val bytes =
+      try {
+        Files.newInputStream(Path.of(path), LinkOption.NOFOLLOW_LINKS).use {
+          it.readNBytes(artifactReadCap + 1)
+        }
+      } catch (e: Exception) {
+        return ArtifactResolution.Unresolved("read-fault:${e.message}")
+      }
+    if (bytes.size > artifactReadCap) {
+      return ArtifactResolution.Unresolved(
+        "bound-artifact-changed:grew past the $artifactReadCap bytes the sink carries while it was read"
+      )
+    }
     if (sha256HexBytes(bytes) != payloadDigest) return ArtifactResolution.Unresolved("digest-mismatch")
     // Decoded strictly: a lenient decode swaps malformed bytes for U+FFFD, showing the operator
     // text the digest does not authorize, and showing distinct byte strings as the same text.

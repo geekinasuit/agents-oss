@@ -31,6 +31,30 @@ import com.geekinasuit.agency.shared.text.hasReadableText
  */
 fun interface GateOpenSink {
   fun announce(signal: GateOpenSignal): AnnounceOutcome
+
+  /**
+   * The largest artifact, in bytes, this sink can carry in a notice. The daemon reads at most one
+   * byte more of a gate's bound copy than this, to see a copy that grew past it: a larger copy is
+   * refused unread, and one that grows past it while it is read is refused as well, since the sink
+   * could not carry either. An upper bound, not a promise: the sink's own encoding adds to an
+   * artifact's size, so the sink may still fail an artifact at or under it when it builds its
+   * notice.
+   *
+   * The daemon reads this once, when it is constructed, and refuses a sink that declares less than
+   * 1 or more than [MAX_ARTIFACT_BYTES]. A sink that does not override it declares
+   * [MAX_ARTIFACT_BYTES].
+   */
+  val maxArtifactBytes: Int
+    get() = MAX_ARTIFACT_BYTES
+
+  companion object {
+    /**
+     * The most a sink may declare as [maxArtifactBytes]: 32 MiB, far more than a notice an operator
+     * reads, and a bound on what the daemon reads of a bound copy on its single loop thread, so a
+     * disturbed copy cannot make that read exhaust the heap.
+     */
+    const val MAX_ARTIFACT_BYTES: Int = 32 shl 20
+  }
 }
 
 /**
