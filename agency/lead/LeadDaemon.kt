@@ -86,8 +86,17 @@ class LeadDaemon(
    * sent again. REQUIRED, no default, for the same reason [podSpec] is: under a service that fires
    * nothing, a failed announce is marked for a retry that never comes and is never escalated, and a
    * silently-defaulted service would hide that. A deployment passes a service that fires, such as
-   * [ThreadTimerService]. A test passes a service it controls: most pass [TimerService.NOOP] and
-   * fire timers with [injectTimerDue], and some pass one that records or fires timers itself. */
+   * [ThreadTimerService].
+   *
+   * A daemon under a ceremony auth ([LeadAuth.hasApprovers]) refuses [TimerService.NOOP], the one
+   * service this module supplies that fires nothing. Whether any other service fires is behaviour
+   * the daemon cannot inspect, so it takes one on trust. A daemon under a non-ceremony auth still
+   * takes NOOP. It mints no nonce, but it announces one a ceremony daemon left in the journal, and
+   * under NOOP a failed announce of that nonce is neither sent again nor escalated.
+   *
+   * A test passes a service it controls. Most pass NOOP, or under a ceremony auth one of their own
+   * that fires nothing, and fire timers with [injectTimerDue]; some pass one that records or fires
+   * timers itself. */
   private val timers: TimerService,
   private val faults: FaultInjector = FaultInjector.NONE,
   /** Where a ceremony gate-open is announced so an operator can authorize it ([GateOpenSink]).
@@ -124,6 +133,14 @@ class LeadDaemon(
     require(maxCognitionAttempts in 1..MAX_COGNITION_ATTEMPTS_CEILING) {
       "maxCognitionAttempts must be in 1..$MAX_COGNITION_ATTEMPTS_CEILING, " +
         "was $maxCognitionAttempts"
+    }
+    // Under a ceremony auth a gate-open announce the sink fails waits on a timer, which sends it
+    // again and escalates its last failure. NOOP fires nothing, so under it that announce would be
+    // neither sent again nor escalated. The journal would hold the failed attempt, but no operator
+    // would be told, and the gate would wait for an approval no operator was asked for.
+    require(!(leadAuth.hasApprovers && timers === TimerService.NOOP)) {
+      "a daemon under a ceremony auth needs a timer service that fires, such as ThreadTimerService: " +
+        "under TimerService.NOOP a failed gate-open announce is never sent again or escalated"
     }
   }
 
@@ -1735,7 +1752,9 @@ fun interface TimerService {
   fun arm(timer: ArmedTimer, onDue: (String) -> Unit)
 
   companion object {
-    /** Tests fire manually via [LeadDaemon.injectTimerDue]. */
+    /** Fires nothing: a test that passes it fires each timer itself, with
+     * [LeadDaemon.injectTimerDue]. A daemon under a ceremony auth refuses it, since there a failed
+     * gate-open announce waits on a timer to be sent again or escalated. */
     val NOOP = TimerService { _, _ -> }
   }
 }
