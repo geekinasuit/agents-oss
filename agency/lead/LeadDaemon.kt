@@ -321,15 +321,18 @@ class LeadDaemon(
   fun runLoop() {
     check(active.compareAndSet(false, true)) { "lead daemon is already running (single loop rule)" }
     try {
+      // At start the lead appends nothing to a journal it cannot read and fold, since an escalation
+      // there would extend a journal the lead has not understood. When the read or either fold
+      // throws (a chain that does not verify, an entry a fold refuses, a failed read), the fault
+      // propagates from here, and it is the only record of why the lead does not run.
+      val folded = refold()
       try {
-        adopt()
+        adopt(folded)
       } catch (t: Throwable) {
-        // A fault in adopt (folding the journal, re-arming a timer, re-driving an effect, a journal
-        // append) stops the loop before its first wake. A restart folds the same journal to the
-        // same step, so a fault that persists there recurs on every start, and the escalation
-        // records why the lead does not run. When the fold itself refuses the journal (a broken
-        // chain, an epoch rule, an unknown version), the escalation is still appended, but a
-        // verified read stops at the entry it refused and never reaches it.
+        // A fault in adopt (re-arming a timer, re-driving an effect, a journal append) stops the
+        // loop before its first wake. A restart folds the same journal to the same step, so a
+        // fault that persists there recurs on every start, and the escalation records why the
+        // lead does not run.
         escalateThenRethrow("adopt-fault", t)
       }
       while (true) {
@@ -380,7 +383,7 @@ class LeadDaemon(
   fun driveUntilQuiescent(): Folded {
     check(active.compareAndSet(false, true)) { "lead daemon is already running (single loop rule)" }
     try {
-      adopt()
+      adopt(refold())
       while (true) {
         val ev = queue.poll() ?: break
         if (ev is WakeEvent.Shutdown) break
@@ -401,8 +404,7 @@ class LeadDaemon(
 
   // ---- adopt ----
 
-  private fun adopt() {
-    val folded = refold() // readAll verifies the chain; both folds derive state
+  private fun adopt(folded: Folded) {
     faults.at("mid-adopt")
     for (t in folded.shared.pendingTimers) {
       timers.arm(t) { id -> queue.put(WakeEvent.TimerDue(id)) }
