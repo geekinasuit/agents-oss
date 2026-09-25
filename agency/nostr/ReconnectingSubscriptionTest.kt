@@ -77,8 +77,11 @@ class ReconnectingSubscriptionTest {
     }
   }
 
-  private fun subscription(newConnection: () -> RelayConnection, auth: RelayAuth) =
-    ReconnectingSubscription(newConnection, connectTimeout, auth, SUB, filters, backoff)
+  private fun subscription(
+    newConnection: () -> RelayConnection,
+    auth: RelayAuth,
+    backoff: ReconnectingSubscription.Backoff = this.backoff,
+  ) = ReconnectingSubscription(newConnection, connectTimeout, auth, SUB, filters, backoff)
 
   /** An event the transport carries without checking it. [n] sets its id. */
   private fun event(n: Int) =
@@ -511,6 +514,134 @@ class ReconnectingSubscriptionTest {
       relay.assertScriptClean()
       subscription.close()
     }
+  }
+
+  @Test
+  fun `a next whose timeout ends before the delay makes no attempt and reports nothing`() {
+    val url = refusedUrl()
+    val attempts = AtomicInteger()
+    val subscription =
+      subscription(
+        {
+          attempts.incrementAndGet()
+          RelayConnection(RelayConfig(url, SecretKeyHex.ofHexString(key)))
+        },
+        RelayAuth.None,
+        ReconnectingSubscription.Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5)),
+      )
+    assertTrue(subscription.next(wait) is Delivery.Unavailable)
+
+    val started = System.nanoTime()
+    val result = subscription.next(Duration.ofMillis(100))
+    val millis = (System.nanoTime() - started) / 1_000_000
+    assertEquals("nothing to report before the 5 s delay passes", null, result)
+    assertTrue("next(100 ms) took $millis ms, waiting toward the 5 s delay", millis < 2_500)
+    assertEquals("no attempt before the delay passes", 1, attempts.get())
+    subscription.close()
+  }
+
+  @Test
+  fun `after an interruption the next attempt waits for its retryAfter`() {
+    // Long enough that next(100 ms) still starts well before the delay passes when the test thread
+    // stalls on a loaded machine.
+    val delay = Duration.ofSeconds(3)
+    FakeRelay().use { first ->
+      FakeRelay().use { second ->
+        first.serve { session ->
+          awaitReq(session)
+          session.sendClose()
+        }
+        second.serve { session -> awaitReq(session) }
+        val connections = Connections(first.url, second.url)
+        val subscription =
+          subscription(connections::next, RelayAuth.None, ReconnectingSubscription.Backoff(delay, delay))
+        assertEquals(Delivery.Subscribed, subscription.next(wait))
+
+        val started = System.nanoTime()
+        val interrupted = subscription.next(wait)
+        assertEquals(
+          "expected Interrupted after a 3 s delay, got $interrupted",
+          delay,
+          (interrupted as? Delivery.Interrupted)?.retryAfter,
+        )
+        assertEquals("nothing to report before the delay passes", null, subscription.next(Duration.ofMillis(100)))
+        assertEquals("no attempt before the delay passes", 1, connections.configs.size)
+        assertEquals(Delivery.Subscribed, subscription.next(wait.plus(delay)))
+        val millis = (System.nanoTime() - started) / 1_000_000
+        assertTrue(
+          "the new connection was subscribed $millis ms after the old one's wait began",
+          millis >= delay.toMillis(),
+        )
+        first.assertScriptClean()
+        second.assertScriptClean()
+        subscription.close()
+      }
+    }
+  }
+
+  @Test
+  fun `on an interrupted thread next makes no attempt and leaves the thread interrupted`() {
+    val attempts = AtomicInteger()
+    val subscription =
+      subscription({ attempts.incrementAndGet(); error("no attempt expected") }, RelayAuth.None)
+    Thread.currentThread().interrupt()
+    try {
+      assertEquals("an attempt is due, but nothing is reported", null, subscription.next(wait))
+      assertTrue("the thread is still interrupted", Thread.currentThread().isInterrupted)
+    } finally {
+      // Clear the status, so it does not reach the next cell on this thread.
+      Thread.interrupted()
+    }
+    assertEquals("no attempt on an interrupted thread", 0, attempts.get())
+    subscription.close()
+  }
+
+  @Test
+  fun `a negative timeout counts as zero`() {
+    val attempts = AtomicInteger()
+    val subscription =
+      subscription(
+        { attempts.incrementAndGet(); throw IllegalStateException("no relay") },
+        RelayAuth.None,
+        ReconnectingSubscription.Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5)),
+      )
+    assertTrue(subscription.next(wait) is Delivery.Unavailable)
+
+    // A timeout this negative converts to Long.MIN_VALUE ns. Added with no lower clamp, that puts the
+    // deadline so far back that the subtraction comparing it wraps, and the deadline reads as far ahead.
+    val started = System.nanoTime()
+    val result = subscription.next(Duration.ofMillis(Long.MIN_VALUE))
+    val millis = (System.nanoTime() - started) / 1_000_000
+    assertEquals("nothing to report before the 5 s delay passes", null, result)
+    assertTrue("next took $millis ms, waiting toward the 5 s delay", millis < 2_500)
+    assertEquals("no attempt before the delay passes", 1, attempts.get())
+    subscription.close()
+  }
+
+  @Test
+  fun `a timeout too long to count in nanoseconds does not throw, and next still waits for the delay`() {
+    val attempts = AtomicInteger()
+    val subscription =
+      subscription(
+        { attempts.incrementAndGet(); throw IllegalStateException("no relay") },
+        RelayAuth.None,
+        ReconnectingSubscription.Backoff(Duration.ofMillis(300), Duration.ofMillis(600)),
+      )
+    val forever = Duration.ofMillis(Long.MAX_VALUE)
+    val started = System.nanoTime()
+    assertEquals(
+      Delivery.Unavailable("could not create a connection: IllegalStateException", Duration.ofMillis(300)),
+      subscription.next(forever),
+    )
+    // The second call waits out the 300 ms delay and tries again, rather than returning at once.
+    assertEquals(
+      Delivery.Unavailable("could not create a connection: IllegalStateException", Duration.ofMillis(600)),
+      subscription.next(forever),
+    )
+    val millis = (System.nanoTime() - started) / 1_000_000
+    assertTrue("the second attempt came $millis ms after the first call began, before its 300 ms delay", millis >= 300)
+    assertEquals(2, attempts.get())
+    subscription.close()
   }
 }
 
