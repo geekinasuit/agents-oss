@@ -139,7 +139,8 @@ sealed interface AuthResult {
   data class Refused(val message: String) : AuthResult
 
   /** The handshake could not complete: no challenge arrived, no matching OK arrived, the event
-   * could not be signed or sent, or the connection failed mid-handshake. Fail-closed. */
+   * could not be signed or sent, the connection failed mid-handshake, or the thread was interrupted
+   * while it waited. Fail-closed. */
   data class Failed(val detail: String) : AuthResult
 }
 
@@ -152,8 +153,9 @@ sealed interface PublishResult {
   /** The relay explicitly rejected the event (`OK ... false`). [message] is the relay's reason. */
   data class Rejected(val message: String) : PublishResult
 
-  /** No verdict: the event could not be sent, no matching OK arrived within the deadline, or the
-   * socket dropped. Fail-closed — never assume the event was stored. */
+  /** No verdict: the event could not be sent, no matching OK arrived within the deadline, the socket
+   * dropped, or the thread was interrupted while it waited. Fail-closed — never assume the event was
+   * stored. */
   data class Failed(val detail: String) : PublishResult
 }
 
@@ -302,7 +304,9 @@ class RelayConnection(
    * return a non-[Authenticated] result. And if signing overruns the budget — a cold native load on
    * the first call, or a slow entropy draw on a low-entropy host — that is reported distinctly from
    * the relay staying silent, never a false "no OK" that blames the relay for a slow local sign.
-   * Never throws.
+   * An interrupt ends a wait at once, and the thread's interrupt status is still set when this
+   * returns. The detail says the wait was interrupted, or names the connection's fault if one was
+   * recorded. Never throws.
    */
   fun authenticate(timeout: Duration): AuthResult {
     val ws = webSocket ?: return AuthResult.Failed("not connected")
@@ -311,7 +315,7 @@ class RelayConnection(
 
     val challenge =
       awaitMessage(deadline) { (it as? RelayMessage.Auth)?.challenge }
-        ?: return AuthResult.Failed(failedDetail("no AUTH challenge within deadline"))
+        ?: return AuthResult.Failed(noMessageDetail("AUTH challenge"))
 
     val authEvent =
       try {
@@ -356,7 +360,7 @@ class RelayConnection(
       }
       val ok =
         pollUntilDeadline(slot, deadline)
-          ?: return AuthResult.Failed(failedDetail("no OK for our auth event within deadline"))
+          ?: return AuthResult.Failed(noMessageDetail("OK for our auth event"))
       return if (ok.accepted) AuthResult.Authenticated else AuthResult.Refused(ok.message)
     } finally {
       unregisterOkWaiter(authEvent.id, slot)
@@ -370,7 +374,9 @@ class RelayConnection(
    *
    * Fail-closed: a send fault, no OK within the deadline, an OK for a DIFFERENT event id (a relay
    * cannot ack our event by acknowledging another), or a dropped socket all yield
-   * [PublishResult.Failed], never a hopeful assumption the event landed. Never throws.
+   * [PublishResult.Failed], never a hopeful assumption the event landed. An interrupt ends a wait at
+   * once, and the thread's interrupt status is still set when this returns. The detail says the
+   * wait was interrupted, or names the connection's fault if one was recorded. Never throws.
    *
    * MECHANISM, not policy: the caller builds and signs [event] — WHAT to publish is the
    * deployment's choice; this only carries it and reports the relay's answer, making no
@@ -389,7 +395,7 @@ class RelayConnection(
       }
       val ok =
         pollUntilDeadline(slot, deadline)
-          ?: return PublishResult.Failed(failedDetail("no OK for published event within deadline"))
+          ?: return PublishResult.Failed(noMessageDetail("OK for published event"))
       return if (ok.accepted) PublishResult.Accepted else PublishResult.Rejected(ok.message)
     } finally {
       unregisterOkWaiter(event.id, slot)
@@ -514,7 +520,8 @@ class RelayConnection(
   // await (a per-event ack slot). A fault checked before the poll ends the wait even if an ack is
   // already buffered in the slot: fail-closed is the only safe posture for authenticate() (which
   // shares this and needs a live socket), and for publish a false Failed costs only an idempotent
-  // republish, never a false Accepted. Returns null on deadline, failure, or interrupt.
+  // republish, never a false Accepted. Returns null on deadline, failure, or interrupt, and sets the
+  // thread's interrupt status again on an interrupt.
   private fun <M : RelayMessage> pollUntilDeadline(queue: BlockingQueue<M>, deadline: Instant): M? {
     while (true) {
       if (failure.get() != null) return null
@@ -574,6 +581,18 @@ class RelayConnection(
 
   private fun failedDetail(default: String): String =
     failure.get()?.let { "connection failed: $it" } ?: default
+
+  // The detail for a wait for [what] that pollUntilDeadline ended with no message. That function
+  // returns null on a recorded fault, an interrupt or the deadline. On an interrupt it sets the
+  // thread's interrupt status again, so the status tells an interrupted wait from one that ran out
+  // of time. A recorded fault comes first: the connection is finished, and the status still shows
+  // any interrupt. An interrupt that lands after the wait's last poll, before this reads the
+  // status, reads as an interrupt too: either way the status is set when the caller gets the
+  // result.
+  private fun noMessageDetail(what: String): String =
+    failure.get()?.let { "connection failed: $it" }
+      ?: if (Thread.currentThread().isInterrupted) "interrupted while awaiting $what"
+      else "no $what within deadline"
 
   private fun freshAuxRandHex(): String {
     val bytes = ByteArray(32)
