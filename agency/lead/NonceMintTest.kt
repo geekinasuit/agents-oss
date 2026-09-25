@@ -21,6 +21,7 @@ import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -476,39 +477,41 @@ class NonceMintTest {
   }
 
   @Test
-  fun aGateUnderAClaimHoldingALoneSurrogateGetsNoNonceAndTheWakeConverges() {
+  fun aClaimHoldingALoneSurrogateStopsEveryDriveWithNothingAppended() {
     // The claim accepts only ticket refs in an ASCII charset, so a claimed ref holding a lone
-    // surrogate reaches the fold only from a journal the lead did not write. A gate under the id
-    // derived from it can come from that journal, or from the lead's own gate-open for the claim.
-    // The ref is not one the claim accepts, so the gate gets no nonce.
+    // surrogate reaches the journal only from a writer other than the lead. The fold refuses that
+    // claim, so the lead derives no gate id, nonce or announce from it: each drive stops at its
+    // first fold, with nothing appended.
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
-    val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val first = f1.lead.issuedNonces.values.toList()
-    assertEquals("the gate-open minted one nonce", 1, first.size)
-    store.append(
-      LeadKinds.TICKET_CLAIMED,
-      buildJsonObject { put("ticketRef", escapedLoneSurrogateAfter("t")) },
-      ORIGIN_SUBSTRATE,
-    )
-    store.append(
-      LeadKinds.GATE_OPENED,
-      buildJsonObject {
-        put("gateId", escapedLoneSurrogateAfter(gateIdFor(GateKinds.PLAN_APPROVAL, "t")))
-        put("gateKind", GateKinds.PLAN_APPROVAL)
-        put("payloadDigest", f1.lead.planArtifactSha!!)
-      },
-      ORIGIN_SUBSTRATE,
-    )
+    val announced = mutableListOf<String>()
+    val sink = GateOpenSink { signal ->
+      announced += signal.gateId
+      AnnounceOutcome.Announced("delivered")
+    }
+    daemon(dir, store, ceremonyAuth(), sink = sink).driveUntilQuiescent()
+    assertEquals("the honest walk announced its plan gate", listOf(PLAN_GATE), announced)
+    val claim =
+      store.append(
+        LeadKinds.TICKET_CLAIMED,
+        buildJsonObject { put("ticketRef", escapedLoneSurrogateAfter("t")) },
+        ORIGIN_SUBSTRATE,
+      )
+    val rows = store.readAll().size
 
-    val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val ticket = "t$LONE_SURROGATE"
-    assertEquals("the fold holds the claim with its surrogate", ticket, f.lead.currentTicket)
-    assertTrue(
-      "and a gate under the id derived from it",
-      gateIdFor(GateKinds.PLAN_APPROVAL, ticket) in f.lead.openGates,
-    )
-    assertEquals("no nonce is minted for it", first, f.lead.issuedNonces.values.toList())
+    repeat(3) { drive ->
+      val e =
+        assertThrows("drive ${drive + 1}: the fold refuses the claim", LeadFoldException::class.java) {
+          daemon(dir, store, ceremonyAuth(), sink = sink).driveUntilQuiescent()
+        }
+      assertTrue("drive ${drive + 1}: the fault names the claim", e.message!!.contains("seq=${claim.seq}"))
+      assertEquals(
+        "drive ${drive + 1}: nothing was appended, so no gate-open, nonce or marker",
+        rows,
+        store.readAll().size,
+      )
+    }
+    assertEquals("nothing further was announced", listOf(PLAN_GATE), announced)
     store.close()
   }
 

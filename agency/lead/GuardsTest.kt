@@ -767,6 +767,19 @@ class GuardsTest {
   }
 
   @Test
+  fun aClaimOfEveryShapeTheClaimAcceptsIsFolded() {
+    // The fold refuses a claimed ref the claim would refuse, so the two checks must agree: a fold
+    // stricter than the claim would refuse a journal the lead wrote itself, and the lead would not
+    // run on it again.
+    for (ticket in listOf("Az09._-", "a".repeat(128))) {
+      val rig = Rig(tmp.newFolder(), mutableListOf(), ticket = ticket)
+      val folded = rig.daemon.driveUntilQuiescent()
+      assertEquals("a ref of ${ticket.length} chars is claimed and folded", ticket, folded.lead.currentTicket)
+      rig.store.close()
+    }
+  }
+
+  @Test
   fun oversizedCognitionOutputIsCappedInTheAuditEntry() {
     val dir = tmp.newFolder()
     // A hostile/buggy strategy returns a huge reasoning string, a huge meta value, and far

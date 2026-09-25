@@ -15,6 +15,7 @@ import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -479,6 +480,23 @@ private val SUBSTRATE_AUTHORED_KINDS =
     LeadKinds.NONCE_CONSUMED,
   )
 
+/** Well-formed ticket refs: a ticket ref is untrusted input (a fixture line today, a real
+ * ticket-index row later) that flows into task refs, gate ids, and effect keys. A conservative
+ * charset — ':' and '/' excluded, so it can forge neither a task namespace nor a path — plus a
+ * length bound keeps a malformed ref from wedging the pipeline or polluting a namespace. */
+private val TICKET_REF_RE = Regex("[A-Za-z0-9._-]+")
+private const val MAX_TICKET_REF_LEN = 128
+
+/** Whether the claim accepts [ref]: in [TICKET_REF_RE]'s charset and at most [MAX_TICKET_REF_LEN]
+ * chars. The claim journals only a ref that passes, as a JSON string. The fold refuses a
+ * substrate-origin claim of any other ref, and records a claim of any other origin in
+ * [LeadState.misOriginedEntries] before it reads the ref. The claim and the fold check this one
+ * predicate, since a fold stricter than the claim would refuse a journal the lead wrote itself.
+ * Widening the predicate keeps every journal already written foldable. Tightening it makes the
+ * fold refuse claims already journaled, so it needs a migration of those journals. */
+internal fun isClaimableTicketRef(ref: String): Boolean =
+  TICKET_REF_RE.matches(ref) && ref.length <= MAX_TICKET_REF_LEN
+
 /** A fold failure with its position identified — a malformed payload on a known kind
  * (field missing, wrong type) is chain corruption or payload-contract drift, and it must
  * fail CLASSIFIED (seq + kind named) rather than as an anonymous NPE boot-loop. */
@@ -541,8 +559,19 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
   val p = Json.parseToJsonElement(e.payloadJson).jsonObject
   return when (e.kind) {
       LeadKinds.RUN_STARTED -> s.copy(runsStarted = s.runsStarted + 1)
-      LeadKinds.TICKET_CLAIMED ->
-        s.copy(currentTicket = p.str("ticketRef"), phase = TicketPhase.CLAIMED)
+      LeadKinds.TICKET_CLAIMED -> {
+        // The claim journals only a ref it accepts, as a JSON string, so a claim of any other came
+        // from a writer other than the lead. Gate ids, task refs and effect keys are derived from
+        // the claimed ref, so such a claim is refused, not held. The field is read here and not
+        // through [str], whose message carries the field's content. This message leaves the ref
+        // out: it is untrusted text, and a fault's message can be journaled in an escalation.
+        val ref = p["ticketRef"]
+        require(ref is JsonPrimitive && ref.isString && isClaimableTicketRef(ref.content)) {
+          "claimed ticket ref is not a JSON string in the claim's charset of at most " +
+            "$MAX_TICKET_REF_LEN chars"
+        }
+        s.copy(currentTicket = ref.content, phase = TicketPhase.CLAIMED)
+      }
       LeadKinds.PLAN_REQUESTED -> s.copy(phase = TicketPhase.PLAN_REQUESTED)
       LeadKinds.PLAN_ARTIFACT_RECORDED ->
         s.copy(
