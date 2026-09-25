@@ -175,22 +175,44 @@ fun authMessage(event: NostrEvent): String =
  * references, are values the deployment supplies when it builds the approval subscription — never
  * hardcoded here.
  *
- * The field set is the COHERENCE-MINIMAL selector of an approval-collection subscription — the WHAT
- * and the WHICH-GATE, and nothing else:
+ * The selectors are the COHERENCE-MINIMAL set for an approval-collection subscription — the WHAT and
+ * the WHICH-GATE, and nothing else — and [limit] asks the relay to send at most [limit] stored
+ * events for the filter:
  *  - [kinds]: the approval-event kind(s) the daemon subscribes for.
  *  - [tags]: single-letter tag filters, e.g. `#e` referencing the gate-open notice. NIP-01
  *    restricts a tag-filter key to one letter (a-zA-Z) and every key must carry at least one value;
  *    [init] enforces BOTH HERE — where the map is built — so a malformed tag fails fast rather than
  *    as an opaque relay CLOSED, or (for an empty value list) a silently-widened subscription.
+ *  - [limit]: how many stored events NIP-01 asks a relay to return for this filter's initial query,
+ *    as the newest [limit] by `created_at`. It is a SHOULD: a relay may return fewer, and should
+ *    not return many more. A limit of zero is stronger: the relay MUST NOT return stored events for
+ *    the filter. Events that arrive after EOSE are never limited.
  *
- * `authors`, `since`, `until`, `ids`, and `limit` are DELIBERATELY OMITTED under one uniform YAGNI
- * rule, no per-field special-casing: none has a caller in 2a.4, and each is a PURE ADDITION when one
+ * [ReconnectingSubscription] sends its REQ again on each new connection, and the relay answers with
+ * the stored matching events each time. The connection breaks when the relay sends more messages
+ * than it queues ([RelayConnection.MAX_QUEUED_MESSAGES]) before the consumer takes them. A limit on
+ * every filter of the REQ asks the relay to keep that replay to the sum of the limits. EOSE,
+ * NOTICE, AUTH, CLOSED and live events share the queue, so the sum needs room to spare, and a relay
+ * that ignores the limits can still overflow it.
+ *
+ * The cost of a limit is its window: the newest [limit] matching events by `created_at`, or fewer
+ * where the relay clamps the limit to its own maximum (NIP-11's `max_limit`), which NIP-11 says a
+ * relay typically does silently. `created_at` is whatever each event's author wrote. Any key whose
+ * matching events the relay stores can push an event out of every later replay by publishing as
+ * many matching events as the window holds, stamped later than it, and nothing reports the loss.
+ * NIP-59 asks for a gift wrap's `created_at` to be moved into the past, by an amount it does not
+ * bound, so a wrap can fall outside the window even when the relay stored it last. A relay's own
+ * cap on a filter with no limit (NIP-11's `default_limit`) can make the same window, and on such a
+ * relay a limit above that cap asks for more stored events than no limit does.
+ *
+ * `authors`, `since`, `until`, and `ids` are DELIBERATELY OMITTED under one uniform YAGNI
+ * rule, no per-field special-casing: none has a caller, and each is a PURE ADDITION when one
  * appears. An `authors` allow-list narrowing is an OPTIONAL efficiency, not a correctness selector —
  * the fold re-verifies every approval's own signature against the allow-list regardless (A4-3:
- * listening never authorizes), so a relay-side author filter changes no outcome — and it lands when
+ * listening never authorizes), so a relay-side author filter authorizes nothing — and it lands when
  * the allow-list wiring does (step 5). A `since`/`until` window belongs to approval-validity expiry,
  * out of scope for this phase. Correctness never rests on any of them: the relay is a hint, not a
- * boundary, so what it filters is only ever an optimization.
+ * boundary, so what it filters can withhold an approval but never authorize one.
  *
  * An empty filter serializes to `{}` — the NIP-01 "match everything" filter. An empty [kinds] is
  * OMITTED, never emitted as `[]`: in NIP-01 an ABSENT condition matches all while `"kinds":[]`
@@ -201,6 +223,7 @@ fun authMessage(event: NostrEvent): String =
 class NostrFilter(
   kinds: List<Int> = emptyList(),
   tags: Map<Char, List<String>> = emptyMap(),
+  val limit: Int? = null,
 ) {
   // Immutable snapshots taken at construction. A filter's invariant — every tag value list non-empty —
   // must hold for its whole life, but the caller keeps its own references: without the copy, clearing a
@@ -210,6 +233,7 @@ class NostrFilter(
   val tags: Map<Char, List<String>> = tags.mapValues { (_, values) -> values.toList() }
 
   init {
+    require(limit == null || limit >= 0) { "a NIP-01 limit must be zero or more, was $limit" }
     for ((key, values) in this.tags) {
       require(key in 'a'..'z' || key in 'A'..'Z') {
         "a NIP-01 tag filter key must be a single ASCII letter (a-zA-Z), was '$key'"
@@ -333,16 +357,18 @@ private fun JsonObjectBuilder.putEventFields(
   put("content", content)
 }
 
-/** The filter as a NIP-01 JSON object, in a fixed key order (kinds, then tag filters by letter) so
- * the output is deterministic. An empty [kinds] is OMITTED, never emitted as `[]` — an absent
- * condition matches all, an empty one matches none; tag values are non-empty by construction
- * ([NostrFilter] `init`), so every tag emits. */
+/** The filter as a NIP-01 JSON object, in a fixed key order (kinds, then tag filters by letter, then
+ * limit) so the output is deterministic. An empty [kinds] is OMITTED, never emitted as `[]` — an
+ * absent condition matches all, an empty one matches none; tag values are non-empty by construction
+ * ([NostrFilter] `init`), so every tag emits. A null limit is omitted, and a zero one is emitted,
+ * since NIP-01 gives zero a meaning of its own. */
 private fun NostrFilter.toJsonObject(): JsonObject =
   buildJsonObject {
     if (kinds.isNotEmpty()) putJsonArray("kinds") { for (k in kinds) add(k) }
     for ((letter, values) in tags.toSortedMap()) {
       putJsonArray("#$letter") { for (v in values) add(v) }
     }
+    if (limit != null) put("limit", limit)
   }
 
 /** Structure a parsed JSON element into a [NostrEvent], or `null` if it is not a conformant event

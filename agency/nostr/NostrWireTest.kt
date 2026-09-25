@@ -373,6 +373,32 @@ class NostrWireTest {
     )
   }
 
+  @Test
+  fun `NostrFilter serializes a limit after its kinds and tag filters`() {
+    val filter = NostrFilter(kinds = listOf(1059), tags = mapOf('p' to listOf("pk")), limit = 100)
+    assertEquals(
+      """["REQ","s",{"kinds":[1059],"#p":["pk"],"limit":100}]""",
+      reqMessage("s", listOf(filter)),
+    )
+  }
+
+  @Test
+  fun `a NostrFilter limit of zero is emitted`() {
+    // NIP-01 gives zero a meaning of its own: the relay returns no stored events, only new ones. So a
+    // zero limit must reach the wire, not be dropped the way an absent limit is.
+    assertEquals("""["REQ","s",{"limit":0}]""", reqMessage("s", listOf(NostrFilter(limit = 0))))
+  }
+
+  @Test
+  fun `NostrFilter rejects a negative limit`() {
+    try {
+      NostrFilter(limit = -1)
+      throw AssertionError("expected IllegalArgumentException for a negative limit")
+    } catch (e: IllegalArgumentException) {
+      assertTrue(e.message!!.contains("zero or more"))
+    }
+  }
+
   private companion object {
     // The six characters of the JSON escape for U+D800, a high surrogate, built from two parts so this
     // source holds no escape sequence of its own.
