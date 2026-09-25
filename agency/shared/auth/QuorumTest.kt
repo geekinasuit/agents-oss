@@ -138,6 +138,24 @@ class QuorumTest {
   }
 
   @Test
+  fun aThresholdThatIsNotAnIntIsRefusedWithoutQuotingIt() {
+    // 99999999999 is an integer, but not one an Int holds.
+    for (threshold in listOf("7.25", "99999999999")) {
+      val message =
+        try {
+          parseQuorum(
+            """{"type":"group","threshold":$threshold,""" +
+              """"children":[{"type":"signer","principalId":"a"}]}"""
+          )
+          throw AssertionError("$threshold: expected IllegalArgumentException")
+        } catch (expected: IllegalArgumentException) {
+          expected.message.orEmpty()
+        }
+      assertEquals(threshold, "quorum group 'threshold' is not an integer in Int range", message)
+    }
+  }
+
+  @Test
   fun oversizedGroupAsDataIsRefusedBeforeItsChildrenParse() {
     val children = (1..33).joinToString(",") { """{"type":"signer","principalId":"p$it"}""" }
     val message =

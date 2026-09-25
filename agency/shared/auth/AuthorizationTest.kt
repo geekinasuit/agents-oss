@@ -208,6 +208,22 @@ class AuthorizationTest {
   }
 
   @Test
+  fun aRefusedEvidenceFieldIsNamedButItsValueIsNot() {
+    // The evidence is text its carrier chose, and a caller may keep a refusal's message, so the
+    // message names the field and the check and leaves the value out.
+    val message =
+      try {
+        ApprovalEvidence.fromJson(
+          evidenceJson("publicKey" to kotlinx.serialization.json.JsonPrimitive(90210))
+        )
+        throw AssertionError("expected IllegalArgumentException")
+      } catch (expected: IllegalArgumentException) {
+        expected.message.orEmpty()
+      }
+    assertEquals("approval evidence 'publicKey' must be a JSON string", message)
+  }
+
+  @Test
   fun signedPreimageSurvivesAJsonTextRoundTripVerbatim() {
     // fromJson(toJson()) round-trips an in-memory object graph and never crosses the JSON
     // text boundary, so it cannot observe a string-escaping defect. That boundary is where
