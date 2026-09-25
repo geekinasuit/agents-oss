@@ -144,9 +144,25 @@ class NonceMintTest {
       "the nonce-less release folded stale",
       f.lead.staleReleases.any { it.second == PLAN_GATE },
     )
+    // No sink is wired, so the announce was escalated too. That escalation must not silence the
+    // playbook's escalation of the refused release: each is a different thing for a human to see.
+    assertTrue(
+      "the gate-open no sink announced is escalated",
+      f.lead.escalations.any { it.startsWith("gate-open notify had no sink") },
+    )
+    assertEquals(
+      "the refused release is escalated once",
+      1,
+      f.lead.escalations.count { it == "stale gate release observed (digest mismatch)" },
+    )
 
     val again = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
     assertEquals("a second restart mints nothing more", minted, planNonces(again.lead))
+    assertEquals(
+      "a second restart does not escalate the refused release again",
+      1,
+      again.lead.escalations.count { it == "stale gate release observed (digest mismatch)" },
+    )
     store.close()
   }
 
