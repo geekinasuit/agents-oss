@@ -103,6 +103,9 @@ interface CognitionStrategy {
   fun decide(context: WakeContext): CognitionOutput
 }
 
+/** The reason [ScriptedCognition] escalates a stale release with. */
+private const val STALE_RELEASE_REASON = "stale gate release observed (digest mismatch)"
+
 /**
  * Deterministic playbook on [WakeContext] predicates: drives the full ticket
  * walk — claim (substrate) → plan pod → plan gate → execute pod → commit gate → done
@@ -121,9 +124,12 @@ class ScriptedCognition : CognitionStrategy {
     val lead = context.lead
     val ticket = lead.currentTicket ?: return CognitionOutput.IDLE
 
-    if (lead.staleReleases.isNotEmpty() && lead.escalations.isEmpty()) {
+    // A stale release is escalated once. The check looks for that escalation only, so an escalation
+    // of another kind, such as a gate-open no sink announced, does not silence it. The escalations
+    // are a capped tail: once enough later ones push this one out, it is raised again.
+    if (lead.staleReleases.isNotEmpty() && STALE_RELEASE_REASON !in lead.escalations) {
       return CognitionOutput(
-        listOf(Proposal.ProposeEscalate("stale gate release observed (digest mismatch)")),
+        listOf(Proposal.ProposeEscalate(STALE_RELEASE_REASON)),
         "a release did not match the gate as opened; a human should look",
       )
     }

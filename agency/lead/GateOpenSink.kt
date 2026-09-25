@@ -24,7 +24,9 @@ import com.geekinasuit.agency.shared.text.hasReadableText
  * may receive the same signal again; the nonce is single-use, so a repeat cannot authorize twice. A
  * sink that reached some recipients and not others chooses: [AnnounceOutcome.Announced] if what it
  * delivered lets the operator act, or [AnnounceOutcome.Failed] to have the whole signal sent again.
- * The retry and the escalation need the daemon's timer service to fire: under
+ * A sink with nowhere to announce to, such as one wired with no recipient, returns
+ * [AnnounceOutcome.NoSink] instead: sending again cannot change that, so the daemon escalates at
+ * once. The retry and the escalation need the daemon's timer service to fire: under
  * [TimerService.NOOP], which fires nothing, a failed announce is neither sent again nor escalated.
  */
 fun interface GateOpenSink {
@@ -64,8 +66,10 @@ sealed interface AnnounceOutcome {
    * wired sink maps its per-recipient delivery report to it — and journaled as-is. */
   data class Announced(val summary: String) : AnnounceOutcome
 
-  /** No sink is wired: nothing was announced. The gate is still marked, so the arm stays inert and
-   * fires at most once — the notice reaches an operator only once a real sink is wired. */
+  /** The sink has nowhere to announce to: it is the default [NoOpGateOpenSink], or a sink wired
+   * with no recipient. Nothing was announced. The gate is still marked, so the arm fires at most
+   * once, and the daemon escalates it, since the gate waits for an approval no operator was asked
+   * for. The notice reaches an operator only once a sink with a recipient is wired. */
   object NoSink : AnnounceOutcome
 
   /** The sink could not deliver; [detail] is journaled. The daemon sends the signal again later,
@@ -75,8 +79,9 @@ sealed interface AnnounceOutcome {
 }
 
 /**
- * The default [GateOpenSink]: announces nothing, reports [AnnounceOutcome.NoSink]. Every in-tree
- * daemon runs with this, so a ceremony gate is marked announced and never re-announced, keeping the
- * notify arm inert until the deployment wires a sink that reaches an operator.
+ * The default [GateOpenSink]: announces nothing and reports [AnnounceOutcome.NoSink]. A daemon runs
+ * with this until its deployment wires a sink that reaches an operator. Under a ceremony auth the
+ * daemon marks each gate it opens as announced, so the gate is not announced again, and escalates
+ * it, since no operator was asked for the approval the gate waits on.
  */
 val NoOpGateOpenSink = GateOpenSink { AnnounceOutcome.NoSink }

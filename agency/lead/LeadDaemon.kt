@@ -86,10 +86,11 @@ class LeadDaemon(
   private val timers: TimerService,
   private val faults: FaultInjector = FaultInjector.NONE,
   /** Where a ceremony gate-open is announced so an operator can authorize it ([GateOpenSink]).
-   * Defaults to [NoOpGateOpenSink]: an un-wired daemon marks the gate announced (so the arm fires
-   * at most once) but reaches no operator — a real sink, and the recipients/relay it needs, are
-   * the deployment's wiring. Under a non-ceremony auth no nonce is minted, so the notify arm never
-   * fires and this is never consulted, exactly as the mint is inert under [LeadAuth.DENY_ALL]. */
+   * Defaults to [NoOpGateOpenSink], which reaches no operator: a real sink, and the recipients and
+   * relay it needs, are the deployment's wiring. A daemon whose sink reports
+   * [AnnounceOutcome.NoSink] marks the gate announced, so the arm fires at most once, and escalates
+   * it, since the gate then waits for an approval no operator was asked for. Under a non-ceremony
+   * auth no nonce is minted, so this is consulted only for a nonce the journal already holds. */
   private val gateOpenSink: GateOpenSink = NoOpGateOpenSink,
   private val dedupEffects: Boolean = true,
   private val capabilityDesc: String = "scripted/none",
@@ -960,10 +961,12 @@ class LeadDaemon(
    * come to arm it. The arm calls the sink again only when that timer fires, so a failing sink is
    * called once per attempt, never once per pass, with [ANNOUNCE_RETRY_DELAYS_MS] between
    * attempts. When the last of [MAX_ANNOUNCE_ATTEMPTS] attempts fails, the announce is escalated
-   * once and its marker is final. These bounds count attempts whose marker landed: a crash between
-   * an attempt and its marker sends that attempt again on restart, and on the last attempt it
-   * escalates again. The escalation comes before the marker because the other order loses it in
-   * that crash.
+   * once and its marker is final. An announce no sink made ([AnnounceOutcome.NoSink]) is escalated
+   * at once, and its marker is final: no operator was asked for the approval the gate waits on.
+   * These bounds count attempts whose marker landed: a crash between an attempt and its marker
+   * sends that attempt again on restart, so an escalation that landed before the crash can land a
+   * second time. Each escalation comes before its marker because the other order loses it in that
+   * crash.
    *
    * The artifact the operator reads is resolved from the gate's lead-owned bound copy first (a
    * [payloadDigest] match verified). An UNRESOLVED artifact — no bound path in the journal, the
@@ -1008,14 +1011,26 @@ class LeadDaemon(
     val sinkFailure =
       if (resolved is ArtifactResolution.Resolved) outcome as? AnnounceOutcome.Failed else null
     val retry = sinkFailure != null && attempt < MAX_ANNOUNCE_ATTEMPTS
-    if (sinkFailure != null && !retry) {
-      // The detail is the sink's text, so it is cut short: the full text would push the rest of the
-      // reason past the escalation's own bound. The marker keeps the detail up to that bound.
-      escalate(
-        "gate-open notify failed for $gateId ($gateKind) after $attempt attempts: " +
-          "${sinkFailure.detail.take(200)} — gate is open and blocking, operator not notified"
-      )
-    }
+    // An outcome that leaves the gate unannounced for good is escalated: here, or above for an
+    // unresolved artifact. The `when` is exhaustive, so an outcome added later must say whether it
+    // is escalated.
+    val escalation =
+      when (outcome) {
+        is AnnounceOutcome.Announced -> null
+        AnnounceOutcome.NoSink ->
+          "gate-open notify had no sink for $gateId ($gateKind) — gate is open and blocking, " +
+            "operator not notified"
+        // The detail is the sink's text, so it is cut short: the full text would push the rest of
+        // the reason past the escalation's own bound. The marker keeps the detail up to that bound.
+        is AnnounceOutcome.Failed ->
+          if (sinkFailure != null && !retry) {
+            "gate-open notify failed for $gateId ($gateKind) after $attempt attempts: " +
+              "${sinkFailure.detail.take(200)} — gate is open and blocking, operator not notified"
+          } else {
+            null
+          }
+      }
+    if (escalation != null) escalate(escalation)
     faults.at("after-gate-announced")
     store.append(
       LeadKinds.GATE_OPEN_NOTIFIED,
