@@ -1,5 +1,8 @@
 package com.geekinasuit.agency.shared.journal
 
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonUnquotedLiteral
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -77,6 +80,68 @@ class FoldTest {
       state = fold(store.readAll())
       assertTrue(state.pendingTimers.isEmpty())
       assertTrue(state.undeliveredMail.isEmpty())
+    }
+  }
+
+  @Test
+  @OptIn(ExperimentalSerializationApi::class)
+  fun anEntryTheFoldCannotReadFailsItNamingTheEntryButNotItsText() {
+    // Each payload holds the marker Qx7, which no refusal's own text contains. An unquoted literal
+    // is stored as its raw text, so the last payload is stored as {"id":Qx7 marker}, which is not
+    // JSON.
+    val cases: List<Triple<String, JsonObject, String>> =
+      listOf(
+        Triple(
+          "effect-done",
+          buildJsonObject {
+            put("key", "k1")
+            put("attempt", "Qx7")
+          },
+          "payload field 'attempt' is not an integer",
+        ),
+        Triple(
+          "mailbox-delivered",
+          buildJsonObject { put("appendSeq", "Qx7") },
+          "payload field 'appendSeq' is not an integer",
+        ),
+        Triple(
+          "timer-fired",
+          buildJsonObject { put("id", buildJsonObject { put("Qx7", 1) }) },
+          "payload field 'id' is missing or not a JSON scalar",
+        ),
+        Triple(
+          "timer-fired",
+          buildJsonObject { put("id", JsonUnquotedLiteral("Qx7 marker")) },
+          "payload is not valid JSON",
+        ),
+      )
+    val mismatches =
+      cases.mapNotNull { (kind, payload, reason) ->
+        SqliteStore(tmp.newFolder().absolutePath, componentId = "lead").use { store ->
+          val entry = store.append(kind, payload, ORIGIN_SUBSTRATE)
+          val expected = "journal fold failed at seq=${entry.seq} kind='$kind': $reason"
+          val thrown = runCatching { fold(store.readAll()) }.exceptionOrNull()
+          if (thrown is JournalFoldException && thrown.message == expected) null
+          else "expected JournalFoldException($expected), got $thrown"
+        }
+      }
+    assertEquals(emptyList<String>(), mismatches)
+  }
+
+  @Test
+  fun aLongThatOpensAQuoteAndEndsInsideItsDigitsIsRefusedNamingTheField() {
+    // The lexer behind JsonPrimitive.long reads past the end of "1 looking for the closing quote,
+    // and throws StringIndexOutOfBoundsException rather than IllegalArgumentException.
+    SqliteStore(tmp.newFolder().absolutePath, componentId = "lead").use { store ->
+      val payload = buildJsonObject { put("appendSeq", "\"1") }
+      val entry = store.append("mailbox-delivered", payload, ORIGIN_SUBSTRATE)
+      val thrown = runCatching { fold(store.readAll()) }.exceptionOrNull()
+      assertTrue("expected a JournalFoldException, got $thrown", thrown is JournalFoldException)
+      assertEquals(
+        "journal fold failed at seq=${entry.seq} kind='mailbox-delivered': " +
+          "payload field 'appendSeq' is not an integer",
+        thrown!!.message,
+      )
     }
   }
 }

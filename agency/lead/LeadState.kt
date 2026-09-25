@@ -13,11 +13,11 @@ import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
 import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
-import kotlinx.serialization.json.Json
+import com.geekinasuit.agency.shared.journal.foldFaultMessage
+import com.geekinasuit.agency.shared.journal.payloadObject
+import com.geekinasuit.agency.shared.journal.requireContract
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Lead-chain entry kinds and the lead fold.
@@ -202,9 +202,11 @@ data class IssuedNonce(
   val issuedSeq: Long,
 ) {
   init {
-    require(nonce.isNotBlank()) { "an issued nonce requires a non-blank value" }
-    require(gateId.isNotBlank()) { "an issued nonce requires a non-blank gateId" }
-    require(payloadDigest.isNotBlank()) { "an issued nonce requires a non-blank payloadDigest" }
+    requireContract(nonce.isNotBlank()) { "an issued nonce requires a non-blank value" }
+    requireContract(gateId.isNotBlank()) { "an issued nonce requires a non-blank gateId" }
+    requireContract(payloadDigest.isNotBlank()) {
+      "an issued nonce requires a non-blank payloadDigest"
+    }
   }
 }
 
@@ -224,9 +226,13 @@ data class VerifiedApproval(
   val seq: Long,
 ) {
   init {
-    require(principalId.isNotBlank()) { "a verified approval requires a non-blank principalId" }
-    require(nonce.isNotBlank()) { "a verified approval requires a non-blank nonce" }
-    require(payloadDigest.isNotBlank()) { "a verified approval requires a non-blank payloadDigest" }
+    requireContract(principalId.isNotBlank()) {
+      "a verified approval requires a non-blank principalId"
+    }
+    requireContract(nonce.isNotBlank()) { "a verified approval requires a non-blank nonce" }
+    requireContract(payloadDigest.isNotBlank()) {
+      "a verified approval requires a non-blank payloadDigest"
+    }
   }
 }
 
@@ -499,9 +505,10 @@ internal fun isClaimableTicketRef(ref: String): Boolean =
 
 /** A fold failure with its position identified — a malformed payload on a known kind
  * (field missing, wrong type) is chain corruption or payload-contract drift, and it must
- * fail CLASSIFIED (seq + kind named) rather than as an anonymous NPE boot-loop. */
+ * fail CLASSIFIED (seq + kind named) rather than as an anonymous NPE boot-loop. The message
+ * takes [foldFaultMessage]'s form, so it quotes nothing from the entry's payload. */
 class LeadFoldException(seq: Long, kind: String, cause: Throwable) :
-  RuntimeException("lead fold failed at seq=$seq kind='$kind': ${cause.message}", cause)
+  RuntimeException(foldFaultMessage("lead fold", seq, kind, cause), cause)
 
 /**
  * The lead state machine: `leadState = leadFold(entries, auth)`. Folds the SAME entry list
@@ -556,17 +563,16 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
       misOriginedEntries = (s.misOriginedEntries + (e.seq to e.kind)).takeLast(ANOMALY_TAIL)
     )
   }
-  val p = Json.parseToJsonElement(e.payloadJson).jsonObject
+  val p = payloadObject(e.payloadJson)
   return when (e.kind) {
       LeadKinds.RUN_STARTED -> s.copy(runsStarted = s.runsStarted + 1)
       LeadKinds.TICKET_CLAIMED -> {
         // The claim journals only a ref it accepts, as a JSON string, so a claim of any other came
         // from a writer other than the lead. Gate ids, task refs and effect keys are derived from
-        // the claimed ref, so such a claim is refused, not held. The field is read here and not
-        // through [str], whose message carries the field's content. This message leaves the ref
-        // out: it is untrusted text, and a fault's message can be journaled in an escalation.
+        // the claimed ref, so such a claim is refused, not held. One check covers the field's type,
+        // charset and length, and like every refusal here its message leaves the ref out.
         val ref = p["ticketRef"]
-        require(ref is JsonPrimitive && ref.isString && isClaimableTicketRef(ref.content)) {
+        requireContract(ref is JsonPrimitive && ref.isString && isClaimableTicketRef(ref.content)) {
           "claimed ticket ref is not a JSON string in the claim's charset of at most " +
             "$MAX_TICKET_REF_LEN chars"
         }
@@ -675,16 +681,20 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
           // field at all) — absent folds to null, never a fabricated 0.0. A PRESENT value
           // must be a finite, non-negative number — the write side journals only such
           // values — so anything else is payload-contract drift on a substrate-authored
-          // entry and fails CLASSIFIED: non-numeric via toDouble throwing, and NaN /
-          // Infinity / negatives (which toDouble would accept silently) via the explicit
-          // check.
+          // entry and fails CLASSIFIED: a value that is not a number by one check, and NaN /
+          // Infinity / negatives (which a number conversion accepts) by the next.
           val updated =
             pod.copy(
               resultDigest = p.str("resultDigest"),
               boundPath = p.strOrNull("boundPath"),
               costUsd =
-                p.strOrNull("costUsd")?.toDouble()?.also {
-                  require(it.isFinite() && it >= 0.0) { "costUsd '$it' is non-finite or negative" }
+                p.strOrNull("costUsd")?.let { text ->
+                  val cost = text.toDoubleOrNull()
+                  requireContract(cost != null) { "payload field 'costUsd' is not a number" }
+                  requireContract(cost.isFinite() && cost >= 0.0) {
+                    "payload field 'costUsd' is non-finite or negative"
+                  }
+                  cost
                 },
             )
           s.copy(
@@ -1036,11 +1046,11 @@ private fun foldApproval(
  * are refused for the same reason — a numeric 123 must not fold onward as the string
  * "123" — matching the strict readers the shared auth codec sets the doctrine with. */
 private fun kotlinx.serialization.json.JsonObject.str(k: String): String {
-  val el = this[k] ?: throw IllegalArgumentException("payload field '$k' is missing")
-  require(el !is kotlinx.serialization.json.JsonNull) { "payload field '$k' is null" }
-  val prim = el.jsonPrimitive
-  require(prim.isString) { "payload field '$k' must be a JSON string, got '${prim.content}'" }
-  return prim.content
+  val el = this[k]
+  requireContract(el != null) { "payload field '$k' is missing" }
+  requireContract(el !is kotlinx.serialization.json.JsonNull) { "payload field '$k' is null" }
+  requireContract(el is JsonPrimitive && el.isString) { "payload field '$k' must be a JSON string" }
+  return el.content
 }
 
 /** Optional payload field: absent and JsonNull both read as "no value" — an optional
@@ -1051,7 +1061,8 @@ private fun kotlinx.serialization.json.JsonObject.str(k: String): String {
 private fun kotlinx.serialization.json.JsonObject.strOrNull(k: String): String? {
   val el = this[k] ?: return null
   if (el is kotlinx.serialization.json.JsonNull) return null
-  return el.jsonPrimitive.content
+  requireContract(el is JsonPrimitive) { "payload field '$k' must be a JSON scalar" }
+  return el.content
 }
 
 /** Whether a notify marker says its announce will be sent again: only a JSON `true` in `retry`
