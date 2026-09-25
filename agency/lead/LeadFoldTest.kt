@@ -7,10 +7,16 @@ import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
 import com.geekinasuit.agency.shared.journal.fold
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonUnquotedLiteral
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -97,6 +103,58 @@ class LeadFoldTest {
     )
 
   // -- cells -----------------------------------------------------------------------------
+
+  @Test
+  @OptIn(ExperimentalSerializationApi::class)
+  fun aClaimTheClaimStepWouldRefuseIsRefusedByTheFold() {
+    // The claim step journals only a JSON string in its charset and within its length bound, so
+    // any other claim comes from a writer other than the lead. Gate ids, task refs and effect keys
+    // are all derived from the claimed ref, so the fold refuses such a claim rather than hold it.
+    val refused: List<Pair<String, JsonPrimitive>> =
+      listOf(
+        "a lone surrogate" to JsonPrimitive("t" + Char(0xD800)),
+        "a colon" to JsonPrimitive("plan:t1"),
+        "a slash" to JsonPrimitive("t1/x"),
+        "a space" to JsonPrimitive("t1 x"),
+        "an empty ref" to JsonPrimitive(""),
+        "one char over the length bound" to JsonPrimitive("a".repeat(129)),
+        "a number" to JsonPrimitive(90210),
+        "a boolean" to JsonPrimitive(true),
+        "a null" to JsonNull,
+        "an unquoted literal" to JsonUnquotedLiteral("t1/x"),
+      )
+    for ((label, ref) in refused) {
+      newStore().use { s ->
+        val claim =
+          s.append(
+            LeadKinds.TICKET_CLAIMED,
+            buildJsonObject { put("ticketRef", ref) },
+            ORIGIN_SUBSTRATE,
+          )
+        val e = assertThrows("$label: refused", LeadFoldException::class.java) { s.lead() }
+        assertTrue(
+          "$label: the refusal names the claim's seq and kind",
+          e.message!!.contains("seq=${claim.seq} kind='${LeadKinds.TICKET_CLAIMED}'"),
+        )
+        // A null's content is the word "null", not text its writer chose.
+        val text = if (ref is JsonNull) "" else ref.content
+        assertFalse(
+          "$label: the refusal does not repeat the ref",
+          text.isNotEmpty() && e.message!!.contains(text),
+        )
+      }
+    }
+  }
+
+  @Test
+  fun aClaimOfEveryShapeTheClaimStepAcceptsIsHeld() {
+    for (ref in listOf("Az09._-", "a".repeat(128))) {
+      newStore().use { s ->
+        s.claim(ref)
+        assertEquals("a ref of ${ref.length} chars is held", ref, s.lead().currentTicket)
+      }
+    }
+  }
 
   @Test
   fun fullTicketWalkAdvancesPhasesStepwise() {

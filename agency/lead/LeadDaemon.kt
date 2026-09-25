@@ -743,10 +743,10 @@ class LeadDaemon(
     //
     // So the id and digest a nonce is bound to here are never blank, which the fold refuses, and
     // are in the forms the lead itself writes: the id is a kind [evidenceDigest] knows and a ticket
-    // ref in the charset the claim accepts, and the digest is in the hex form the substrate records.
-    // A gate under any other id or digest came from a journal the lead did not write, or was opened
-    // for a claim that came from one, and the mint does not act on it.
-    val wellFormedTicket = lead.currentTicket?.takeIf { TICKET_REF_RE.matches(it) }
+    // ref the claim accepts, and the digest is in the hex form the substrate records. A gate under
+    // any other id or digest came from a journal the lead did not write, or was opened for a claim
+    // that came from one, and the mint does not act on it.
+    val wellFormedTicket = lead.currentTicket?.takeIf { isClaimableTicketRef(it) }
     if (leadAuth.hasApprovers && wellFormedTicket != null) {
       for (gate in lead.openGates.values) {
         if (gate.gateId != gateIdFor(gate.gateKind, wellFormedTicket)) continue
@@ -797,7 +797,7 @@ class LeadDaemon(
         // nor traverse a path — so a malformed ref is escalated visibly and NOT claimed, rather
         // than silently wedging every later plan/execute spawn against TASK_REF_RE. Returns
         // false (not true): the pass makes no progress on a bad ref instead of re-looping on it.
-        if (!TICKET_REF_RE.matches(offered) || offered.length > MAX_TICKET_REF_LEN) {
+        if (!isClaimableTicketRef(offered)) {
           escalate("ticket claim rejected: malformed ticket ref '${offered.take(80)}' (charset/length)")
           return false
         }
@@ -1776,14 +1776,6 @@ private const val MAX_COGNITION_ATTEMPTS_CEILING = 5
  * is REFUSED, never truncated (accept means durable and intact). Generous for
  * fixture traffic; the real mailbox surface revisits it with the channel model. */
 private const val MAX_ACCEPTED_MAIL_CHARS = 64_000
-
-/** Well-formed ticket refs: a ticket ref is untrusted
- * input (a fixture line today, a real ticket-index row later) that flows into task refs, gate
- * ids, and effect keys. A conservative charset — ':' and '/' excluded, so it can forge neither
- * a task namespace nor a path — plus a length bound, validated at the claim boundary, keeps a
- * malformed ref from wedging the pipeline or polluting a namespace. */
-private val TICKET_REF_RE = Regex("[A-Za-z0-9._-]+")
-private const val MAX_TICKET_REF_LEN = 128
 
 /** The form the substrate records an evidence digest in: [sha256HexBytes]'s lowercase hex. */
 private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
