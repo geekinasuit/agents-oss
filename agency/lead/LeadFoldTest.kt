@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.lead
 
+import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.JournalStore
 import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
 import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
@@ -144,6 +145,101 @@ class LeadFoldTest {
         )
       }
     }
+  }
+
+  @Test
+  @OptIn(ExperimentalSerializationApi::class)
+  fun anEntryTheLeadFoldRefusesIsNamedBySeqAndKindAndItsTextIsLeftOut() {
+    // Each refused payload holds the marker Qx7, which no refusal's own text contains. An unquoted
+    // literal is stored as its raw text: "Qx7/../x" parses as a scalar that is not a string, and
+    // "Qx7 marker" does not parse at all. The blank nonce holds no marker; it checks that a
+    // record's own check still names what it refused.
+    val cases: List<Triple<String, (JournalStore) -> JournalEntry, String>> =
+      listOf(
+        Triple(
+          "a status that is not a string",
+          { s ->
+            s.append(
+              LeadKinds.STATUS_WRITTEN,
+              buildJsonObject { put("status", JsonUnquotedLiteral("Qx7/../x")) },
+              ORIGIN_SUBSTRATE,
+            )
+          },
+          "payload field 'status' must be a JSON string",
+        ),
+        Triple(
+          "a status that is an object",
+          { s ->
+            s.append(
+              LeadKinds.STATUS_WRITTEN,
+              buildJsonObject { put("status", buildJsonObject { put("Qx7", 1) }) },
+              ORIGIN_SUBSTRATE,
+            )
+          },
+          "payload field 'status' must be a JSON string",
+        ),
+        Triple(
+          "a payload that does not parse",
+          { s ->
+            s.append(
+              LeadKinds.STATUS_WRITTEN,
+              buildJsonObject { put("status", JsonUnquotedLiteral("Qx7 marker")) },
+              ORIGIN_SUBSTRATE,
+            )
+          },
+          "payload is not valid JSON",
+        ),
+        Triple(
+          "a cost that is not a number",
+          { s ->
+            s.podSpawned("p1", "plan:t1")
+            s.append(
+              LeadKinds.POD_RESULT_RECORDED,
+              buildJsonObject {
+                put("podId", "p1")
+                put("resultDigest", "aa11")
+                put("costUsd", "Qx7")
+              },
+              ORIGIN_SUBSTRATE,
+            )
+          },
+          "payload field 'costUsd' is not a number",
+        ),
+        Triple(
+          "an issued nonce with a blank value",
+          { s ->
+            s.append(
+              LeadKinds.NONCE_ISSUED,
+              buildJsonObject {
+                put("nonce", " ")
+                put("gateId", "g1")
+                put("payloadDigest", "aa11")
+              },
+              ORIGIN_SUBSTRATE,
+            )
+          },
+          "an issued nonce requires a non-blank value",
+        ),
+      )
+    val mismatches =
+      cases.mapNotNull { (label, plant, reason) ->
+        newStore().use { s ->
+          val entry = plant(s)
+          val expected = "lead fold failed at seq=${entry.seq} kind='${entry.kind}': $reason"
+          val thrown = runCatching { s.lead() }.exceptionOrNull()
+          if (thrown is LeadFoldException && thrown.message == expected) null
+          else "$label: expected LeadFoldException($expected), got $thrown"
+        }
+      }
+    assertEquals(emptyList<String>(), mismatches)
+  }
+
+  @Test
+  fun aLeadFoldExceptionShowsAnyOtherCauseByItsClassNameAlone() {
+    assertEquals(
+      "lead fold failed at seq=1 kind='k': java.lang.NumberFormatException",
+      LeadFoldException(1, "k", NumberFormatException("For input string: \"Qx7\"")).message,
+    )
   }
 
   @Test

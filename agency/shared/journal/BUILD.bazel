@@ -20,6 +20,7 @@ kt_jvm_library(
         "EffectReceiver.kt",
         "Envelope.kt",
         "Fold.kt",
+        "FoldFault.kt",
         "Journal.kt",
         "SqliteStore.kt",
         "Upcast.kt",
@@ -102,6 +103,19 @@ kt_jvm_test(
     srcs = ["FoldTest.kt"],
     test_class = "com.geekinasuit.agency.shared.journal.FoldTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "fold_fault_test",
+    size = "small",
+    srcs = ["FoldFaultTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.journal.FoldFaultTest",
     deps = [
         ":journal",
         "@maven//:junit_junit",

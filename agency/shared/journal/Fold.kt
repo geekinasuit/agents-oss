@@ -1,9 +1,7 @@
 package com.geekinasuit.agency.shared.journal
 
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.long
 
 /**
@@ -61,36 +59,69 @@ data class JournalState(
 
 const val KIND_GATE_RELEASED = "gate-released"
 
+/** Folds [entries] in order. An entry the fold cannot read fails the fold with a
+ * [JournalFoldException] that names it. */
 fun fold(entries: List<JournalEntry>): JournalState {
   var s = JournalState()
   for (e in entries) {
-    val p = Json.parseToJsonElement(e.payloadJson).jsonObject
-    s = when (e.kind) {
-      KIND_GENESIS -> s
-      KIND_KEY_EPOCH_STARTED -> s.copy(currentKeyEpoch = e.keyEpoch)
-      "effect-intent" -> s.copy(intents = s.intents + (e.idempotencyKey!! to p))
-      "effect-done" -> s.copy(doneKeys = s.doneKeys + (p.str("key") to p.int("attempt")))
-      "timer-armed" ->
-        s.copy(
-          armedTimers =
-            s.armedTimers + (p.str("id") to ArmedTimer(p.str("id"), p.lng("fireAtEpochMs"), p.str("action")))
-        )
-      "timer-fired" -> s.copy(firedTimers = s.firedTimers + p.str("id"))
-      "session-started" -> s.copy(sessions = s.sessions + p.str("sessionId"))
-      "mailbox-appended" -> s.copy(mailboxAppended = s.mailboxAppended + (e.seq to p.str("message")))
-      "mailbox-delivered" -> s.copy(mailboxDelivered = s.mailboxDelivered + p.lng("appendSeq"))
-      KIND_GATE_RELEASED ->
-        if (e.origin == ORIGIN_AUTH_LAYER) s.copy(gateReleases = s.gateReleases + p.str("gateId"))
-        else s.copy(rejectedGateReleases = s.rejectedGateReleases + (e.seq to p.str("gateId")))
-      "note" -> s
-      else -> s // unknown kinds no-op — legal ONLY under the state-bump rule above
-    }
+    s =
+      try {
+        foldOne(s, e)
+      } catch (x: Exception) {
+        throw JournalFoldException(e.seq, e.kind, x)
+      }
   }
   return s
 }
 
-private fun JsonObject.str(k: String): String = this[k]!!.jsonPrimitive.content
+private fun foldOne(s: JournalState, e: JournalEntry): JournalState {
+  val p = payloadObject(e.payloadJson)
+  return when (e.kind) {
+    KIND_GENESIS -> s
+    KIND_KEY_EPOCH_STARTED -> s.copy(currentKeyEpoch = e.keyEpoch)
+    "effect-intent" -> {
+      val key = e.idempotencyKey
+      requireContract(key != null) { "an effect-intent entry carries no idempotency key" }
+      s.copy(intents = s.intents + (key to p))
+    }
+    "effect-done" -> s.copy(doneKeys = s.doneKeys + (p.str("key") to p.int("attempt")))
+    "timer-armed" ->
+      s.copy(
+        armedTimers =
+          s.armedTimers + (p.str("id") to ArmedTimer(p.str("id"), p.lng("fireAtEpochMs"), p.str("action")))
+      )
+    "timer-fired" -> s.copy(firedTimers = s.firedTimers + p.str("id"))
+    "session-started" -> s.copy(sessions = s.sessions + p.str("sessionId"))
+    "mailbox-appended" -> s.copy(mailboxAppended = s.mailboxAppended + (e.seq to p.str("message")))
+    "mailbox-delivered" -> s.copy(mailboxDelivered = s.mailboxDelivered + p.lng("appendSeq"))
+    KIND_GATE_RELEASED ->
+      if (e.origin == ORIGIN_AUTH_LAYER) s.copy(gateReleases = s.gateReleases + p.str("gateId"))
+      else s.copy(rejectedGateReleases = s.rejectedGateReleases + (e.seq to p.str("gateId")))
+    "note" -> s
+    else -> s // unknown kinds no-op — legal ONLY under the state-bump rule above
+  }
+}
 
-private fun JsonObject.int(k: String): Int = this[k]!!.jsonPrimitive.content.toInt()
+// The readers take any scalar's text, an integer's text, and a JSON long. A field they cannot read
+// is refused with a message that names the field and not its content.
+private fun JsonObject.scalar(k: String): JsonPrimitive =
+  this[k] as? JsonPrimitive
+    ?: throw PayloadContractException("payload field '$k' is missing or not a JSON scalar")
 
-private fun JsonObject.lng(k: String): Long = this[k]!!.jsonPrimitive.long
+private fun JsonObject.str(k: String): String = scalar(k).content
+
+private fun JsonObject.int(k: String): Int =
+  scalar(k).content.toIntOrNull()
+    ?: throw PayloadContractException("payload field '$k' is not an integer")
+
+private fun JsonObject.lng(k: String): Long {
+  val field = scalar(k)
+  return try {
+    field.long
+  } catch (_: RuntimeException) {
+    // .long only parses the field's text, and its lexer throws more than IllegalArgumentException
+    // for text it cannot read (a quote that never closes, for one), so any failure means the field
+    // is not an integer.
+    throw PayloadContractException("payload field '$k' is not an integer")
+  }
+}

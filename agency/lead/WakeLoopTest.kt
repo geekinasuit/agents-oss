@@ -9,6 +9,7 @@ import com.geekinasuit.agency.shared.journal.ArmedTimer
 import com.geekinasuit.agency.shared.journal.ChainBrokenException
 import com.geekinasuit.agency.shared.journal.EffectReceiver
 import com.geekinasuit.agency.shared.journal.JournalEntry
+import com.geekinasuit.agency.shared.journal.JournalFoldException
 import com.geekinasuit.agency.shared.journal.JournalStore
 import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
 import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
@@ -16,8 +17,13 @@ import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
 import java.sql.DriverManager
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonUnquotedLiteral
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
@@ -782,6 +788,97 @@ class WakeLoopTest {
     assertEquals("the lead appended nothing to the journal", rows, store.readRaw().size)
     store.close()
   }
+
+  // A status written as an unquoted literal is stored as its raw text. "Qx7 marker" makes a payload
+  // that is not JSON, which the shared fold refuses; "Qx7/../x" makes one that parses with a status
+  // that is not a string, which only the lead fold refuses. The marker Qx7 is in no refusal's text.
+  @OptIn(ExperimentalSerializationApi::class)
+  private fun JournalStore.statusWrittenAsLiteral(literal: String): JournalEntry =
+    append(
+      LeadKinds.STATUS_WRITTEN,
+      buildJsonObject { put("status", JsonUnquotedLiteral(literal)) },
+      ORIGIN_SUBSTRATE,
+    )
+
+  @Test
+  fun aJournalHoldingAPayloadThatDoesNotParseStopsTheLoopNamingTheEntry() {
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val planted = store.statusWrittenAsLiteral("Qx7 marker")
+    val rows = store.readRaw().size
+    val thrown = runLoopUntilItStops(adoptingDaemon(dir, store))
+    assertTrue("the shared fold's refusal propagated, got $thrown", thrown is JournalFoldException)
+    assertEquals(
+      "journal fold failed at seq=${planted.seq} kind='status-written': payload is not valid JSON",
+      thrown!!.message,
+    )
+    assertEquals("the lead appended nothing to the journal", rows, store.readRaw().size)
+    store.close()
+  }
+
+  @Test
+  fun aWakeFaultOnAPayloadThatDoesNotParseIsJournaledNamingTheEntryButNotItsText() {
+    val rig = Rig(tmp.newFolder(), ticket = null)
+    val (planted, thrown) = wakeFaultOn(rig) { it.statusWrittenAsLiteral("Qx7 marker") }
+    assertTrue(
+      "the shared fold's refusal stopped the loop, got $thrown",
+      thrown is JournalFoldException,
+    )
+    val reasons = escalationReasons(rig.store)
+    val expected =
+      "wake-fault on MailInject: journal fold failed at seq=${planted.seq} " +
+        "kind='status-written': payload is not valid JSON — stopping loop for restart"
+    assertTrue("the fault is journaled, naming the entry, got $reasons", expected in reasons)
+    assertTrue(
+      "no escalation repeats the payload's text, got $reasons",
+      reasons.none { "Qx7" in it },
+    )
+    rig.store.close()
+  }
+
+  @Test
+  fun aWakeFaultOnAFieldTheLeadFoldRefusesIsJournaledNamingTheEntryButNotItsText() {
+    val rig = Rig(tmp.newFolder(), ticket = null)
+    val (planted, thrown) = wakeFaultOn(rig) { it.statusWrittenAsLiteral("Qx7/../x") }
+    assertTrue("the lead fold's refusal stopped the loop, got $thrown", thrown is LeadFoldException)
+    val reasons = escalationReasons(rig.store)
+    val expected =
+      "wake-fault on MailInject: lead fold failed at seq=${planted.seq} kind='status-written': " +
+        "payload field 'status' must be a JSON string — stopping loop for restart"
+    assertTrue("the fault is journaled, naming the entry, got $reasons", expected in reasons)
+    assertTrue("no escalation repeats the field's text, got $reasons", reasons.none { "Qx7" in it })
+    rig.store.close()
+  }
+
+  /**
+   * Runs [rig]'s loop until its adopt wake is done and the loop waits for the next wake, appends
+   * the entry [plant] writes, wakes the loop with mail, and returns that entry with what the loop
+   * threw when it stopped. Waiting for the loop to go idle keeps the adopt wake from reading the
+   * entry.
+   */
+  private fun wakeFaultOn(
+    rig: Rig,
+    plant: (JournalStore) -> JournalEntry,
+  ): Pair<JournalEntry, Throwable?> {
+    val thrown = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+    val loop = Thread { try { rig.daemon.runLoop() } catch (t: Throwable) { thrown.set(t) } }
+    loop.start()
+    awaitTrue("the loop waits for a wake after adopt") {
+      rig.counting.calls == 1 &&
+        loop.state == Thread.State.WAITING &&
+        loop.stackTrace.any { it.methodName == "take" }
+    }
+    val planted = plant(rig.store)
+    rig.daemon.injectMail("wake")
+    loop.join(5_000)
+    assertTrue("the loop terminated rather than hanging", !loop.isAlive)
+    return planted to thrown.get()
+  }
+
+  private fun escalationReasons(store: JournalStore): List<String> =
+    store.readAll()
+      .filter { it.kind == LeadKinds.ESCALATED }
+      .map { Json.parseToJsonElement(it.payloadJson).jsonObject["reason"]!!.jsonPrimitive.content }
 
   @Test
   fun unmeasuredPodCostJournalsAsAbsentAndFoldsAsNullNotZero() {
