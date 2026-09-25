@@ -71,7 +71,7 @@ class ReconnectingPublisherTest {
     }
   }
 
-  private fun publisher(connections: Connections, auth: ReconnectingPublisher.Auth) =
+  private fun publisher(connections: Connections, auth: RelayAuth) =
     ReconnectingPublisher(connections::next, connectTimeout, auth)
 
   /** An event the transport carries without checking it. [n] sets its id, which an OK must echo. */
@@ -128,7 +128,7 @@ class ReconnectingPublisherTest {
         }
         second.serve { session -> answer(session, event(2), accepted = true) }
         val connections = Connections(first.url, second.url)
-        val publisher = publisher(connections, ReconnectingPublisher.Auth.None)
+        val publisher = publisher(connections, RelayAuth.None)
 
         val failed = publisher.publish(event(1), publishTimeout)
         assertTrue("expected Failed, got $failed", failed is PublishResult.Failed)
@@ -158,7 +158,7 @@ class ReconnectingPublisherTest {
         }
         second.serve { session -> answer(session, event(2), accepted = true) }
         val connections = Connections(first.url, second.url)
-        val publisher = publisher(connections, ReconnectingPublisher.Auth.None)
+        val publisher = publisher(connections, RelayAuth.None)
 
         assertEquals(PublishResult.Accepted, publisher.publish(event(1), publishTimeout))
         publishReturned.countDown()
@@ -191,7 +191,7 @@ class ReconnectingPublisherTest {
         }
         second.serve { session -> answer(session, event(2), accepted = true) }
         val connections = Connections(first.url, second.url)
-        val publisher = publisher(connections, ReconnectingPublisher.Auth.None)
+        val publisher = publisher(connections, RelayAuth.None)
 
         val failed = publisher.publish(event(1), Duration.ofMillis(500))
         assertTrue("expected Failed, got $failed", failed is PublishResult.Failed)
@@ -218,7 +218,7 @@ class ReconnectingPublisherTest {
         answer(session, event(3), accepted = true)
       }
       val connections = Connections(relay.url)
-      val publisher = publisher(connections, ReconnectingPublisher.Auth.None)
+      val publisher = publisher(connections, RelayAuth.None)
 
       assertEquals(PublishResult.Accepted, publisher.publish(event(1), publishTimeout))
       assertEquals(
@@ -239,7 +239,7 @@ class ReconnectingPublisherTest {
     FakeRelay().use { relay ->
       relay.serve { session -> answer(session, event(2), accepted = true) }
       val connections = Connections("ws://127.0.0.1:$refused", relay.url)
-      val publisher = publisher(connections, ReconnectingPublisher.Auth.None)
+      val publisher = publisher(connections, RelayAuth.None)
 
       val failed = publisher.publish(event(1), publishTimeout)
       assertTrue("expected Failed, got $failed", failed is PublishResult.Failed)
@@ -260,7 +260,7 @@ class ReconnectingPublisherTest {
       ReconnectingPublisher(
         { throw IllegalStateException("key file held 0123abcd") },
         connectTimeout,
-        ReconnectingPublisher.Auth.None,
+        RelayAuth.None,
       )
     assertEquals(
       PublishResult.Failed("could not create a connection: IllegalStateException"),
@@ -278,7 +278,7 @@ class ReconnectingPublisherTest {
       relay.serve { session -> seen.put(session.nextClientText(10_000) ?: NOTHING) }
       val connections = Connections(relay.url)
       val publisher =
-        publisher(connections, ReconnectingPublisher.Auth.Nip42(Duration.ofMillis(400)))
+        publisher(connections, RelayAuth.Nip42(Duration.ofMillis(400)))
 
       assertEquals(
         PublishResult.Failed("could not authenticate: no AUTH challenge within deadline"),
@@ -301,7 +301,7 @@ class ReconnectingPublisherTest {
         ReconnectingPublisher(
           { RelayConnection(shared) },
           connectTimeout,
-          ReconnectingPublisher.Auth.Nip42(Duration.ofMillis(400)),
+          RelayAuth.Nip42(Duration.ofMillis(400)),
         )
       // The first connection gets no challenge, fails to authenticate, and is closed.
       relay.serve { session -> session.nextClientText(3_000) }
@@ -339,7 +339,7 @@ class ReconnectingPublisherTest {
         seen.put(session.nextClientText(10_000) ?: NOTHING)
       }
       val connections = Connections(relay.url)
-      val publisher = publisher(connections, ReconnectingPublisher.Auth.None)
+      val publisher = publisher(connections, RelayAuth.None)
 
       assertEquals(PublishResult.Accepted, publisher.publish(event(1), publishTimeout))
       publisher.close()
@@ -368,7 +368,7 @@ class ReconnectingPublisherTest {
         openMillis.put((System.nanoTime() - seenAt) / 1_000_000)
       }
       val connections = Connections(relay.url)
-      val publisher = publisher(connections, ReconnectingPublisher.Auth.None)
+      val publisher = publisher(connections, RelayAuth.None)
       val results = LinkedBlockingQueue<PublishResult>()
       val publishing = Thread { results.put(publisher.publish(event(1), Duration.ofSeconds(2))) }
       publishing.start()
@@ -411,7 +411,7 @@ class ReconnectingPublisherTest {
             connections.next()
           },
           connectTimeout,
-          ReconnectingPublisher.Auth.None,
+          RelayAuth.None,
         )
       val results = LinkedBlockingQueue<PublishResult>()
       val publishing = Thread { results.put(publisher.publish(event(1), publishTimeout)) }
@@ -456,7 +456,7 @@ class ReconnectingPublisherTest {
           answer(session, event(3), accepted = true)
         }
         val connections = Connections(first.url, second.url)
-        val publisher = publisher(connections, ReconnectingPublisher.Auth.Nip42(authTimeout))
+        val publisher = publisher(connections, RelayAuth.Nip42(authTimeout))
 
         assertEquals(PublishResult.Accepted, publisher.publish(event(1), publishTimeout))
         publishReturned.countDown()
@@ -485,7 +485,7 @@ class ReconnectingPublisherTest {
         seen.put(session.nextClientText(10_000) ?: NOTHING)
       }
       val connections = Connections(relay.url)
-      val publisher = publisher(connections, ReconnectingPublisher.Auth.Nip42(authTimeout))
+      val publisher = publisher(connections, RelayAuth.Nip42(authTimeout))
 
       assertEquals(
         PublishResult.Failed("relay refused authentication: restricted: not on the list"),
@@ -516,7 +516,7 @@ class ReconnectingPublisherTest {
           val frame = session.nextClientText(3_000) ?: error("no EVENT from the client")
           session.sendText("[\"OK\",\"${clientEventId(frame)}\",true,\"\"]")
         }
-        val publisher = publisher(Connections(first.url, second.url), ReconnectingPublisher.Auth.None)
+        val publisher = publisher(Connections(first.url, second.url), RelayAuth.None)
         val notifier =
           RelayNotifier(
             SecretKeyHex.ofHexString("0000000000000000000000000000000000000000000000000000000000000001"),

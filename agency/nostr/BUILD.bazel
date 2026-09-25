@@ -197,6 +197,12 @@ kt_jvm_library(
         # The publisher that replaces a connection it can no longer trust before its next publish,
         # so one fault does not fail every later publish. It opens connections, so it lives here.
         "ReconnectingPublisher.kt",
+        # The subscription that sends its REQ again on a new connection after the one it ran on
+        # fails, so a consumer keeps receiving past a relay close. It opens connections too.
+        "ReconnectingSubscription.kt",
+        # How a new connection authenticates, and the open-and-authenticate step the publisher and
+        # the subscription share.
+        "RelayAuth.kt",
         # The gate-open notifier (step 4): fans the notice codec out over a recipient set and
         # publishes each via RelayConnection. Lives here, with the target that dials, because it
         # publishes; the codec itself is hermetic and stays in :nostr.
@@ -373,6 +379,26 @@ kt_jvm_test(
     srcs = ["ReconnectingPublisherTest.kt"],
     associates = [":relay"],
     test_class = "com.geekinasuit.agency.nostr.ReconnectingPublisherTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":fake_relay",
+        ":nostr",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# The reconnecting subscription against fake relays: the REQ it sends again on a new connection,
+# messages for another subscription id, the delay before each attempt and its reset, what it reports
+# when it cannot connect or authenticate, and close. The NIP-42 cells sign, so it needs the native
+# runtime-only, and reads JSON directly to pull the AUTH event's id out of a client frame. associates
+# (not deps) on :relay so the cells can check that a closed connection's key is zeroed.
+kt_jvm_test(
+    name = "reconnecting_subscription_test",
+    size = "small",
+    srcs = ["ReconnectingSubscriptionTest.kt"],
+    associates = [":relay"],
+    test_class = "com.geekinasuit.agency.nostr.ReconnectingSubscriptionTest",
     runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
     deps = [
         ":fake_relay",
