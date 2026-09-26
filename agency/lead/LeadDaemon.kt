@@ -807,12 +807,33 @@ class LeadDaemon(
     if (leadAuth.hasApprovers && wellFormedTicket != null) {
       for (gate in lead.openGates.values) {
         if (gate.gateId != gateIdFor(gate.gateKind, wellFormedTicket)) continue
-        val everIssued =
-          lead.issuedNonces.values.any {
-            it.gateId == gate.gateId && it.payloadDigest == gate.payloadDigest
-          }
-        if (everIssued || gate.payloadDigest != evidenceDigest(gate.gateKind, lead)) continue
+        if (mintRefusal(gate, lead) != null) continue
         mintNonce(gate.gateId, gate.payloadDigest)
+        return true
+      }
+
+      // A gate the mint refuses stays open, with nothing to release it under this auth unless it
+      // has a usable nonce or was released on its digest, and nothing announces it. Each stage of
+      // the current ticket waits on the gate under the id the gate-open derives for its kind, and
+      // the gate-open skips an id already open, so a gate under that id blocks that stage whatever
+      // kind it records. It is escalated once its refusal is settled: at once when its recorded
+      // kind is not the kind its id names, which the mint never issues a nonce for, and otherwise
+      // once evidence is recorded for its kind, which until then may yet be its digest. It is
+      // escalated once per gate and digest: the escalation names both, and the fold keeps them
+      // ([LeadState.escalatedStalls]), so no later pass or restart escalates it again. The one
+      // append is the escalation and its record, so no crash can fall between them.
+      for (kind in GateKinds.ALL) {
+        val gate = lead.openGates[gateIdFor(kind, wellFormedTicket)] ?: continue
+        if (lead.openNonceFor(gate) != null || lead.approvedOnCurrentDigest(gate.gateId)) continue
+        if (gate.payloadDigest in lead.escalatedStalls[gate.gateId].orEmpty()) continue
+        val refusal =
+          if (gate.gateKind != kind) {
+            "its recorded kind of ${gate.gateKind.length} chars is not the kind its id names"
+          } else {
+            if (recordedEvidence(kind, lead) == null) continue
+            mintRefusal(gate, lead) ?: continue
+          }
+        escalateStall(gate, refusal)
         return true
       }
     }
@@ -975,18 +996,24 @@ class LeadDaemon(
     return false
   }
 
-  /** The digest the substrate recorded as the evidence a gate of [gateKind] binds to: the plan
-   * artifact's for the plan gate, the commit manifest's for the commit gate, none for any other
-   * kind. A gate opens only on this digest, and a gate-open's nonce is minted only while the
-   * gate's digest still equals it. A recorded digest counts only in the form the substrate records
-   * one, and any other counts as none: a digest in another form was not recorded by the substrate,
-   * and a nonce bound to a blank one would make every later fold of the journal fail. */
-  private fun evidenceDigest(gateKind: String, lead: LeadState): String? =
+  /** The digest recorded as the evidence a gate of [gateKind] binds to, in whatever form the
+   * journal holds it: the plan artifact's for the plan gate, the commit manifest's for the commit
+   * gate, none for any other kind or while none is recorded. */
+  private fun recordedEvidence(gateKind: String, lead: LeadState): String? =
     when (gateKind) {
       GateKinds.PLAN_APPROVAL -> lead.planArtifactSha
       GateKinds.COMMIT_APPROVAL -> lead.commitManifestDigest
       else -> null
-    }?.takeIf { SHA256_HEX_RE.matches(it) }
+    }
+
+  /** The digest the substrate recorded as the evidence a gate of [gateKind] binds to
+   * ([recordedEvidence]). A gate opens only on this digest, and a gate-open's nonce is minted only
+   * while the gate's digest still equals it. A recorded digest counts only in the form the
+   * substrate records one, and any other counts as none: a digest in another form was not recorded
+   * by the substrate, and a nonce bound to a blank one would make every later fold of the journal
+   * fail. */
+  private fun evidenceDigest(gateKind: String, lead: LeadState): String? =
+    recordedEvidence(gateKind, lead)?.takeIf { SHA256_HEX_RE.matches(it) }
 
   /** Journal a fresh single-use nonce bound to ([gateId], [payloadDigest]), the pair the release
    * fold checks it against, and return it. */
@@ -1002,6 +1029,46 @@ class LeadDaemon(
       origin = ORIGIN_SUBSTRATE,
     )
     return nonce
+  }
+
+  /** Why the mechanical pass's mint issues [gate] no nonce, or null when it issues one. Evidence
+   * must be recorded for the gate's kind in the form the substrate records it ([evidenceDigest]),
+   * the gate's digest must be that evidence, and no nonce may have been issued on that digest
+   * before: a voided one stays withdrawn, and a spent one's release already decided the gate on
+   * that digest. A digest that fails the evidence check came from a journal the lead did not write,
+   * so the reason gives its length, never its text. */
+  private fun mintRefusal(gate: OpenGate, lead: LeadState): String? {
+    val evidence = evidenceDigest(gate.gateKind, lead)
+    return when {
+      recordedEvidence(gate.gateKind, lead) == null -> "no evidence is recorded for its kind"
+      evidence == null -> "the evidence recorded for its kind is not in the form the substrate records"
+      gate.payloadDigest != evidence ->
+        "its digest of ${gate.payloadDigest.length} chars is not the recorded evidence ${evidence.take(16)}"
+      lead.issuedNonces.values.any { it.gateId == gate.gateId && it.payloadDigest == gate.payloadDigest } ->
+        "a nonce was already issued on its digest"
+      else -> null
+    }
+  }
+
+  /** Escalate [gate] as stalled: open with no usable nonce, refused one for [refusal], and not
+   * released on its digest. The refusal is the mint's ([mintRefusal]), or the gate's recorded kind
+   * not being the kind its id names, for which the mint never issues one. The row names the gate
+   * and its digest beside the reason, the pair [LeadState.escalatedStalls] keeps. The reason quotes
+   * the gate id, which equals the one the lead derives for the claimed ticket. */
+  private fun escalateStall(gate: OpenGate, refusal: String) {
+    val reason =
+      "gate-open stalled for ${gate.gateId}: it is open with no usable nonce, and the mint issues " +
+        "none because $refusal — no operator will be asked to approve it, and no release can clear " +
+        "it under the auth in force"
+    store.append(
+      LeadKinds.ESCALATED,
+      buildJsonObject {
+        put("reason", reason.take(MAX_JOURNALED_STRING))
+        put("stalledGateId", gate.gateId)
+        put("stalledDigest", gate.payloadDigest)
+      },
+      origin = ORIGIN_SUBSTRATE,
+    )
   }
 
   /**

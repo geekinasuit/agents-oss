@@ -103,6 +103,17 @@ class LeadFoldTest {
       origin,
     )
 
+  private fun JournalStore.stallEscalated(gateId: String, digest: String) =
+    append(
+      LeadKinds.ESCALATED,
+      buildJsonObject {
+        put("reason", "gate-open stalled for $gateId")
+        put("stalledGateId", gateId)
+        put("stalledDigest", digest)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+
   // -- cells -----------------------------------------------------------------------------
 
   @Test
@@ -639,6 +650,74 @@ class LeadFoldTest {
     assertEquals(100, esc.size) // ANOMALY_TAIL
     assertEquals("e51", esc.first())
     assertEquals("e150", esc.last())
+    s.close()
+  }
+
+  @Test
+  fun anEscalationNamingAStalledGateRecordsItsGateAndDigestUntilTheTicketIsDone() {
+    val s = newStore()
+    s.claim("t1")
+    val gate = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    s.stallEscalated(gate, "aa11")
+    s.stallEscalated(gate, "")
+    // A row of another origin, or one that does not name both fields as JSON strings, records
+    // nothing: it can cost an escalation a second time, and never suppress one.
+    s.append(
+      LeadKinds.ESCALATED,
+      buildJsonObject {
+        put("reason", "forged")
+        put("stalledGateId", gate)
+        put("stalledDigest", "bb22")
+      },
+      ORIGIN_COGNITION,
+    )
+    s.append(
+      LeadKinds.ESCALATED,
+      buildJsonObject {
+        put("reason", "no digest")
+        put("stalledGateId", gate)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    s.append(
+      LeadKinds.ESCALATED,
+      buildJsonObject {
+        put("reason", "a number")
+        put("stalledGateId", gate)
+        put("stalledDigest", 7)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    s.append(
+      LeadKinds.ESCALATED,
+      buildJsonObject {
+        put("reason", "a null")
+        put("stalledGateId", gate)
+        put("stalledDigest", JsonNull)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    s.append(
+      LeadKinds.ESCALATED,
+      buildJsonObject {
+        put("reason", "an object")
+        put("stalledGateId", buildJsonObject {})
+        put("stalledDigest", "cc33")
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    var lead = s.lead()
+    assertEquals(mapOf(gate to setOf("aa11", "")), lead.escalatedStalls)
+    assertEquals(
+      "the row of another origin is kept visible",
+      listOf(LeadKinds.ESCALATED),
+      lead.misOriginedEntries.map { it.second },
+    )
+    assertEquals("each substrate row is still an escalation", 6, lead.escalations.size)
+
+    s.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
+    lead = s.lead()
+    assertTrue("the ticket's end clears the record", lead.escalatedStalls.isEmpty())
     s.close()
   }
 
