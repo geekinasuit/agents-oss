@@ -445,6 +445,7 @@ class LeadDaemon(
       timers.arm(t) { id -> queue.put(WakeEvent.TimerDue(id)) }
     }
     redrivePendingEffects(folded.shared, folded.lead)
+    faults.at("after-redrive")
     respawnActivePods(folded.lead)
     abandonOrphanedSpawnIntents(folded.lead)
     store.append(
@@ -469,10 +470,13 @@ class LeadDaemon(
    * The lead journals one intent, the current ticket's commit effect, and only once
    * [LeadState.approvedToCommit] holds. The re-drive exists to finish such an intent that a crash
    * cut short, so it asks the same question, and fires the message the commit arm builds from the
-   * lead's own state, not the one the row carries. The shared fold accepts an intent row of any
-   * origin and reads only its key, so a journal the lead did not write can hold any intent. One
-   * that fails the question is not fired, and is escalated once ([LeadState.declinedEffects]). It
-   * stays pending: once the question holds, the commit arm fires it.
+   * lead's own state, not the one the row carries. The commit arm would fire the same intent on the
+   * first wake; the re-drive fires it first, so the approved commit lands even when a later adopt
+   * step, or the first wake before the arm, faults, and a fault that persists there recurs on every
+   * start. The shared fold accepts an intent row of any origin and reads only its key, so a journal
+   * the lead did not write can hold any intent. One that fails the question is not fired, and is
+   * escalated once ([LeadState.declinedEffects]). It stays pending: once the question holds, the
+   * commit arm fires it.
    */
   private fun redrivePendingEffects(shared: JournalState, lead: LeadState) {
     val ticket = lead.currentTicket

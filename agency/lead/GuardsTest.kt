@@ -974,6 +974,36 @@ class GuardsTest {
   }
 
   @Test
+  fun aCommitIntentACrashCutShortFiresAtAdoptEvenWhenALaterAdoptStepFaults() {
+    // Adopt re-fires the approved intent before its other steps. Here the restart faults right
+    // after the re-drive, before any wake reaches the commit arm, and the effect has still fired
+    // once. The next start, without the fault, finishes t1, and the receiver has applied the effect
+    // once.
+    val commitKey = "apply-commit:t1"
+    val dir = tmp.newFolder()
+    val store = crashAfterCommitIntent(dir)
+    val fault = FaultInjector {
+      if (it == "after-redrive") throw RuntimeException("fault after the re-drive")
+    }
+    val faulting = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner(), faults = fault)
+    assertThrows(RuntimeException::class.java) { faulting.driveUntilQuiescent() }
+    assertEquals(
+      "the effect fired once before the fault",
+      1,
+      EffectReceiver(dir.absolutePath).lineCountFor(commitKey),
+    )
+
+    val f = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    assertEquals("t1 is done", listOf("t1"), f.lead.doneTickets)
+    assertEquals(
+      "and the receiver has applied it once",
+      1,
+      EffectReceiver(dir.absolutePath).lineCountFor(commitKey),
+    )
+    store.close()
+  }
+
+  @Test
   fun aReDrivenCommitIntentFiresTheLeadsOwnMessageNotTheOneItsRowCarries() {
     val dir = tmp.newFolder()
     // A journal the lead did not write holds t1's commit intent, and its message names a manifest
