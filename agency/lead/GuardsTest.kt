@@ -781,14 +781,7 @@ class GuardsTest {
     File(dir, "ticket.txt").writeText("t1\n")
     val commitKey = "apply-commit:t1"
     val foreignKey = "deploy:" + "x".repeat(40)
-    for (key in listOf(commitKey, foreignKey)) {
-      store.append(
-        "effect-intent",
-        buildJsonObject { put("message", "fire $key") },
-        ORIGIN_SUBSTRATE,
-        idempotencyKey = key,
-      )
-    }
+    for (key in listOf(commitKey, foreignKey)) journalForeignIntent(store, key, "fire $key")
     val f = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
     val effects = EffectReceiver(dir.absolutePath)
     assertEquals("t1's commit effect did not fire", 0, effects.lineCountFor(commitKey))
@@ -877,27 +870,25 @@ class GuardsTest {
     val dir = tmp.newFolder()
     // A journal the lead did not write holds t1's commit intent, and its message names a manifest
     // the lead never recorded, followed by a line break and a forged effect line. The lead walks t1
-    // to both gates approved on their evidence, and a restart's adopt re-fires the intent. The
-    // effect carries the message the lead would journal now, built from its recorded manifest; the
-    // row's message reaches the effect log in no form.
+    // to its commit gate, and the commit release is journaled with no running lead to act on it, so
+    // only a restart's adopt can re-fire the intent. The effect carries the message the lead would
+    // journal now, built from its recorded manifest; the row's message reaches the effect log in no
+    // form.
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     File(dir, "ticket.txt").writeText("t1\n")
     val commitKey = "apply-commit:t1"
-    store.append(
-      "effect-intent",
-      buildJsonObject {
-        put("message", "apply-commit ticket=t1 manifest=" + "f".repeat(64) + "\nEFFECT forged:t1 x")
-      },
-      ORIGIN_SUBSTRATE,
-      idempotencyKey = commitKey,
+    journalForeignIntent(
+      store,
+      commitKey,
+      "apply-commit ticket=t1 manifest=" + "f".repeat(64) + "\nEFFECT forged:t1 x",
     )
     val d = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner())
     val f1 = d.driveUntilQuiescent()
     d.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
     val f2 = d.driveUntilQuiescent()
     val manifest = f2.lead.commitManifestDigest!!
-    d.injectAuthRelease(gateIdFor(GateKinds.COMMIT_APPROVAL, "t1"), manifest)
-    d.driveUntilQuiescent()
+    AuthStub.appendRelease(store, gateIdFor(GateKinds.COMMIT_APPROVAL, "t1"), manifest)
+    assertFalse("the effect log is not written yet", File(dir, "effects.log").exists())
 
     val f = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
     assertEquals(
@@ -907,6 +898,131 @@ class GuardsTest {
     )
     assertEquals("and t1 is done", listOf("t1"), f.lead.doneTickets)
     store.close()
+  }
+
+  @Test
+  fun aPendingCommitIntentTheLeadDidNotJournalFiresOnceItsGatesAreApprovedWithoutARestart() {
+    val dir = tmp.newFolder()
+    // A journal the lead did not write holds t1's commit intent before the lead reaches its commit,
+    // and its message names a manifest the lead never recorded. The lead runs its wake loop, so it
+    // adopts once, and adopt declines the intent, since no gate is approved yet. The running lead
+    // then walks t1 to both gates approved on their evidence, fires the intent once with the message
+    // it would journal now, and finishes t1.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val commitKey = "apply-commit:t1"
+    journalForeignIntent(store, commitKey, "apply-commit ticket=t1 manifest=" + "f".repeat(64))
+    val effects = EffectReceiver(dir.absolutePath)
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    val commitGateId = gateIdFor(GateKinds.COMMIT_APPROVAL, "t1")
+    val d = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner())
+    val loop = Thread { d.runLoop() }
+    loop.start()
+    try {
+      val planned = awaitFold(d, "the plan gate is open") { planGateId in it.lead.openGates }
+      assertEquals("adopt declines the intent", 1, declinedReDrives(planned.lead).size)
+      d.injectAuthRelease(planGateId, planned.lead.planArtifactSha!!)
+      val executed = awaitFold(d, "the commit gate is open") { commitGateId in it.lead.openGates }
+      val manifest = executed.lead.commitManifestDigest!!
+      assertEquals("not fired before the commit gate", 0, effects.lineCountFor(commitKey))
+
+      d.injectAuthRelease(commitGateId, manifest)
+      val f = awaitFold(d, "t1 is done") { "t1" in it.lead.doneTickets }
+      assertEquals(
+        "one effect line, carrying the lead's own message",
+        listOf("EFFECT $commitKey apply-commit ticket=t1 manifest=$manifest"),
+        File(dir, "effects.log").readLines(),
+      )
+      assertTrue("no intent is pending", f.shared.pendingEffectKeys.isEmpty())
+      assertEquals("nothing more is escalated", 1, declinedReDrives(f.lead).size)
+      assertEquals(
+        "and the lead adopted once",
+        1,
+        store.readAll().count { it.kind == LeadKinds.RUN_STARTED },
+      )
+    } finally {
+      d.shutdown()
+      loop.join(10_000)
+    }
+    store.close()
+  }
+
+  @Test
+  fun aCrashAfterTheLeadFiresAPendingCommitIntentIsReFiredAndTheReceiverAppliesItOnce() {
+    val dir = tmp.newFolder()
+    // As above, but the running lead crashes after it fires the pending intent and before it
+    // journals the done entry. The restart's adopt fires the intent again, and the receiver, keyed
+    // on the intent's key, suppresses that second fire; the done entry records it, and t1 is done.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val commitKey = "apply-commit:t1"
+    journalForeignIntent(store, commitKey, "apply-commit ticket=t1 manifest=" + "f".repeat(64))
+    val effects = EffectReceiver(dir.absolutePath)
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    val commitGateId = gateIdFor(GateKinds.COMMIT_APPROVAL, "t1")
+    val crash = FaultInjector {
+      if (it == "after-commit-effect") throw RuntimeException("crash after the commit effect")
+    }
+    val d = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner(), faults = crash)
+    val thrown = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+    val loop = Thread { try { d.runLoop() } catch (t: Throwable) { thrown.set(t) } }
+    loop.start()
+    try {
+      val planned = awaitFold(d, "the plan gate is open") { planGateId in it.lead.openGates }
+      d.injectAuthRelease(planGateId, planned.lead.planArtifactSha!!)
+      val executed = awaitFold(d, "the commit gate is open") { commitGateId in it.lead.openGates }
+      d.injectAuthRelease(commitGateId, executed.lead.commitManifestDigest!!)
+      loop.join(5_000)
+    } finally {
+      if (loop.isAlive) {
+        d.shutdown()
+        loop.join(10_000)
+      }
+    }
+    assertEquals("the lead crashed", "crash after the commit effect", thrown.get()?.message)
+    assertEquals("the effect fired", 1, effects.lineCountFor(commitKey))
+    assertEquals(
+      "and its intent has no done entry",
+      listOf(commitKey),
+      d.refold().shared.pendingEffectKeys,
+    )
+
+    val f = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    assertEquals(
+      "the restart fired it again, and the receiver suppressed it",
+      listOf("Suppressed"),
+      store.readAll()
+        .filter { it.kind == "effect-done" }
+        .map { Regex("\"result\":\"(\\w+)\"").find(it.payloadJson)!!.groupValues[1] },
+    )
+    assertEquals("so it was applied once", 1, effects.lineCountFor(commitKey))
+    assertEquals("and t1 is done", listOf("t1"), f.lead.doneTickets)
+    store.close()
+  }
+
+  /** Re-folds [d]'s journal while its loop runs until [cond] holds, and returns that fold. */
+  private fun awaitFold(
+    d: LeadDaemon,
+    what: String,
+    cond: (LeadDaemon.Folded) -> Boolean,
+  ): LeadDaemon.Folded {
+    val deadline = System.currentTimeMillis() + 5_000
+    while (System.currentTimeMillis() < deadline) {
+      val f = d.refold()
+      if (cond(f)) return f
+      Thread.sleep(10)
+    }
+    throw AssertionError("timed out waiting for: $what")
+  }
+
+  /** Journals an effect intent for [key] as a writer other than the lead would. */
+  private fun journalForeignIntent(store: SqliteStore, key: String, message: String) {
+    store.append(
+      "effect-intent",
+      buildJsonObject { put("message", message) },
+      ORIGIN_SUBSTRATE,
+      idempotencyKey = key,
+    )
   }
 
   /** Walks t1 to its commit under DENY_ALL, and crashes right after the commit effect's intent is
