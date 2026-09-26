@@ -34,26 +34,39 @@ class FakeRelay : AutoCloseable {
   val url: String = "ws://127.0.0.1:$port"
 
   @Volatile private var accepted: Socket? = null
+  @Volatile private var script: Thread? = null
   private val scriptError = AtomicReference<Throwable?>(null)
 
   /** Run [block] on a dedicated thread once the client has connected and the handshake is done.
    * [block] gets a [Session] to send frames and read the client's frames. An exception it throws is
    * captured and re-raised by [assertScriptClean]. */
   fun serve(block: (Session) -> Unit) {
-    thread(isDaemon = true, name = "fake-relay-$port") {
-      try {
-        val sock = server.accept()
-        accepted = sock
-        handshake(sock)
-        block(Session(sock))
-      } catch (t: Throwable) {
-        scriptError.compareAndSet(null, t)
+    script =
+      thread(isDaemon = true, name = "fake-relay-$port") {
+        try {
+          val sock = server.accept()
+          accepted = sock
+          handshake(sock)
+          block(Session(sock))
+        } catch (t: Throwable) {
+          scriptError.compareAndSet(null, t)
+        }
       }
-    }
+  }
+
+  /** Wait up to [timeoutMillis] for the last [serve] script to end, and return whether it ended.
+   * Once it has, [assertScriptClean] sees anything it threw, since the script's thread records a
+   * throw before it ends. [timeoutMillis] must be positive: as with [Thread.join], zero waits
+   * with no limit and a negative value throws. */
+  fun awaitScript(timeoutMillis: Long): Boolean {
+    val running = checkNotNull(script) { "no script was served" }
+    running.join(timeoutMillis)
+    return !running.isAlive
   }
 
   /** Re-raise anything the [serve] script threw, so a relay-side failure fails the test rather than
-   * hiding on a daemon thread. Call after the client-side assertions. */
+   * hiding on a daemon thread. Call after the client-side assertions. It sees only what the script
+   * has thrown so far: when the client does not see the script's last step, [awaitScript] first. */
   fun assertScriptClean() {
     scriptError.get()?.let { throw AssertionError("fake relay script failed", it) }
   }
