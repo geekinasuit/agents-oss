@@ -372,6 +372,12 @@ data class LeadState(
    * restarts, which the capped [escalations] tail cannot promise. Ticket-scoped:
    * [LeadKinds.TICKET_DONE] clears it. */
   val escalatedStalls: Map<String, Set<String>> = emptyMap(),
+  /** The pending effect intents adopt declined to re-fire and escalated, each as the SHA-256 of its
+   * key's UTF-8 text: a key comes from the journal, of any length, so the record holds a digest of
+   * fixed size. Read from the digest an [LeadKinds.ESCALATED] row names beside its reason. The
+   * daemon reads it to escalate each declined intent once, across restarts. Not ticket-scoped: a
+   * declined intent stays pending, and every adopt meets it again, whichever ticket is current. */
+  val declinedEffects: Set<String> = emptySet(),
   /** (seq, reason) for turns whose output was unusable — the degradation signal, kept apart
    * from [escalations] so a degrading model is countable rather than merely noisy. */
   val malformedCognition: List<Pair<Long, String>> = emptyList(),
@@ -437,6 +443,14 @@ data class LeadState(
     return openGates[gateId]?.payloadDigest == evidence && approvedOnCurrentDigest(gateId)
   }
 
+  /** Whether the commit effect may fire for [ticket]: its commit gate is approved on the recorded
+   * manifest and its plan gate on the recorded plan ([approvedOnEvidence]). The daemon asks this
+   * before it journals the effect's intent, and again before adopt re-fires an intent a crash cut
+   * short. */
+  fun approvedToCommit(ticket: String): Boolean =
+    approvedOnEvidence(GateKinds.COMMIT_APPROVAL, ticket) &&
+      approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)
+
   /** The gate's currently-usable nonce: issued for THIS gate, bound to the digest the
    * gate is CURRENTLY open on, and not consumed — the same clauses [foldRelease] honors,
    * so a nonce returned here is releasable as it stands (the digest filter matches
@@ -497,10 +511,13 @@ data class LeadState(
  * view, not a record.) [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
  * an audit marker whose absence is itself a claim ("released under the ceremony"), so an
  * evicted entry would not lose the answer, it would invert it. [LeadState.escalatedStalls] is
- * uncapped too: evicting an entry escalates its gate again, the repeat it exists to suppress. All
- * seven share the same bound: the ticket, not a tail — TICKET_DONE clears them — and their kinds are
- * origin-gated, so only the substrate and the authorization layer can grow them: a party
- * positioned to flood them could already write worse. */
+ * uncapped too: evicting an entry escalates its gate again, the repeat it exists to suppress. Those
+ * seven share the same bound: the ticket, not a tail — TICKET_DONE clears them.
+ * [LeadState.declinedEffects] is uncapped for the same reason as the stall record, and is not
+ * ticket-scoped: it holds one digest per distinct pending intent key adopt declined, since a
+ * declined intent stays pending across tickets. Each entry costs its writer a journal row. All
+ * their kinds are origin-gated, so only the substrate and the authorization layer can grow them: a
+ * party positioned to flood them could already write worse. */
 private const val ANOMALY_TAIL = 100
 
 /** The lead kinds only the substrate ever authors. Any of these
@@ -683,12 +700,17 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
         // silenced. Any digest counts, blank or not, since it is the one the gate is open on.
         val gateId = p.jsonStringOrNull("stalledGateId")
         val digest = p.jsonStringOrNull("stalledDigest")
-        if (gateId == null || digest == null) escalated
-        else
-          escalated.copy(
-            escalatedStalls =
-              escalated.escalatedStalls + (gateId to escalated.escalatedStalls[gateId].orEmpty() + digest)
-          )
+        val stalled =
+          if (gateId == null || digest == null) escalated
+          else
+            escalated.copy(
+              escalatedStalls =
+                escalated.escalatedStalls + (gateId to escalated.escalatedStalls[gateId].orEmpty() + digest)
+            )
+        // A declined effect intent is named by its key's digest, on the same terms.
+        val declined = p.jsonStringOrNull("declinedEffectDigest")
+        if (declined == null) stalled
+        else stalled.copy(declinedEffects = stalled.declinedEffects + declined)
       }
       LeadKinds.GATE_OPENED -> {
         val gate = OpenGate(p.str("gateId"), p.str("gateKind"), p.str("payloadDigest"), e.seq)

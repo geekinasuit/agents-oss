@@ -770,6 +770,178 @@ class GuardsTest {
   }
 
   @Test
+  fun aPendingEffectIntentTheLeadWouldNotJournalIsNotReDrivenAndIsEscalatedOnce() {
+    val dir = tmp.newFolder()
+    // Adopt re-fires each effect intent with no done entry, but only one the lead would journal
+    // now. A journal the lead did not write holds two, with no gate opened: t1's commit effect, and
+    // a key the lead never journals. Neither is fired, and each is escalated once; the restart
+    // adopts with t1 current, and fires and escalates neither again. The key the lead never
+    // journals is not quoted.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val commitKey = "apply-commit:t1"
+    val foreignKey = "deploy:" + "x".repeat(40)
+    for (key in listOf(commitKey, foreignKey)) {
+      store.append(
+        "effect-intent",
+        buildJsonObject { put("message", "fire $key") },
+        ORIGIN_SUBSTRATE,
+        idempotencyKey = key,
+      )
+    }
+    val f = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    val effects = EffectReceiver(dir.absolutePath)
+    assertEquals("t1's commit effect did not fire", 0, effects.lineCountFor(commitKey))
+    assertEquals("the foreign effect did not fire", 0, effects.lineCountFor(foreignKey))
+    assertEquals(
+      "both intents are still pending",
+      listOf(commitKey, foreignKey).sorted(),
+      f.shared.pendingEffectKeys,
+    )
+    val declined = declinedReDrives(f.lead)
+    assertEquals("each is escalated once", 2, declined.size)
+    assertTrue(
+      "t1's commit effect is named",
+      declined.any { it.startsWith("effect re-drive declined for $commitKey:") },
+    )
+    assertTrue(
+      "the foreign key is described by its length",
+      declined.any {
+        it.startsWith("effect re-drive declined for a key of ${foreignKey.length} chars:")
+      },
+    )
+    assertTrue("and not quoted", f.lead.escalations.none { foreignKey in it })
+
+    val again = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    assertEquals("t1 is the current ticket", "t1", again.lead.currentTicket)
+    assertEquals("none escalated again after a restart", 2, declinedReDrives(again.lead).size)
+    assertEquals("and t1's commit effect still has not fired", 0, effects.lineCountFor(commitKey))
+    store.close()
+  }
+
+  @Test
+  fun aCommitIntentACrashCutShortIsReDrivenOnlyWhileBothGatesAreApprovedOnTheirEvidence() {
+    // The lead journals the commit effect's intent and crashes before it fires the effect. Adopt
+    // re-fires the intent while both gates are approved on their recorded evidence: the effect
+    // fires once, and the ticket is done. When a journal the lead did not write re-opens the plan
+    // gate on another digest before the restart, the plan gate is no longer approved on the
+    // recorded plan, so the intent is not fired, and is escalated once.
+    val commitKey = "apply-commit:t1"
+
+    val control = tmp.newFolder()
+    val controlStore = crashAfterCommitIntent(control)
+    val recovered =
+      leadDaemon(control, controlStore, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    assertEquals(
+      "the intent is re-fired once",
+      1,
+      EffectReceiver(control.absolutePath).lineCountFor(commitKey),
+    )
+    assertEquals("and t1 is done", listOf("t1"), recovered.lead.doneTickets)
+    assertTrue("nothing is declined", declinedReDrives(recovered.lead).isEmpty())
+    controlStore.close()
+
+    val dir = tmp.newFolder()
+    val store = crashAfterCommitIntent(dir)
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    store.gateOpened(planGateId, GateKinds.PLAN_APPROVAL, "0".repeat(64))
+    val f = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    assertEquals(
+      "the intent is not re-fired",
+      0,
+      EffectReceiver(dir.absolutePath).lineCountFor(commitKey),
+    )
+    assertTrue("t1 is not done", f.lead.doneTickets.isEmpty())
+    assertTrue(
+      "the commit gate is still approved on the recorded manifest",
+      f.lead.approvedOnEvidence(GateKinds.COMMIT_APPROVAL, "t1"),
+    )
+    val declined = declinedReDrives(f.lead)
+    assertEquals("one escalation", 1, declined.size)
+    assertTrue(
+      "names the intent",
+      declined.single().startsWith("effect re-drive declined for $commitKey:"),
+    )
+    val again = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    assertEquals("none again after a restart", 1, declinedReDrives(again.lead).size)
+    assertEquals(
+      "and the intent still has not fired",
+      0,
+      EffectReceiver(dir.absolutePath).lineCountFor(commitKey),
+    )
+    store.close()
+  }
+
+  @Test
+  fun aReDrivenCommitIntentFiresTheLeadsOwnMessageNotTheOneItsRowCarries() {
+    val dir = tmp.newFolder()
+    // A journal the lead did not write holds t1's commit intent, and its message names a manifest
+    // the lead never recorded, followed by a line break and a forged effect line. The lead walks t1
+    // to both gates approved on their evidence, and a restart's adopt re-fires the intent. The
+    // effect carries the message the lead would journal now, built from its recorded manifest; the
+    // row's message reaches the effect log in no form.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val commitKey = "apply-commit:t1"
+    store.append(
+      "effect-intent",
+      buildJsonObject {
+        put("message", "apply-commit ticket=t1 manifest=" + "f".repeat(64) + "\nEFFECT forged:t1 x")
+      },
+      ORIGIN_SUBSTRATE,
+      idempotencyKey = commitKey,
+    )
+    val d = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner())
+    val f1 = d.driveUntilQuiescent()
+    d.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
+    val f2 = d.driveUntilQuiescent()
+    val manifest = f2.lead.commitManifestDigest!!
+    d.injectAuthRelease(gateIdFor(GateKinds.COMMIT_APPROVAL, "t1"), manifest)
+    d.driveUntilQuiescent()
+
+    val f = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    assertEquals(
+      "one effect line, carrying the lead's own message",
+      listOf("EFFECT $commitKey apply-commit ticket=t1 manifest=$manifest"),
+      File(dir, "effects.log").readLines(),
+    )
+    assertEquals("and t1 is done", listOf("t1"), f.lead.doneTickets)
+    store.close()
+  }
+
+  /** Walks t1 to its commit under DENY_ALL, and crashes right after the commit effect's intent is
+   * journaled, before the effect fires. Returns the store, still open. */
+  private fun crashAfterCommitIntent(dir: File): SqliteStore {
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val crash = FaultInjector {
+      if (it == "after-commit-intent") throw RuntimeException("crash after the commit intent")
+    }
+    val d = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner(), faults = crash)
+    val f1 = d.driveUntilQuiescent()
+    d.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
+    val f2 = d.driveUntilQuiescent()
+    d.injectAuthRelease(gateIdFor(GateKinds.COMMIT_APPROVAL, "t1"), f2.lead.commitManifestDigest!!)
+    assertThrows(RuntimeException::class.java) { d.driveUntilQuiescent() }
+    val afterCrash = d.refold()
+    assertEquals(
+      "the intent is journaled and not done",
+      listOf("apply-commit:t1"),
+      afterCrash.shared.pendingEffectKeys,
+    )
+    assertEquals(
+      "and the effect has not fired",
+      0,
+      EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
+    )
+    return store
+  }
+
+  /** The escalations that report a pending effect intent adopt declined to re-fire. */
+  private fun declinedReDrives(lead: LeadState): List<String> =
+    lead.escalations.filter { it.startsWith("effect re-drive declined for ") }
+
+  @Test
   fun anApprovalOnTheEvidenceAdvancesTheTicketWithNoEscalation() {
     val dir = tmp.newFolder()
     // Each gate is released on the digest the lead opened it on, which is the substrate's evidence
