@@ -81,21 +81,7 @@ class FakeRelay : AutoCloseable {
   }
 
   private fun handshake(sock: Socket) {
-    val reader = sock.getInputStream().bufferedReader(Charsets.US_ASCII)
-    var key = ""
-    while (true) {
-      val line = reader.readLine() ?: break
-      if (line.isEmpty()) break
-      if (line.startsWith("Sec-WebSocket-Key:", ignoreCase = true)) {
-        key = line.substringAfter(":").trim()
-      }
-    }
-    val magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-    val accept =
-      Base64.getEncoder()
-        .encodeToString(
-          MessageDigest.getInstance("SHA-1").digest((key + magic).toByteArray(Charsets.US_ASCII))
-        )
+    val accept = readUpgradeRequest(sock)
     val response =
       "HTTP/1.1 101 Switching Protocols\r\n" +
         "Upgrade: websocket\r\nConnection: Upgrade\r\n" +
@@ -218,6 +204,57 @@ class FakeRelay : AutoCloseable {
     const val OPCODE_CLOSE = 0x8
     const val OPCODE_PING = 0x9
     const val OPCODE_PONG = 0xA
+  }
+}
+
+/** Read a client's upgrade request from [sock] up to its blank line, and return the
+ * `Sec-WebSocket-Accept` value that answers its `Sec-WebSocket-Key` (RFC 6455, section 4.2.2). */
+internal fun readUpgradeRequest(sock: Socket): String {
+  val reader = sock.getInputStream().bufferedReader(Charsets.US_ASCII)
+  var key = ""
+  while (true) {
+    val line = reader.readLine() ?: break
+    if (line.isEmpty()) break
+    if (line.startsWith("Sec-WebSocket-Key:", ignoreCase = true)) {
+      key = line.substringAfter(":").trim()
+    }
+  }
+  val magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+  val digest =
+    MessageDigest.getInstance("SHA-1").digest((key + magic).toByteArray(Charsets.US_ASCII))
+  return Base64.getEncoder().encodeToString(digest)
+}
+
+/**
+ * A one-connection raw server for opening-handshake cells: it reads the client's upgrade request
+ * and writes back exactly the text [response] builds from the correct `Sec-WebSocket-Accept` value,
+ * so a cell can answer with any status or header set, well-formed or not. It then holds the socket
+ * until [close].
+ */
+class HandshakeResponder(response: (accept: String) -> String) : AutoCloseable {
+  private val server = ServerSocket(0)
+  val url: String = "ws://127.0.0.1:${server.localPort}"
+  @Volatile private var accepted: Socket? = null
+
+  init {
+    thread(isDaemon = true, name = "handshake-responder-${server.localPort}") {
+      try {
+        val sock = server.accept()
+        accepted = sock
+        val text = response(readUpgradeRequest(sock))
+        sock.getOutputStream().write(text.toByteArray(Charsets.US_ASCII))
+        sock.getOutputStream().flush()
+      } catch (_: Exception) {}
+    }
+  }
+
+  override fun close() {
+    try {
+      accepted?.close()
+    } catch (_: Exception) {}
+    try {
+      server.close()
+    } catch (_: Exception) {}
   }
 }
 

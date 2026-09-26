@@ -138,6 +138,101 @@ class RelayConnectionTest {
   }
 
   @Test
+  fun `a wrong Sec-WebSocket-Accept classifies as HANDSHAKE and names that check`() {
+    // The JDK reports this as a WebSocketHandshakeException with no message whose cause names the
+    // check, so the detail must come from down the chain, not from the top exception.
+    val failed = handshakeFailure { _ -> "${UPGRADE_OK}Sec-WebSocket-Accept: wrong\r\n\r\n" }
+    assertEquals(ConnectFailure.HANDSHAKE, failed.failure)
+    assertEquals("handshake rejected: Bad Sec-WebSocket-Accept", failed.detail)
+  }
+
+  @Test
+  fun `a handshake check that quotes the server names the check without the server's value`() {
+    // Each answer passes the accept check, then fails one whose JDK text quotes what the server
+    // sent. The marker must not reach the detail, and the detail must still name the check.
+    val cases =
+      listOf(
+        "Sec-WebSocket-Protocol: $MARKER" to "Unexpected subprotocol",
+        "Sec-WebSocket-Extensions: $MARKER" to "Response field 'Sec-WebSocket-Extensions' present",
+        "Sec-WebSocket-Accept: $MARKER" to "Response field 'Sec-WebSocket-Accept' multivalued",
+      )
+    for ((extraHeader, check) in cases) {
+      val failed =
+        handshakeFailure { accept ->
+          "${UPGRADE_OK}Sec-WebSocket-Accept: $accept\r\n$extraHeader\r\n\r\n"
+        }
+      assertEquals(ConnectFailure.HANDSHAKE, failed.failure)
+      assertTrue("server value leaked: ${failed.detail}", !failed.detail.contains(MARKER))
+      assertEquals("handshake rejected: $check", failed.detail)
+    }
+  }
+
+  @Test
+  fun `handshakeCheckDetail keeps the JDK's check texts that quote no server text`() {
+    // These texts are the JDK's own, measured from its WebSocket client against a raw server.
+    for (text in
+      listOf(
+        "Bad Sec-WebSocket-Accept",
+        "Unexpected HTTP response status code 404",
+        "Response field missing: Upgrade",
+        "Bad response field: Upgrade",
+      )) {
+      assertEquals(text, handshakeCheckDetail(text))
+    }
+  }
+
+  @Test
+  fun `handshakeCheckDetail cuts the server's value from the texts that quote it`() {
+    assertEquals("Unexpected subprotocol", handshakeCheckDetail("Unexpected subprotocol: $MARKER"))
+    assertEquals(
+      "Response field 'Sec-WebSocket-Extensions' present",
+      handshakeCheckDetail("Response field 'Sec-WebSocket-Extensions' present: [$MARKER]"),
+    )
+    assertEquals(
+      "Response field 'Sec-WebSocket-Accept' multivalued",
+      handshakeCheckDetail("Response field 'Sec-WebSocket-Accept' multivalued: [abc=, $MARKER]"),
+    )
+    // A value spanning lines is still cut to the check, not withheld as an unknown text.
+    assertEquals(
+      "Unexpected subprotocol",
+      handshakeCheckDetail("Unexpected subprotocol: a\n$MARKER"),
+    )
+  }
+
+  @Test
+  fun `handshakeCheckDetail withholds any text it does not recognise`() {
+    assertEquals("no check named", handshakeCheckDetail(null))
+    val withheld = "an unrecognised check, its text withheld"
+    assertEquals(withheld, handshakeCheckDetail("Something new: $MARKER"))
+    // A known text must match whole: one with more after it is not that text.
+    assertEquals(withheld, handshakeCheckDetail("Bad response field: Upgrade\n$MARKER"))
+    // Each kept or cut form admits only the JDK's own words where its value goes: anything else
+    // in that slot makes the text unknown.
+    for (text in
+      listOf(
+        "Unexpected HTTP response status code $MARKER",
+        "Unexpected HTTP response status code 4040",
+        "Bad Sec-WebSocket-Accept: $MARKER",
+        "Bad response field: $MARKER",
+        "Response field missing: $MARKER",
+        "Response field '$MARKER' present: [x]",
+        "Response field '$MARKER' multivalued: [x, y]",
+        "Unexpected subprotocol $MARKER",
+      )) {
+      assertEquals(withheld, handshakeCheckDetail(text))
+    }
+  }
+
+  /** Connect to a raw server answering the upgrade with [response]'s text (given the correct
+   * accept value), and return the failure, which each caller expects. */
+  private fun handshakeFailure(response: (accept: String) -> String): ConnectResult.Failed =
+    HandshakeResponder(response).use { relay ->
+      val result = RelayConnection(config(relay.url)).connect(Duration.ofSeconds(5))
+      assertTrue("expected Failed, got $result", result is ConnectResult.Failed)
+      result as ConnectResult.Failed
+    }
+
+  @Test
   fun `connect to an unresolvable host fails closed, never throws`() {
     // .invalid never resolves (RFC 6761). Classification is DNS-environment-dependent (UNKNOWN_HOST
     // on a clean resolver), so assert only the contract that matters: a Failed, never a throw and
@@ -873,3 +968,11 @@ private class CloseWhileWaitingWebSocket(private val listener: WebSocket.Listene
     return at > 0 && frames[at - 1].methodName == "poll"
   }
 }
+
+/** A 101 status line with the Upgrade and Connection fields; the accept field and the blank line
+ * that ends the answer are left to each cell. */
+private const val UPGRADE_OK =
+  "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+
+/** A value only a server sent, so its presence in a detail shows the server's text leaked. */
+private const val MARKER = "relay-chosen-marker"
