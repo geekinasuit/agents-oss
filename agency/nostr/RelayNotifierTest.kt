@@ -13,8 +13,8 @@ import org.junit.Test
  * refused at construction, each recipient gets its own outcome (partial delivery is a liveness gap),
  * an oversize notice is NotEncodable for every recipient without publishing, all crypto completes
  * before any publish (the #45 phase separation), the gift-wrap timestamps (one notice time for the
- * whole fan-out, each seal backdated by its own draw, within two days by default), and a closed
- * notifier fails its next notify closed.
+ * whole fan-out, read again on each call, each seal backdated from its call's time by its own draw,
+ * within two days by default), and a closed notifier fails its next notify closed.
  */
 class RelayNotifierTest {
   private val leadSecret = "0000000000000000000000000000000000000000000000000000000000000001"
@@ -215,6 +215,40 @@ class RelayNotifierTest {
     val sealB = sealOf(wrapB, recipBSecret)
     assertEquals("A's seal is backdated by the first draw", noticeTime - 10L, sealA.createdAt)
     assertEquals("B's seal is backdated by the second draw", noticeTime - 20L, sealB.createdAt)
+  }
+
+  // A retried announce is a new call, so it carries the time of that call. A relay that refuses an
+  // event whose created_at is older than some bound would refuse a retry dated at the first attempt
+  // once the retry came more than that bound after it. The seal is backdated from its own call's
+  // time too: backdated from an earlier call's, it would land further back than its draw.
+  @Test
+  fun dates_each_call_at_its_own_reading_of_the_clock() {
+    val fake = FakePublisher()
+    val times = listOf(noticeTime, noticeTime + 90L)
+    val reads = ArrayDeque(times)
+    val backdate = 10L
+    val notifier =
+      RelayNotifier(
+        SecretKeyHex.ofHexString(leadSecret),
+        fake,
+        now = { reads.removeFirst() },
+        sealBackdateSeconds = { backdate },
+      )
+
+    notifier.notifyGateOpen(notice, setOf(key(recipASecret)), timeout)
+    notifier.notifyGateOpen(notice, setOf(key(recipASecret)), timeout)
+
+    assertEquals("one publish per call", 2, fake.published.size)
+    for ((wrap, time) in fake.published.zip(times)) {
+      assertEquals("the wrap carries its call's time", time, wrap.createdAt)
+      val rumor = Nip59.unwrap(hexToBytes(recipASecret), wrap)
+      assertEquals("the rumor carries its call's time", time, rumor!!.createdAt)
+      assertEquals(
+        "the seal is backdated from its call's time",
+        time - backdate,
+        sealOf(wrap, recipASecret).createdAt,
+      )
+    }
   }
 
   @Test
