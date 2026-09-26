@@ -706,6 +706,114 @@ class GuardsTest {
       1,
       releasedOffEvidence(f.lead, planGateId).size,
     )
+
+    // Positive control: in this state the plan conjunct is the only thing holding the effect. With
+    // the plan gate re-opened on the recorded plan, which it was released on, the effect fires once
+    // and the ticket is done.
+    store.gateOpened(planGateId, GateKinds.PLAN_APPROVAL, f.lead.planArtifactSha!!)
+    val g = leadDaemon(dir, store, idle, FakePodRunner(), auth).driveUntilQuiescent()
+    assertEquals(
+      "the commit effect fired once",
+      1,
+      EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
+    )
+    assertEquals("the ticket is done", listOf("t1"), g.lead.doneTickets)
+    store.close()
+  }
+
+  @Test
+  fun theCommitEffectDoesNotFireWhileThePlanGateIsOpenOnANewlyRecordedPlanThatIsNotReleased() {
+    val dir = tmp.newFolder()
+    // The commit effect asks for the plan gate released on the digest it is open on, not only open
+    // on the recorded plan. Re-opening the gate on the plan it was released on cannot show that: a
+    // gate's released digests only grow until the ticket is done. A newly recorded plan can. Here,
+    // after the commit gate is released on the recorded manifest, a journal the lead did not write
+    // records another plan and opens the plan gate on it. Nothing releases that digest, so the
+    // commit effect must not fire.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val auth = ceremonyAuth()
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    val newPlan = openPlanGateOnANewUnreleasedPlan(dir, store, auth)
+
+    // The restarted lead's cognition proposes nothing, so only the mechanical pass acts.
+    val idle = ProgrammedCognition(mutableListOf())
+    val f = leadDaemon(dir, store, idle, FakePodRunner(), auth).driveUntilQuiescent()
+    assertFalse("no commit intent is journaled", "apply-commit:t1" in f.shared.intents)
+    assertEquals(
+      "the commit effect did not fire",
+      0,
+      EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
+    )
+    assertTrue("the ticket is not done", f.lead.doneTickets.isEmpty())
+    assertEquals("the recorded plan is the new one", newPlan, f.lead.planArtifactSha)
+    assertEquals(
+      "the plan gate is open on the recorded plan",
+      newPlan,
+      f.lead.openGates[planGateId]?.payloadDigest,
+    )
+    assertFalse("nothing released it on that digest", f.lead.approvedOnCurrentDigest(planGateId))
+    assertTrue(
+      "the commit gate is approved on the recorded manifest",
+      f.lead.approvedOnEvidence(GateKinds.COMMIT_APPROVAL, "t1"),
+    )
+
+    // Positive control: the plan gate's release on the new plan is the only thing holding the
+    // effect. Released on the nonce the lead minted for that digest, the effect fires once and the
+    // ticket is done.
+    store.approveAndRelease(
+      f.lead.issuedNonces.values.single { it.gateId == planGateId && it.payloadDigest == newPlan }
+    )
+    val g = leadDaemon(dir, store, idle, FakePodRunner(), auth).driveUntilQuiescent()
+    assertEquals(
+      "the commit effect fired once",
+      1,
+      EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
+    )
+    assertEquals("the ticket is done", listOf("t1"), g.lead.doneTickets)
+    store.close()
+  }
+
+  @Test
+  fun aPendingCommitIntentIsNotReDrivenWhileThePlanGateIsOpenOnANewlyRecordedPlanThatIsNotReleased() {
+    val dir = tmp.newFolder()
+    // Adopt re-drives a pending commit intent only when the lead would journal it now, which asks
+    // the same plan check as the commit arm. Here the journal also holds a commit intent for t1 that
+    // the lead did not write, so the restart reaches that check through adopt: the plan gate is open
+    // on the newly recorded plan, and nothing released it there, so the intent is declined, not
+    // fired.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val auth = ceremonyAuth()
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    val newPlan = openPlanGateOnANewUnreleasedPlan(dir, store, auth)
+    journalForeignIntent(store, "apply-commit:t1", "foreign-row-text")
+
+    val idle = ProgrammedCognition(mutableListOf())
+    val f = leadDaemon(dir, store, idle, FakePodRunner(), auth).driveUntilQuiescent()
+    assertEquals(
+      "the commit effect did not fire",
+      0,
+      EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
+    )
+    assertTrue("the ticket is not done", f.lead.doneTickets.isEmpty())
+    assertEquals(
+      "the re-drive declined the intent once",
+      1,
+      f.lead.escalations.count { it.startsWith("effect re-drive declined for apply-commit:t1:") },
+    )
+
+    // Positive control: the plan gate's release on the new plan is the only thing holding the
+    // intent. Released on the nonce the lead minted for that digest, the effect fires once and the
+    // ticket is done.
+    store.approveAndRelease(
+      f.lead.issuedNonces.values.single { it.gateId == planGateId && it.payloadDigest == newPlan }
+    )
+    val g = leadDaemon(dir, store, idle, FakePodRunner(), auth).driveUntilQuiescent()
+    assertEquals(
+      "the commit effect fired once",
+      1,
+      EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
+    )
+    assertEquals("the ticket is done", listOf("t1"), g.lead.doneTickets)
     store.close()
   }
 
@@ -1121,6 +1229,35 @@ class GuardsTest {
       ORIGIN_SUBSTRATE,
       idempotencyKey = key,
     )
+  }
+
+  /** Walks t1 under [auth] until its plan gate is released on the recorded plan and its commit gate
+   * on the recorded manifest. Then, as a journal the lead did not write can, records another plan
+   * and opens the plan gate on it, with nothing released on that digest. Returns the new plan's
+   * digest. */
+  private fun openPlanGateOnANewUnreleasedPlan(
+    dir: File,
+    store: SqliteStore,
+    auth: LeadAuth,
+  ): String {
+    File(dir, "ticket.txt").writeText("t1\n")
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    val commitGateId = gateIdFor(GateKinds.COMMIT_APPROVAL, "t1")
+    val f1 = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner(), auth).driveUntilQuiescent()
+    store.approveAndRelease(f1.lead.issuedNonces.values.single { it.gateId == planGateId })
+    val f2 = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner(), auth).driveUntilQuiescent()
+    store.approveAndRelease(f2.lead.issuedNonces.values.single { it.gateId == commitGateId })
+    val newPlan = "2".repeat(64)
+    store.append(
+      LeadKinds.PLAN_ARTIFACT_RECORDED,
+      buildJsonObject {
+        put("path", File(dir, "another-plan.md").absolutePath)
+        put("sha256", newPlan)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    store.gateOpened(planGateId, GateKinds.PLAN_APPROVAL, newPlan)
+    return newPlan
   }
 
   /** Walks t1 to its commit under DENY_ALL, and crashes right after the commit effect's intent is
