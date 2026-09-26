@@ -1,16 +1,7 @@
 package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.pod.PodSpec
-import com.geekinasuit.agency.shared.auth.AllowList
-import com.geekinasuit.agency.shared.auth.ApprovalEvidence
-import com.geekinasuit.agency.shared.auth.ApprovalVerifier
-import com.geekinasuit.agency.shared.auth.Principal
-import com.geekinasuit.agency.shared.auth.SchemeKey
-import com.geekinasuit.agency.shared.auth.committedPreimage
-import com.geekinasuit.agency.shared.auth.oneOfOne
 import com.geekinasuit.agency.shared.journal.EffectReceiver
-import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
-import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
@@ -47,19 +38,6 @@ import org.junit.rules.TemporaryFolder
 class NonceMintTest {
 
   @get:Rule val tmp = TemporaryFolder()
-
-  /** The minimal ceremony auth: one allow-listed principal is enough for [LeadAuth.hasApprovers]
-   * to hold, which is all the mint reads. The verifier and quorum are not exercised here — a
-   * release's verification is the fold's concern (AuthFoldTest), not the mint's. */
-  private fun ceremonyAuth(): LeadAuth =
-    LeadAuth(
-      allowList =
-        AllowList(
-          listOf(Principal("operator", role = "authorizer", keys = listOf(SchemeKey("test", "pk-operator"))))
-        ),
-      verifier = ApprovalVerifier { _, _, _, _ -> true },
-      quorum = oneOfOne("operator"),
-    )
 
   /** A timer service that fires nothing, since no cell here needs a timer to fire. A daemon under a
    * ceremony auth refuses [TimerService.NOOP], which is the service a deployment could pick up by
@@ -975,45 +953,6 @@ class NonceMintTest {
       },
       ORIGIN_SUBSTRATE,
     )
-
-  /** An approval by the ceremony auth's one principal that re-verifies under its accepting
-   * verifier, then the release naming [nonce], which that approval's quorum clears. */
-  private fun SqliteStore.approveAndRelease(gateId: String, digest: String, nonce: String) {
-    val publicKey = "pk-operator"
-    append(
-      LeadKinds.APPROVAL_RECORDED,
-      buildJsonObject {
-        put("gateId", gateId)
-        put("principalId", "operator")
-        put("nonce", nonce)
-        put("payloadDigest", digest)
-        put(
-          "evidence",
-          ApprovalEvidence(
-              schemeId = "test",
-              publicKey = publicKey,
-              signature = "sig-operator",
-              carrierArtifactId = "carrier-$nonce",
-              gateId = gateId,
-              payloadDigest = digest,
-              nonce = nonce,
-              signedPreimage = committedPreimage(publicKey, gateId, digest, nonce),
-            )
-            .toJson(),
-        )
-      },
-      ORIGIN_AUTH_LAYER,
-    )
-    append(
-      KIND_GATE_RELEASED,
-      buildJsonObject {
-        put("gateId", gateId)
-        put("payloadDigest", digest)
-        put("nonce", nonce)
-      },
-      ORIGIN_AUTH_LAYER,
-    )
-  }
 
   private companion object {
     val PLAN_GATE = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")

@@ -199,12 +199,10 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.NonceMintTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
+        # A ceremony auth makes hasApprovers hold, which is what gates the mint.
+        ":ceremony_test_support",
         ":lead",
         "//agency/pod",
-        # Builds a ceremony LeadAuth (allow-list + verifier + quorum) to exercise the
-        # hasApprovers-gated mint; the lead library depends on this target too, so the test's
-        # use of it is direct, not a peek past the boundary.
-        "//agency/shared/auth",
         "//agency/shared/journal",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
