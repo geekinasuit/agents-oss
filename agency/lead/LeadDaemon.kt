@@ -1029,6 +1029,19 @@ class LeadDaemon(
         fireCommitEffect(ticket, lead, attempt = 2)
         return true
       }
+      if (effectKey !in effects.seenKeys()) {
+        // The journal's done entry is not evidence the effect happened: the shared fold accepts
+        // one of any origin. The receiver's own record is, so the ticket is recorded done only
+        // once the receiver has seen the key. A receiver that lost its record fires it again.
+        // The escalation is at least once: a crash before the fire escalates again on restart.
+        escalate(
+          "effect done entry for $effectKey has no matching effect in the receiver's record — " +
+            "the effect is fired before the ticket is recorded done"
+        )
+        faults.at("after-unconfirmed-done-escalated")
+        fireCommitEffect(ticket, lead, attempt = 2)
+        return true
+      }
       store.append(
         LeadKinds.TICKET_DONE,
         buildJsonObject { put("ticketRef", ticket) },
