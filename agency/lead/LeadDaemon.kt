@@ -26,7 +26,6 @@ import java.util.concurrent.LinkedBlockingQueue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
@@ -445,7 +444,7 @@ class LeadDaemon(
     for (t in folded.shared.pendingTimers) {
       timers.arm(t) { id -> queue.put(WakeEvent.TimerDue(id)) }
     }
-    redrivePendingEffects(folded.shared)
+    redrivePendingEffects(folded.shared, folded.lead)
     respawnActivePods(folded.lead)
     abandonOrphanedSpawnIntents(folded.lead)
     store.append(
@@ -462,23 +461,64 @@ class LeadDaemon(
     queue.put(WakeEvent.Adopted)
   }
 
-  /** Exactly-once inheritance from the journal layer: re-fire every intent without a done entry; the
-   * receiver dedups on the idempotency key (attempt 2 mirrors the journal fixture). */
-  private fun redrivePendingEffects(shared: JournalState) {
+  /**
+   * Exactly-once inheritance from the journal layer: re-fire each intent without a done entry that
+   * the lead would journal now, and decline every other. The receiver dedups on the idempotency
+   * key (attempt 2 mirrors the journal fixture).
+   *
+   * The lead journals one intent, the current ticket's commit effect, and only once
+   * [LeadState.approvedToCommit] holds. The re-drive exists to finish such an intent that a crash
+   * cut short, so it asks the same question, and fires the message the commit arm builds from the
+   * lead's own state, not the one the row carries. The shared fold accepts an intent row of any
+   * origin and reads only its key, so a journal the lead did not write can hold any intent. One
+   * that fails the question is not fired, and is escalated once ([LeadState.declinedEffects]). It
+   * stays pending, so a later adopt re-fires it once the question holds.
+   */
+  private fun redrivePendingEffects(shared: JournalState, lead: LeadState) {
+    val ticket = lead.currentTicket
     for (key in shared.pendingEffectKeys) {
-      val message = shared.intents[key]?.strOrNull("message") ?: key
-      val result = effects.fire(key, message, dedupEffects)
+      if (ticket != null && key == commitEffectKey(ticket) && lead.approvedToCommit(ticket)) {
+        val result = effects.fire(key, commitEffectMessage(ticket, lead), dedupEffects)
+        store.append(
+          "effect-done",
+          buildJsonObject {
+            put("key", key)
+            put("attempt", 2)
+            put("result", result.toString())
+          },
+          origin = ORIGIN_SUBSTRATE,
+        )
+        continue
+      }
+      val digest = sha256HexBytes(key.toByteArray(Charsets.UTF_8))
+      if (digest in lead.declinedEffects) continue
+      val keyTicket = key.removePrefix(COMMIT_EFFECT_PREFIX)
+      val reason =
+        if (key.startsWith(COMMIT_EFFECT_PREFIX) && isClaimableTicketRef(keyTicket))
+          "effect re-drive declined for $key: the lead journals a ticket's commit effect only " +
+            "while it is the current ticket, with its commit and plan gates approved on their " +
+            "recorded evidence, and that does not hold — the effect is not fired"
+        else
+          "effect re-drive declined for a key of ${key.length} chars: it is not a key the lead " +
+            "journals — the effect is not fired"
       store.append(
-        "effect-done",
+        LeadKinds.ESCALATED,
         buildJsonObject {
-          put("key", key)
-          put("attempt", 2)
-          put("result", result.toString())
+          put("reason", reason.take(MAX_JOURNALED_STRING))
+          put("declinedEffectDigest", digest)
         },
         origin = ORIGIN_SUBSTRATE,
       )
     }
   }
+
+  /** The idempotency key of [ticket]'s commit effect: the one intent the lead journals. */
+  private fun commitEffectKey(ticket: String) = COMMIT_EFFECT_PREFIX + ticket
+
+  /** The message of [ticket]'s commit effect, built from the lead's own state: the intent row's
+   * message is not read back, since a journal the lead did not write can hold any message there. */
+  private fun commitEffectMessage(ticket: String, lead: LeadState) =
+    "apply-commit ticket=$ticket manifest=${lead.commitManifestDigest}"
 
   /** Fake pods re-spawn, not resume — abandon the in-flight record visibly; the
    * playbook re-proposes from the missing evidence. Real re-attach (--resume) is later work. */
@@ -976,28 +1016,20 @@ class LeadDaemon(
     // Commit approved → drive the apply-commit effect exactly-once, then finish the
     // ticket. Gate membership alone is NOT the precondition: each gate must be approved on
     // its evidence — the plan gate on the recorded plan, the commit gate on the recorded
-    // manifest — so a release for a gate that opened out of order, or on a digest the
-    // substrate never recorded, can never fire an effect on evidence nobody approved.
-    val commitApproved =
-      lead.approvedOnEvidence(GateKinds.COMMIT_APPROVAL, ticket) && planApproved
-    if (commitApproved) {
-      val effectKey = "apply-commit:$ticket"
+    // manifest ([LeadState.approvedToCommit]) — so a release for a gate that opened out of
+    // order, or on a digest the substrate never recorded, can never fire an effect on
+    // evidence nobody approved.
+    if (lead.approvedToCommit(ticket)) {
+      val effectKey = commitEffectKey(ticket)
       if (effectKey !in shared.intents) {
         store.append(
           "effect-intent",
-          buildJsonObject {
-            put("message", "apply-commit ticket=$ticket manifest=${lead.commitManifestDigest}")
-          },
+          buildJsonObject { put("message", commitEffectMessage(ticket, lead)) },
           origin = ORIGIN_SUBSTRATE,
           idempotencyKey = effectKey,
         )
         faults.at("after-commit-intent")
-        val result =
-          effects.fire(
-            effectKey,
-            "apply-commit ticket=$ticket manifest=${lead.commitManifestDigest}",
-            dedupEffects,
-          )
+        val result = effects.fire(effectKey, commitEffectMessage(ticket, lead), dedupEffects)
         faults.at("after-commit-effect")
         store.append(
           "effect-done",
@@ -1910,7 +1942,8 @@ class LeadDaemon(
    * task refs built from it, a digest or path the lead computed or recorded, and a pod's id as the
    * lead's own pod runner reports it. A proposed task ref that passed its check equals one the
    * lead builds from the claimed ticket, so a reason may quote it even when a later check refuses
-   * the spawn. Some reasons carry text as its author wrote it, cut to a bound: the reason
+   * the spawn. Likewise an effect key in the commit effect's form, with a ticket ref the claim
+   * accepts, is one the lead builds, so a reason may quote it. Some reasons carry text as its author wrote it, cut to a bound: the reason
    * cognition gives when it proposes an escalation, and the detail a collaborator or an exception
    * reports, such as a sink's failure, a pod event's reason, or the message of a fault that stops
    * the loop.
@@ -2063,6 +2096,8 @@ private val TASK_REF_RE = Regex("[A-Za-z0-9:._-]+")
 private const val MAX_PROPOSALS_PER_WAKE = 16
 private const val MAX_JOURNALED_STRING = 4000
 
+private const val COMMIT_EFFECT_PREFIX = "apply-commit:"
+
 /** The waits before each retry of a gate-open announce the sink reported failed: the first retry
  * comes 30 s after the first failure, the last 30 min after the fourth. With the first attempt that
  * is [MAX_ANNOUNCE_ATTEMPTS] attempts over about 42 minutes; a sink down for longer is a fault the
@@ -2111,5 +2146,3 @@ fun interface FaultInjector {
     val NONE = FaultInjector { }
   }
 }
-
-private fun JsonObject.strOrNull(k: String): String? = this[k]?.jsonPrimitive?.content
