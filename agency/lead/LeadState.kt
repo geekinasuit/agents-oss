@@ -362,6 +362,13 @@ data class LeadState(
   val misOriginedEntries: List<Pair<Long, String>> = emptyList(), // (seq, kind): substrate-authored kind with a non-substrate origin — never honored
   val statusTail: List<String> = emptyList(),
   val escalations: List<String> = emptyList(),
+  /** Gate id → the digests the gate was escalated as stalled on this ticket: open under a ceremony
+   * auth with no usable nonce, one the mint issues none for, and not released on that digest. Read
+   * from the gate and digest an [LeadKinds.ESCALATED] row names beside its reason, so the escalation
+   * and its record are one append. The mechanical pass reads it to escalate each gate and digest
+   * once, across restarts, which the capped [escalations] tail cannot promise. Ticket-scoped:
+   * [LeadKinds.TICKET_DONE] clears it. */
+  val escalatedStalls: Map<String, Set<String>> = emptyMap(),
   /** (seq, reason) for turns whose output was unusable — the degradation signal, kept apart
    * from [escalations] so a degrading model is countable rather than merely noisy. */
   val malformedCognition: List<Pair<Long, String>> = emptyList(),
@@ -452,8 +459,9 @@ data class LeadState(
  * tail — an approval that did not verify contributes nothing a release depends on, so it is a
  * view, not a record.) [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
  * an audit marker whose absence is itself a claim ("released under the ceremony"), so an
- * evicted entry would not lose the answer, it would invert it. All six share the same
- * bound: the ticket, not a tail — TICKET_DONE clears them — and their kinds are
+ * evicted entry would not lose the answer, it would invert it. [LeadState.escalatedStalls] is
+ * uncapped too: evicting an entry escalates its stall again, the repeat it exists to suppress. All
+ * seven share the same bound: the ticket, not a tail — TICKET_DONE clears them — and their kinds are
  * origin-gated, so only the substrate and the authorization layer can grow them: a party
  * positioned to flood them could already write worse. */
 private const val ANOMALY_TAIL = 100
@@ -621,13 +629,27 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
           consumedNonces = emptySet(),
           notifiedNonces = emptySet(),
           failedAnnounces = emptyMap(),
+          escalatedStalls = emptyMap(),
           verifiedApprovals = emptyMap(),
           unverifiedApprovals = emptyList(),
           pods = emptyMap(),
           pendingSpawnIntents = emptyMap(),
         )
-      LeadKinds.ESCALATED ->
-        s.copy(escalations = (s.escalations + p.str("reason")).takeLast(ANOMALY_TAIL))
+      LeadKinds.ESCALATED -> {
+        val escalated = s.copy(escalations = (s.escalations + p.str("reason")).takeLast(ANOMALY_TAIL))
+        // An escalation of a stalled gate names the gate and its digest beside the reason. Only two
+        // JSON strings are recorded: a row with any other value there is still an escalation, and at
+        // worst its stall is escalated again, never silenced. Any digest counts, blank or not, since
+        // it is the one the gate is open on.
+        val gateId = p.jsonStringOrNull("stalledGateId")
+        val digest = p.jsonStringOrNull("stalledDigest")
+        if (gateId == null || digest == null) escalated
+        else
+          escalated.copy(
+            escalatedStalls =
+              escalated.escalatedStalls + (gateId to escalated.escalatedStalls[gateId].orEmpty() + digest)
+          )
+      }
       LeadKinds.GATE_OPENED -> {
         val gate = OpenGate(p.str("gateId"), p.str("gateKind"), p.str("payloadDigest"), e.seq)
         s.copy(
@@ -1067,6 +1089,11 @@ private fun kotlinx.serialization.json.JsonObject.strOrNull(k: String): String? 
   requireContract(el is JsonPrimitive) { "payload field '$k' must be a JSON scalar" }
   return el.content
 }
+
+/** The field's value if it is a JSON string, else null: absent, null, a number, a boolean, an object
+ * or an array all read as no value, so a malformed field never fails the fold. */
+private fun kotlinx.serialization.json.JsonObject.jsonStringOrNull(k: String): String? =
+  (this[k] as? JsonPrimitive)?.takeIf { it.isString }?.content
 
 /** Whether a notify marker says its announce will be sent again: only a JSON `true` in `retry`
  * does. Absent, null, a string, or any other value reads as final, the outcome that sends nothing
