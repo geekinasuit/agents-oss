@@ -113,7 +113,8 @@ enum class ConnectFailure {
   /** The host did not resolve. */
   UNKNOWN_HOST,
 
-  /** The endpoint was reachable but rejected the WebSocket upgrade (a non-101 response). */
+  /** The endpoint was reachable but its answer to the WebSocket upgrade failed the client's
+   * handshake checks: a non-101 status, or a 101 with a missing, wrong or unexpected field. */
   HANDSHAKE,
 
   /** Some other transport-level fault while establishing the socket. */
@@ -282,7 +283,10 @@ class RelayConnection(
         is UnknownHostException ->
           return ConnectResult.Failed(ConnectFailure.UNKNOWN_HOST, "unknown host: ${t.message}")
         is WebSocketHandshakeException ->
-          return ConnectResult.Failed(ConnectFailure.HANDSHAKE, "handshake rejected: ${t.message}")
+          return ConnectResult.Failed(
+            ConnectFailure.HANDSHAKE,
+            "handshake rejected: ${handshakeCheckDetail(firstMessage(t))}",
+          )
       }
       t = t.cause
       depth++
@@ -291,6 +295,19 @@ class RelayConnection(
       ConnectFailure.TRANSPORT,
       "connect failed: ${cause.javaClass.simpleName}: ${cause.message}",
     )
+  }
+
+  // The first non-null message on [top]'s cause chain: [top] itself, then at most
+  // CAUSE_CHAIN_LIMIT - 1 causes below it.
+  private fun firstMessage(top: Throwable): String? {
+    var t: Throwable? = top
+    var depth = 0
+    while (t != null && depth < CAUSE_CHAIN_LIMIT) {
+      t.message?.let { return it }
+      t = t.cause
+      depth++
+    }
+    return null
   }
 
   /**
@@ -799,6 +816,41 @@ internal fun preparationBudget(now: Instant, deadline: Instant): Duration? {
   val remaining = Duration.between(now, deadline)
   return if (remaining.toMillis() <= 0L) null else remaining
 }
+
+// Names the opening-handshake check that failed, from the first message on the handshake
+// failure's cause chain ([message]; null if none). The JDK's WebSocket client reports a failed
+// check as a message-less WebSocketHandshakeException whose cause carries the check's text, and
+// three of those texts go on to quote what the server sent (a subprotocol, a header's values). A
+// connect failure's detail is the substrate's words, never the relay's, so a known text is kept
+// whole when the only server value it holds is a three-digit status code, cut before the value
+// when it quotes the server's text, and any other text is withheld.
+internal fun handshakeCheckDetail(message: String?): String {
+  if (message == null) return "no check named"
+  if (HANDSHAKE_CHECKS_KEPT_WHOLE.any { it.matches(message) }) return message
+  for (check in HANDSHAKE_CHECKS_CUT) {
+    check.matchEntire(message)?.let { return it.groupValues[1] }
+  }
+  return "an unrecognised check, its text withheld"
+}
+
+// The header names the JDK's handshake checks put in their texts: constants, never server-sent.
+private const val WS_HEADER =
+  "(?:Upgrade|Connection|Sec-WebSocket-(?:Version|Accept|Extensions|Protocol))"
+
+private val HANDSHAKE_CHECKS_KEPT_WHOLE =
+  listOf(
+    Regex("Unexpected HTTP response status code \\d{3}"),
+    Regex("Bad Sec-WebSocket-Accept"),
+    Regex("Bad response field: $WS_HEADER"),
+    Regex("Response field missing: $WS_HEADER"),
+  )
+
+// Group 1 is the check; what follows ": " is the server's value and is dropped.
+private val HANDSHAKE_CHECKS_CUT =
+  listOf(
+    Regex("(Response field '$WS_HEADER' (?:present|multivalued)): .*", RegexOption.DOT_MATCHES_ALL),
+    Regex("(Unexpected subprotocol): .*", RegexOption.DOT_MATCHES_ALL),
+  )
 
 // A caller-supplied subscription id must be non-empty and within NIP-01's 64-char cap. A bad id is
 // a caller bug, not a remote fault, so it throws (like RelayConfig's structural checks) rather than
