@@ -24,6 +24,14 @@ import org.junit.Test
 class RelayConnectionTest {
   private val key = "0000000000000000000000000000000000000000000000000000000000000003"
 
+  /** How long a cell that sends about a megabyte waits for the connection to fail on it. The other
+   * failure waits allow 5 s. A megabyte cell takes tens of milliseconds locally, but one has missed
+   * 5 s on a CI runner that runs other targets alongside, so these two allow more. [waitUntil]
+   * returns once the connection has failed, so a passing cell does not wait this out. With the
+   * size or the depth guard missing, or both, the cells left waiting still end inside the target's
+   * 60 s timeout, so each reports its assertion rather than the target timing out. */
+  private val largeFrameWaitMillis = 20_000L
+
   private fun config(url: String) = RelayConfig(relayUrl = url, leadSecretKey = SecretKeyHex.ofHexString(key))
 
   // preparationBudget is the pure deadline-budget arithmetic authenticate() uses after signing to
@@ -200,7 +208,7 @@ class RelayConnectionTest {
       assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
       assertTrue(
         "connection should have failed on the size bound",
-        waitUntil(5_000) { conn.hasFailed() },
+        waitUntil(largeFrameWaitMillis) { conn.hasFailed() },
       )
       // "characters", not "exceeded": the SIZE and COUNT breaches both say "exceeded", so only the char
       // unit distinguishes the SIZE bound from the DEPTH ("depth") and COUNT ("unconsumed") breaches.
@@ -365,7 +373,7 @@ class RelayConnectionTest {
       assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
       assertTrue(
         "a frame that continues past its closers must breach",
-        waitUntil(5_000) { conn.hasFailed() },
+        waitUntil(largeFrameWaitMillis) { conn.hasFailed() },
       )
       assertTrue(conn.failureReason()!!, conn.failureReason()!!.contains("depth"))
       conn.close()
