@@ -390,11 +390,13 @@ data class LeadState(
    * at all this ticket?" (gate-keyed, epoch-blind), which a gate re-opened on a NEW digest — a
    * distinct authorization surface — answers stale-true; deciding whether to ACT on an approval
    * (advance the pipeline, launch the executor, drive the commit effect) must instead confirm
-   * the digest the gate is open on NOW was the one released. The read-side mirror of
-   * [foldRelease]'s single-release guard — both test `payloadDigest in releasedDigests[gateId]`.
-   * Fail-closed: a gate not open is not approved. [pendingGates] deliberately keeps the
-   * epoch-blind [releasedGates] read; "do not re-surface a gate released at all this ticket" is
-   * a different question. */
+   * the digest the gate is open on NOW was the one released. Acting also needs that digest to
+   * be the evidence the substrate recorded for the gate's kind, which this does not check: a
+   * gate open and released on any other digest approves nothing the substrate recorded, so the
+   * daemon's action checks ask both. The read-side mirror of [foldRelease]'s single-release
+   * guard — both test `payloadDigest in releasedDigests[gateId]`. Fail-closed: a gate not open
+   * is not approved. [pendingGates] deliberately keeps the epoch-blind [releasedGates] read; "do
+   * not re-surface a gate released at all this ticket" is a different question. */
   fun approvedOnCurrentDigest(gateId: String): Boolean {
     val gate = openGates[gateId] ?: return false
     return gate.payloadDigest in releasedDigests[gateId].orEmpty()

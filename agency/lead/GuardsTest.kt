@@ -18,6 +18,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -83,6 +84,43 @@ class GuardsTest {
    * `"attempt":10`, which a higher cap would silently make reachable. */
   private fun attemptOf(payloadJson: String): Int =
     Regex("\"attempt\":(\\d+)").find(payloadJson)!!.groupValues[1].toInt()
+
+  /** A daemon on [store] for the ticket in [dir]'s ticket.txt, under [auth]: DENY_ALL, where a
+   * release needs no nonce, unless a cell needs a ceremony. The cells that hand one journal to
+   * several daemons, each with its own cognition and runner, build them with this. Its timers fire
+   * nothing, and are not [TimerService.NOOP], which a daemon under a ceremony auth refuses. */
+  private fun leadDaemon(
+    dir: File,
+    store: SqliteStore,
+    cognition: CognitionStrategy,
+    runner: PodRunner,
+    auth: LeadAuth = LeadAuth.DENY_ALL,
+    faults: FaultInjector = FaultInjector.NONE,
+  ) =
+    LeadDaemon(
+      store = store,
+      cognition = cognition,
+      podRunner = runner,
+      podSpec = PodSpec.fixture(),
+      ticketSource = FileTicketSource(File(dir, "ticket.txt")),
+      workdir = dir,
+      effects = EffectReceiver(dir.absolutePath),
+      leadAuth = auth,
+      timers = TimerService { _, _ -> },
+      faults = faults,
+    )
+
+  /** A gate-open row with the substrate's origin, as a journal the lead did not write can hold. */
+  private fun SqliteStore.gateOpened(gateId: String, gateKind: String, payloadDigest: String) =
+    append(
+      LeadKinds.GATE_OPENED,
+      buildJsonObject {
+        put("gateId", gateId)
+        put("gateKind", gateKind)
+        put("payloadDigest", payloadDigest)
+      },
+      ORIGIN_SUBSTRATE,
+    )
 
   @Test
   fun gateOpenWithNoSubstrateEvidenceIsRejectedAndEscalated() {
@@ -251,19 +289,7 @@ class GuardsTest {
     // executor. The manifest evidence must refuse it: no pod, escalated.
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     File(dir, "ticket.txt").writeText("t1\n")
-    fun daemon(cognition: CognitionStrategy, runner: PodRunner) =
-      LeadDaemon(
-        store = store,
-        cognition = cognition,
-        podRunner = runner,
-        podSpec = PodSpec.fixture(),
-        ticketSource = FileTicketSource(File(dir, "ticket.txt")),
-        workdir = dir,
-        effects = EffectReceiver(dir.absolutePath),
-        leadAuth = LeadAuth.DENY_ALL, // guard mechanics; releases are nonce-less
-        timers = TimerService.NOOP,
-      )
-    val honest = daemon(ScriptedCognition(), FakePodRunner())
+    val honest = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner())
     val f1 = honest.driveUntilQuiescent() // planner ran, plan gate open
     honest.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
     val f2 = honest.driveUntilQuiescent() // executor ran, manifest recorded, commit gate open
@@ -271,7 +297,9 @@ class GuardsTest {
 
     val hostileRunner = FakePodRunner()
     val hostile =
-      daemon(
+      leadDaemon(
+        dir,
+        store,
         ProgrammedCognition(
           mutableListOf(
             CognitionOutput(
@@ -340,35 +368,18 @@ class GuardsTest {
     // path would emit.
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     File(dir, "ticket.txt").writeText("t1\n")
-    fun daemon(cognition: CognitionStrategy, runner: PodRunner) =
-      LeadDaemon(
-        store = store,
-        cognition = cognition,
-        podRunner = runner,
-        podSpec = PodSpec.fixture(),
-        ticketSource = FileTicketSource(File(dir, "ticket.txt")),
-        workdir = dir,
-        effects = EffectReceiver(dir.absolutePath),
-        leadAuth = LeadAuth.DENY_ALL, // guard mechanics; releases are nonce-less
-        timers = TimerService.NOOP,
-      )
-    val honest = daemon(ScriptedCognition(), FakePodRunner())
+    val honest = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner())
     val f1 = honest.driveUntilQuiescent() // planner ran, plan gate open on d1
     val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
     honest.injectAuthRelease(planGateId, f1.lead.planArtifactSha!!) // append-only, no drive
-    store.append(
-      LeadKinds.GATE_OPENED,
-      buildJsonObject {
-        put("gateId", planGateId)
-        put("gateKind", GateKinds.PLAN_APPROVAL)
-        put("payloadDigest", "d2-reopen") // a new, unapproved authorization surface
-      },
-      ORIGIN_SUBSTRATE,
-    )
+    // a new, unapproved authorization surface
+    store.gateOpened(planGateId, GateKinds.PLAN_APPROVAL, "d2-reopen")
 
     val hostileRunner = FakePodRunner()
     val hostile =
-      daemon(
+      leadDaemon(
+        dir,
+        store,
         ProgrammedCognition(
           mutableListOf(
             CognitionOutput(
@@ -384,6 +395,192 @@ class GuardsTest {
     assertTrue(
       "the execute-ordering guard escalated",
       f3.lead.escalations.any { it.contains("execute") && it.contains("plan") },
+    )
+    store.close()
+  }
+
+  @Test
+  fun executeSpawnIsRefusedWhenThePlanGateIsApprovedOnADigestThatIsNotTheRecordedPlan() {
+    val dir = tmp.newFolder()
+    // The lead opens the plan gate only on the recorded plan's digest, so a plan gate open on any
+    // other digest reaches the fold only from a journal the lead did not write. Here that journal
+    // re-opens the gate on another digest and releases it there, so the gate is approved on the
+    // digest it is open on. That release approves no plan the substrate recorded, so the executor
+    // must not launch on it, even when cognition proposes it.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val honest = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner())
+    honest.driveUntilQuiescent() // planner ran, plan gate open on the recorded plan
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    val notThePlan = "0".repeat(64)
+    store.gateOpened(planGateId, GateKinds.PLAN_APPROVAL, notThePlan)
+    honest.injectAuthRelease(planGateId, notThePlan) // append-only, no drive
+
+    val hostileRunner = FakePodRunner()
+    val hostile =
+      leadDaemon(
+        dir,
+        store,
+        ProgrammedCognition(
+          mutableListOf(
+            CognitionOutput(
+              listOf(Proposal.ProposePodSpawn("execute:t1")),
+              "buggy/hostile: launch the executor on a plan gate approved on another digest",
+            )
+          )
+        ),
+        hostileRunner,
+      )
+    val f = hostile.driveUntilQuiescent()
+    assertTrue(
+      "the plan gate is approved on the digest it is open on",
+      f.lead.approvedOnCurrentDigest(planGateId),
+    )
+    assertTrue(
+      "a plan is recorded, and it is not that digest",
+      f.lead.planArtifactSha.let { it != null && it != notThePlan },
+    )
+    assertTrue("no execute pod launched", hostileRunner.spawnedTaskRefs.isEmpty())
+    assertTrue(
+      "the execute-ordering guard escalated",
+      f.lead.escalations.any { it.startsWith("pod-spawn rejected: execute pod for 't1'") },
+    )
+    store.close()
+  }
+
+  @Test
+  fun executeSpawnIsRefusedWhileThePlanGateIsOpenOnTheRecordedPlanAndNotReleased() {
+    val dir = tmp.newFolder()
+    // The spawn check asks two things: that the plan gate is open on the recorded plan, and that a
+    // release approved it on that digest. Here only the first holds: the honest walk leaves the
+    // plan gate open on the recorded plan, and nothing has released it. The executor must not
+    // launch before the plan is approved, even when cognition proposes it.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val f1 = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+
+    val hostileRunner = FakePodRunner()
+    val hostile =
+      leadDaemon(
+        dir,
+        store,
+        ProgrammedCognition(
+          mutableListOf(
+            CognitionOutput(
+              listOf(Proposal.ProposePodSpawn("execute:t1")),
+              "buggy/hostile: launch the executor before the plan is approved",
+            )
+          )
+        ),
+        hostileRunner,
+      )
+    val f = hostile.driveUntilQuiescent()
+    assertTrue("positive control: the honest walk recorded a plan", f1.lead.planArtifactSha != null)
+    assertEquals(
+      "the plan gate is open on the recorded plan",
+      f1.lead.planArtifactSha,
+      f.lead.openGates[planGateId]?.payloadDigest,
+    )
+    assertFalse("no release has approved it", f.lead.approvedOnCurrentDigest(planGateId))
+    assertTrue("no execute pod launched", hostileRunner.spawnedTaskRefs.isEmpty())
+    assertTrue(
+      "the execute-ordering guard escalated",
+      f.lead.escalations.any { it.startsWith("pod-spawn rejected: execute pod for 't1'") },
+    )
+    store.close()
+  }
+
+  @Test
+  fun noCommitIsProposedWhileThePlanGateIsApprovedOnADigestThatIsNotTheRecordedPlan() {
+    val dir = tmp.newFolder()
+    // Under DENY_ALL a gate is released without a nonce at most once a ticket, so this cell runs
+    // under a ceremony auth. The executor runs on the plan approved on its recorded digest, and a
+    // crash lands right after its result is recorded, before the pass that proposes its manifest as
+    // the commit. A journal the lead did not write then re-opens the plan gate on another digest,
+    // with a nonce bound to it, and that nonce is approved and released, so the gate is approved on
+    // the digest it is open on, which is not the recorded plan. The restarted lead must not propose
+    // the manifest as the commit.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val auth = ceremonyAuth()
+    val f1 = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner(), auth).driveUntilQuiescent()
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    store.approveAndRelease(f1.lead.issuedNonces.values.single())
+    val crash = FaultInjector {
+      if (it == "after-pod-result") throw RuntimeException("crash after the executor's result")
+    }
+    val d2 = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner(), auth, crash)
+    assertThrows(RuntimeException::class.java) { d2.driveUntilQuiescent() }
+    val afterCrash = d2.refold().lead
+    assertTrue(
+      "the executor's result is recorded",
+      afterCrash.podFor("execute:t1")?.resultDigest != null,
+    )
+    assertEquals("and no commit is proposed yet", null, afterCrash.commitManifestDigest)
+    val notThePlan = "0".repeat(64)
+    val foreignNonce = "1".repeat(64)
+    store.gateOpened(planGateId, GateKinds.PLAN_APPROVAL, notThePlan)
+    store.append(
+      LeadKinds.NONCE_ISSUED,
+      buildJsonObject {
+        put("nonce", foreignNonce)
+        put("gateId", planGateId)
+        put("payloadDigest", notThePlan)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    store.approveAndRelease(planGateId, notThePlan, foreignNonce)
+
+    // The restarted lead's cognition proposes nothing, so only the mechanical pass acts.
+    val idle = ProgrammedCognition(mutableListOf())
+    val f = leadDaemon(dir, store, idle, FakePodRunner(), auth).driveUntilQuiescent()
+    assertEquals("no commit is proposed", null, f.lead.commitManifestDigest)
+    assertTrue(
+      "the plan gate is approved on the digest it is open on",
+      f.lead.approvedOnCurrentDigest(planGateId),
+    )
+    store.close()
+  }
+
+  @Test
+  fun theCommitEffectDoesNotFireOnACommitGateApprovedOnADigestThatIsNotTheRecordedManifest() {
+    val dir = tmp.newFolder()
+    // The lead opens the commit gate only on the recorded manifest's digest. Here a journal the lead
+    // did not write opens it first, on another digest, so the lead's own gate-open is skipped: that
+    // gate id is already open. A release on that digest approves no manifest the substrate
+    // recorded, so the commit effect, which names the recorded manifest, must not fire.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val d = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner())
+    val f1 = d.driveUntilQuiescent() // planner ran, plan gate open on the recorded plan
+    val commitGateId = gateIdFor(GateKinds.COMMIT_APPROVAL, "t1")
+    val notTheManifest = "0".repeat(64)
+    store.gateOpened(commitGateId, GateKinds.COMMIT_APPROVAL, notTheManifest)
+    d.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
+    val f2 = d.driveUntilQuiescent() // executor ran, manifest recorded
+    assertTrue(
+      "a manifest is recorded, and it is not the commit gate's digest",
+      f2.lead.commitManifestDigest.let { it != null && it != notTheManifest },
+    )
+    assertEquals(
+      "the commit gate is still open on the digest the journal chose",
+      notTheManifest,
+      f2.lead.openGates[commitGateId]?.payloadDigest,
+    )
+
+    d.injectAuthRelease(commitGateId, notTheManifest)
+    val f = d.driveUntilQuiescent()
+    assertFalse("no commit intent is journaled", "apply-commit:t1" in f.shared.intents)
+    assertEquals(
+      "the commit effect did not fire",
+      0,
+      EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
+    )
+    assertTrue("the ticket is not done", f.lead.doneTickets.isEmpty())
+    assertTrue(
+      "the commit gate is approved on the digest it is open on",
+      f.lead.approvedOnCurrentDigest(commitGateId),
     )
     store.close()
   }

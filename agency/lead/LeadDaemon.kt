@@ -925,8 +925,7 @@ class LeadDaemon(
     }
 
     // Propose the commit from a finished execute pod's manifest — same bound-copy rule.
-    val planApproved =
-      lead.approvedOnCurrentDigest(gateIdFor(GateKinds.PLAN_APPROVAL, ticket))
+    val planApproved = approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket, lead)
     if (planApproved && lead.commitManifestDigest == null) {
       val executor = lead.podFor("execute:$ticket")
       if (executor?.resultDigest != null) {
@@ -945,13 +944,12 @@ class LeadDaemon(
     }
 
     // Commit approved → drive the apply-commit effect exactly-once, then finish the
-    // ticket. Gate membership alone is NOT the precondition: the approved evidence must
-    // exist — plan approved and manifest recorded — so a release for a gate that
-    // somehow opened out of order can never fire an effect on absent evidence.
+    // ticket. Gate membership alone is NOT the precondition: each gate must be approved on
+    // its evidence — the plan gate on the recorded plan, the commit gate on the recorded
+    // manifest — so a release for a gate that opened out of order, or on a digest the
+    // substrate never recorded, can never fire an effect on evidence nobody approved.
     val commitApproved =
-      lead.approvedOnCurrentDigest(gateIdFor(GateKinds.COMMIT_APPROVAL, ticket)) &&
-        planApproved &&
-        lead.commitManifestDigest != null
+      approvedOnEvidence(GateKinds.COMMIT_APPROVAL, ticket, lead) && planApproved
     if (commitApproved) {
       val effectKey = "apply-commit:$ticket"
       if (effectKey !in shared.intents) {
@@ -1014,6 +1012,17 @@ class LeadDaemon(
    * fail. */
   private fun evidenceDigest(gateKind: String, lead: LeadState): String? =
     recordedEvidence(gateKind, lead)?.takeIf { SHA256_HEX_RE.matches(it) }
+
+  /** Whether the [gateKind] gate of [ticket] is approved on the digest it is open on now, and that
+   * digest is the substrate's evidence for its kind ([evidenceDigest]). Each check that acts on an
+   * approval asks this, not [LeadState.approvedOnCurrentDigest] alone: the lead opens a gate only on
+   * its evidence, so a gate open on any other digest came from a journal the lead did not write, and
+   * a release on that digest approves nothing the substrate recorded. */
+  private fun approvedOnEvidence(gateKind: String, ticket: String, lead: LeadState): Boolean {
+    val gateId = gateIdFor(gateKind, ticket)
+    val evidence = evidenceDigest(gateKind, lead) ?: return false
+    return lead.openGates[gateId]?.payloadDigest == evidence && lead.approvedOnCurrentDigest(gateId)
+  }
 
   /** Journal a fresh single-use nonce bound to ([gateId], [payloadDigest]), the pair the release
    * fold checks it against, and return it. */
@@ -1609,19 +1618,21 @@ class LeadDaemon(
           }
           // Pipeline ordering has teeth: an execute pod
           // is real work ON the plan, so it may launch only AFTER the plan-approval gate is
-          // approved on the digest it is CURRENTLY open on. The mechanical pass already refuses
-          // to PROPOSE a commit before plan approval; without this, cognition — by bug or prompt
-          // injection — could still get the substrate to LAUNCH the execute session on an
-          // unapproved (or unrecorded) plan, and the human's plan gate would gate nothing.
-          // Epoch-precise, not a bare `in releasedGates`: a plan re-opened on a new digest is a
-          // fresh, unapproved surface. Escalated, never spawned.
+          // approved on the digest it is CURRENTLY open on, and that digest is the recorded
+          // plan's. The mechanical pass already refuses to PROPOSE a commit before plan
+          // approval; without this, cognition — by bug or prompt injection — could still get the
+          // substrate to LAUNCH the execute session on an unapproved (or unrecorded) plan, and
+          // the human's plan gate would gate nothing. Epoch-precise, not a bare `in
+          // releasedGates`: a plan re-opened on a new digest is a fresh, unapproved surface, and a
+          // release on a digest that is not the recorded plan approves no plan the executor would
+          // run. Escalated, never spawned.
           if (
             p.taskRef == "execute:$ticket" &&
-              !leadAtDecision.approvedOnCurrentDigest(gateIdFor(GateKinds.PLAN_APPROVAL, ticket))
+              !approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket, leadAtDecision)
           ) {
             escalate(
               "pod-spawn rejected: execute pod for '$ticket' proposed before the plan-approval " +
-                "gate is approved on its current digest — the plan must be approved before " +
+                "gate is approved on the recorded plan — the plan must be approved before " +
                 "execution runs"
             )
             continue

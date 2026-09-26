@@ -549,8 +549,8 @@ class AuthFoldTest {
 
   @Test
   fun approvedOnCurrentDigestIsFalseForAGateThatIsNotOpen() {
-    // Fail-closed: no open gate is not approved — the null-guard branch that makes the
-    // execute-spawn guard's `!approvedOnCurrentDigest(...)` refuse rather than fall through.
+    // Fail-closed: no open gate is not approved. ScriptedCognition reads this while no plan gate
+    // is open yet: a true here would have it propose the execute pod while the planner still runs.
     val s = open(newStoreDir())
     assertFalse(s.lead().approvedOnCurrentDigest("never-opened"))
   }

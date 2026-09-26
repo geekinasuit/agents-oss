@@ -161,6 +161,22 @@ kt_jvm_test(
     ],
 )
 
+# The ceremony auth the ceremony cells share, and the approval and release they journal under it.
+# Its verifier accepts every signature, so those cells test what the lead does with a release, not
+# how one is verified.
+kt_jvm_library(
+    name = "ceremony_test_support",
+    testonly = True,
+    srcs = ["CeremonyTestSupport.kt"],
+    deps = [
+        ":lead",
+        "//agency/shared/auth",
+        "//agency/shared/journal",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
 kt_jvm_test(
     name = "guards_test",
     size = "small",
@@ -168,6 +184,7 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.GuardsTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
+        ":ceremony_test_support",
         ":lead",
         "//agency/pod",
         "//agency/shared/journal",
@@ -202,12 +219,10 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.NotifyGateOpenTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
+        # A ceremony auth makes hasApprovers hold, so a nonce mints and the notify arm fires.
+        ":ceremony_test_support",
         ":lead",
         "//agency/pod",
-        # A ceremony LeadAuth (allow-list + verifier + quorum) makes hasApprovers hold, so a nonce
-        # mints and the notify arm fires; the lead library depends on this target too, so the use
-        # is direct, not a peek past the boundary.
-        "//agency/shared/auth",
         "//agency/shared/journal",
         "@maven//:junit_junit",
     ],
