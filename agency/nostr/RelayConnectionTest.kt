@@ -1,7 +1,6 @@
 package com.geekinasuit.agency.nostr
 
 import java.net.ServerSocket
-import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.WebSocket
 import java.time.Duration
@@ -586,15 +585,35 @@ class RelayConnectionTest {
     conn.close()
   }
 
-  // The deadline each interrupt cell gives its call. A wait that ran on to its deadline would return
-  // the same result as one that ended at once, so each cell also checks that its call came back in
-  // less than half of it.
-  private val interruptCellDeadline = Duration.ofSeconds(10)
+  // Inside the send, the double hands the listener an accepting OK for the published event, which
+  // waits in publish's ack slot, and then reports the relay's close. The connection has failed before
+  // publish waits for the OK, so that wait ends on the fault without taking the buffered OK, and
+  // publish never says Accepted.
+  @Test
+  fun `publish on a connection that failed after its OK arrived fails, not Accepted`() {
+    val id = "12".repeat(32)
+    val conn =
+      RelayConnection(
+        config("ws://127.0.0.1:1"),
+        webSocketClient { listener -> OkThenCloseOnSendWebSocket(listener) { id } },
+      )
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+    assertEquals(
+      PublishResult.Failed("connection failed: relay closed: 1000 'bye'"),
+      conn.publish(testEvent(id), Duration.ofSeconds(3)),
+    )
+    conn.close()
+  }
+
+  // The deadline given to each call below whose wait an interrupt or the relay's close should end
+  // early. A wait that ran on to its deadline would return the same result as one that ended early,
+  // so each such cell also checks that its call came back in less than half of it.
+  private val earlyEndDeadline = Duration.ofSeconds(10)
 
   private fun assertCameBackWellInsideTheDeadline(millis: Long) =
     assertTrue(
-      "came back after $millis ms, not well inside its ${interruptCellDeadline.toMillis()} ms deadline",
-      millis < interruptCellDeadline.toMillis() / 2,
+      "came back after $millis ms, not well inside its ${earlyEndDeadline.toMillis()} ms deadline",
+      millis < earlyEndDeadline.toMillis() / 2,
     )
 
   // The synchronous double completes the send at once, and a completed send's wait returns without
@@ -608,7 +627,7 @@ class RelayConnectionTest {
 
     Thread.currentThread().interrupt()
     val started = System.nanoTime()
-    val result = conn.publish(testEvent("99".repeat(32)), interruptCellDeadline)
+    val result = conn.publish(testEvent("99".repeat(32)), earlyEndDeadline)
     val millis = (System.nanoTime() - started) / 1_000_000
     // Thread.interrupted() reads the status and clears it, so no later cell runs interrupted.
     val stillInterrupted = Thread.interrupted()
@@ -627,7 +646,7 @@ class RelayConnectionTest {
 
     Thread.currentThread().interrupt()
     val started = System.nanoTime()
-    val result = conn.authenticate(interruptCellDeadline)
+    val result = conn.authenticate(earlyEndDeadline)
     val millis = (System.nanoTime() - started) / 1_000_000
     val stillInterrupted = Thread.interrupted()
     assertEquals(AuthResult.Failed("interrupted while awaiting AUTH challenge"), result)
@@ -647,11 +666,35 @@ class RelayConnectionTest {
 
     Thread.currentThread().interrupt()
     val started = System.nanoTime()
-    val result = conn.publish(testEvent("99".repeat(32)), interruptCellDeadline)
+    val result = conn.publish(testEvent("99".repeat(32)), earlyEndDeadline)
     val millis = (System.nanoTime() - started) / 1_000_000
     val stillInterrupted = Thread.interrupted()
     assertEquals(PublishResult.Failed("connection failed: relay closed: 1000 'bye'"), result)
     assertTrue("the interrupt is still set when publish returns", stillInterrupted)
+    assertCameBackWellInsideTheDeadline(millis)
+    conn.close()
+  }
+
+  // The double reports the relay's close once publish is waiting in its poll of the ack slot, past
+  // that poll's fault check. A close puts nothing in the slot, so only the fault check between poll
+  // slices ends that wait before its deadline. The double finds that point on the publishing
+  // thread's stack, by two method names: pollUntilDeadline and the poll it calls. If it never finds
+  // that point, it never reports the close, and the cell fails.
+  @Test
+  fun `a relay close while publish waits for the OK ends the wait before its deadline`() {
+    lateinit var double: CloseWhileWaitingWebSocket
+    val conn =
+      RelayConnection(
+        config("ws://127.0.0.1:1"),
+        webSocketClient { listener -> CloseWhileWaitingWebSocket(listener).also { double = it } },
+      )
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+
+    val started = System.nanoTime()
+    val result = conn.publish(testEvent("13".repeat(32)), earlyEndDeadline)
+    val millis = (System.nanoTime() - started) / 1_000_000
+    assertTrue("the double never saw publish waiting for the OK", double.closedWhileWaiting)
+    assertEquals(PublishResult.Failed("connection failed: relay closed: 1000 'bye'"), result)
     assertCameBackWellInsideTheDeadline(millis)
     conn.close()
   }
@@ -726,85 +769,6 @@ class RelayConnectionTest {
 private fun syncOkClient(okId: String, accepted: Boolean): HttpClient =
   webSocketClient { listener -> SyncOkWebSocket(okId, accepted, listener) }
 
-// Reaches RelayConnection's injectable httpClient seam. connect() only ever calls
-// newWebSocketBuilder(), and buildAsync hands the captured listener to [makeSocket] and returns the
-// socket in an already-completed future — so connect() resolves with no live handshake, and every
-// other HttpClient/Builder method is unreachable on the paths these cells drive. Parameterizing on
-// [makeSocket] is what lets one scaffold serve every WebSocket double below, rather than a copy of
-// all this boilerplate per double.
-private fun webSocketClient(makeSocket: (WebSocket.Listener) -> WebSocket): HttpClient =
-  DoubleHttpClient(makeSocket)
-
-private fun notUsed(): Nothing =
-  throw UnsupportedOperationException("this test double does not model this member")
-
-private class DoubleHttpClient(private val makeSocket: (WebSocket.Listener) -> WebSocket) :
-  HttpClient() {
-  override fun newWebSocketBuilder(): WebSocket.Builder = DoubleWebSocketBuilder(makeSocket)
-
-  // connect() only ever calls newWebSocketBuilder(); the rest of HttpClient is never reached.
-  override fun cookieHandler(): java.util.Optional<java.net.CookieHandler> = notUsed()
-  override fun connectTimeout(): java.util.Optional<Duration> = notUsed()
-  override fun followRedirects(): HttpClient.Redirect = notUsed()
-  override fun proxy(): java.util.Optional<java.net.ProxySelector> = notUsed()
-  override fun sslContext(): javax.net.ssl.SSLContext = notUsed()
-  override fun sslParameters(): javax.net.ssl.SSLParameters = notUsed()
-  override fun authenticator(): java.util.Optional<java.net.Authenticator> = notUsed()
-  override fun version(): HttpClient.Version = notUsed()
-  override fun executor(): java.util.Optional<java.util.concurrent.Executor> = notUsed()
-
-  override fun <T> send(
-    request: java.net.http.HttpRequest,
-    responseBodyHandler: java.net.http.HttpResponse.BodyHandler<T>,
-  ): java.net.http.HttpResponse<T> = notUsed()
-
-  override fun <T> sendAsync(
-    request: java.net.http.HttpRequest,
-    responseBodyHandler: java.net.http.HttpResponse.BodyHandler<T>,
-  ): CompletableFuture<java.net.http.HttpResponse<T>> = notUsed()
-
-  override fun <T> sendAsync(
-    request: java.net.http.HttpRequest,
-    responseBodyHandler: java.net.http.HttpResponse.BodyHandler<T>,
-    pushPromiseHandler: java.net.http.HttpResponse.PushPromiseHandler<T>,
-  ): CompletableFuture<java.net.http.HttpResponse<T>> = notUsed()
-}
-
-private class DoubleWebSocketBuilder(private val makeSocket: (WebSocket.Listener) -> WebSocket) :
-  WebSocket.Builder {
-  override fun header(name: String, value: String): WebSocket.Builder = this
-  override fun connectTimeout(timeout: Duration): WebSocket.Builder = this
-
-  override fun subprotocols(
-    mostPreferred: String,
-    vararg lesserPreferred: String,
-  ): WebSocket.Builder = this
-
-  override fun buildAsync(uri: URI, listener: WebSocket.Listener): CompletableFuture<WebSocket> =
-    CompletableFuture.completedFuture<WebSocket>(makeSocket(listener))
-}
-
-// What the WebSocket doubles below share, so each overrides only sendText and the members its
-// cells use. sendText is not here, so the compiler makes each double say what a send does:
-// RelayConnection catches a send that throws and reports an ordinary failed publish, which a cell
-// that asserts only the failure cannot tell from the path it means to drive. sendBinary, sendPing
-// and sendPong are never reached. close() calls sendClose, and aborts only when the close frame is
-// not sent: here it is sent at once, so close() never aborts. request() is called by the listener
-// on each delivery.
-private abstract class DoubleWebSocket : WebSocket {
-  override fun sendClose(statusCode: Int, reason: String): CompletableFuture<WebSocket> =
-    CompletableFuture.completedFuture<WebSocket>(this)
-  override fun abort() {}
-  override fun request(n: Long) {}
-  override fun sendBinary(data: java.nio.ByteBuffer, last: Boolean): CompletableFuture<WebSocket> =
-    notUsed()
-  override fun sendPing(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
-  override fun sendPong(message: java.nio.ByteBuffer): CompletableFuture<WebSocket> = notUsed()
-  override fun getSubprotocol(): String = ""
-  override fun isOutputClosed(): Boolean = false
-  override fun isInputClosed(): Boolean = false
-}
-
 private class SyncOkWebSocket(
   private val okId: String,
   private val accepted: Boolean,
@@ -871,5 +835,37 @@ private class CloseOnSendWebSocket(private val listener: WebSocket.Listener) : D
   override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> {
     listener.onClose(this, WebSocket.NORMAL_CLOSURE, "bye")
     return CompletableFuture.completedFuture<WebSocket>(this)
+  }
+}
+
+// A WebSocket double whose send completes at once, and which then reports the relay's close from
+// another thread once the sending thread waits in pollUntilDeadline's poll. One snapshot of that
+// thread's stack shows it there when the frame just above pollUntilDeadline is poll: no other call
+// that pollUntilDeadline makes is named poll. pollUntilDeadline checks for a fault before each poll,
+// so a thread seen inside the poll has passed that poll's check. [closedWhileWaiting] says whether
+// the double found that point within 5 s and reported the close.
+private class CloseWhileWaitingWebSocket(private val listener: WebSocket.Listener) :
+  DoubleWebSocket() {
+  @Volatile
+  var closedWhileWaiting = false
+    private set
+
+  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> {
+    val sender = Thread.currentThread()
+    val watcher = Thread {
+      if (waitUntil(5_000) { isWaitingInPoll(sender) }) {
+        closedWhileWaiting = true
+        listener.onClose(this, WebSocket.NORMAL_CLOSURE, "bye")
+      }
+    }
+    watcher.isDaemon = true
+    watcher.start()
+    return CompletableFuture.completedFuture<WebSocket>(this)
+  }
+
+  private fun isWaitingInPoll(thread: Thread): Boolean {
+    val frames = thread.stackTrace
+    val at = frames.indexOfFirst { it.methodName == "pollUntilDeadline" }
+    return at > 0 && frames[at - 1].methodName == "poll"
   }
 }

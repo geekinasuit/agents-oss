@@ -229,6 +229,17 @@ kt_jvm_library(
     visibility = ["//visibility:private"],
 )
 
+# WebSocket-level test doubles for RelayConnection, reached through its injectable HttpClient. A
+# double decides when each relay frame reaches the connection's listener, relative to the client's
+# own calls, so a cell can fix an order that the socket-level fake_relay leaves to the scheduler.
+# testonly; it depends on nothing but the JDK.
+kt_jvm_library(
+    name = "websocket_double",
+    testonly = True,
+    srcs = ["WebSocketDouble.kt"],
+    visibility = ["//visibility:private"],
+)
+
 # The clearable secret-key holder (#42), native-free: structural hex validation, the defensive
 # copy, useKeyBytes zeroing its working ByteArray, and clear() zeroing the backing CharArray. It
 # neither signs nor parses, so it needs no crypto native. associates (not deps) on :relay so the
@@ -262,6 +273,7 @@ kt_jvm_test(
     deps = [
         ":fake_relay",
         ":nostr",
+        ":websocket_double",
         "@maven//:junit_junit",
     ],
 )
@@ -352,7 +364,7 @@ kt_jvm_test(
 # The NIP-42 auth handshake over the real BIP-340 primitive: the client signs a kind-22242 event and
 # the relay verdicts on it. Needs the native runtime-only, like nostr_wire_sign_test, because it
 # signs; and reads JSON directly (kotlinx) to pull the client event's id out of the ["AUTH", <event>]
-# frame the fake relay receives.
+# frame the client sends.
 kt_jvm_test(
     name = "relay_connection_auth_test",
     size = "small",
@@ -363,6 +375,7 @@ kt_jvm_test(
         ":fake_relay",
         ":nostr",
         ":relay",
+        ":websocket_double",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],

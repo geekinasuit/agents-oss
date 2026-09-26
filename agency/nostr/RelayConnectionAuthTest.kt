@@ -20,6 +20,10 @@ import org.junit.Test
  * signed AUTH event, waits for the matching OK, and fails closed otherwise). It cannot prove those
  * bytes satisfy a REAL relay — that is a separate manual real-relay cell, because a fake relay only
  * agrees with the test author's reading of NIP-42.
+ *
+ * One cell drives a WebSocket double ([webSocketClient]) in place of a [FakeRelay]. It needs the OK
+ * to arrive, and the relay's close to follow, before authenticate waits for that OK: an order that
+ * a real socket leaves to the scheduler.
  */
 class RelayConnectionAuthTest {
   private val key = "0000000000000000000000000000000000000000000000000000000000000003"
@@ -154,5 +158,29 @@ class RelayConnectionAuthTest {
       relay.assertScriptClean()
       conn.close()
     }
+  }
+
+  @Test
+  fun `authenticate on a connection that failed after its OK arrived fails, not Authenticated`() {
+    // The double delivers the challenge as the socket is built, so it waits in the inbound queue for
+    // authenticate. Inside the send, the double hands the listener an accepting OK for the auth
+    // event, which waits in authenticate's ack slot, and then reports the relay's close. The
+    // connection has failed before authenticate waits for the OK, so that wait ends on the fault
+    // without taking the buffered OK, and authenticate never says Authenticated.
+    val conn =
+      RelayConnection(
+        config("ws://127.0.0.1:1"),
+        webSocketClient { listener ->
+          OkThenCloseOnSendWebSocket(listener, ::clientEventId).also {
+            listener.onText(it, "[\"AUTH\",\"challenge-abc\"]", true)
+          }
+        },
+      )
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+    assertEquals(
+      AuthResult.Failed("connection failed: relay closed: 1000 'bye'"),
+      conn.authenticate(Duration.ofSeconds(3)),
+    )
+    conn.close()
   }
 }
