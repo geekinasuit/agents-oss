@@ -921,6 +921,44 @@ class GuardsTest {
   }
 
   @Test
+  fun anEscalationRowTheLeadDidNotWriteSilencesADeclinedIntentOnlyUnderTheSubstratesOrigin() {
+    // Adopt escalates a declined intent once, and knows it did from the digest an escalation row
+    // names beside its reason. A journal the lead did not write holds an intent the lead never
+    // journals, and an escalation row naming that intent's digest before any adopt. Under the
+    // cognition origin the row is never honored, so adopt still escalates the intent. Under the
+    // substrate's origin it is honored, and adopt says nothing: the residual `declinedEffects`
+    // documents.
+    val foreignKey = "deploy:" + "x".repeat(40)
+    val digest = sha256HexBytes(foreignKey.toByteArray(Charsets.UTF_8))
+    for ((origin, expected) in listOf(ORIGIN_COGNITION to 1, ORIGIN_SUBSTRATE to 0)) {
+      val dir = tmp.newFolder()
+      val store = SqliteStore(dir.absolutePath, componentId = "lead")
+      File(dir, "ticket.txt").writeText("t1\n")
+      journalForeignIntent(store, foreignKey, "fire $foreignKey")
+      store.append(
+        LeadKinds.ESCALATED,
+        buildJsonObject {
+          put("reason", "planted")
+          put("declinedEffectDigest", digest)
+        },
+        origin,
+      )
+      val f = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+      assertEquals(
+        "the foreign intent's decline is escalated $expected time(s) under origin $origin",
+        expected,
+        declinedReDrives(f.lead).size,
+      )
+      assertEquals(
+        "and it is not fired",
+        0,
+        EffectReceiver(dir.absolutePath).lineCountFor(foreignKey),
+      )
+      store.close()
+    }
+  }
+
+  @Test
   fun aCommitIntentACrashCutShortIsReDrivenOnlyWhileBothGatesAreApprovedOnTheirEvidence() {
     // The lead journals the commit effect's intent and crashes before it fires the effect. Adopt
     // re-fires the intent while both gates are approved on their recorded evidence: the effect
