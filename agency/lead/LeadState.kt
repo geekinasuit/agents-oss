@@ -376,7 +376,18 @@ data class LeadState(
    * key's UTF-8 text: a key comes from the journal, of any length, so the record holds a digest of
    * fixed size. Read from the digest an [LeadKinds.ESCALATED] row names beside its reason. The
    * daemon reads it to escalate each declined intent once, across restarts. Not ticket-scoped: a
-   * declined intent stays pending, and every adopt meets it again, whichever ticket is current. */
+   * declined intent stays pending, and every adopt meets it again, whichever ticket is current.
+   *
+   * No field of a row is evidence the lead wrote it. An escalation row with the substrate's origin
+   * that the lead did not write can name an intent's digest before adopt declines the intent, and
+   * adopt then does not escalate it: the intent stays pending, unfired and unnamed.
+   * [escalatedStalls] is silenced the same way. An escalation row with any other origin is never
+   * honored. This record does not try to be stronger than the journal: a writer that can use the
+   * substrate's origin can already append any substrate row, [LeadKinds.TICKET_DONE] among them,
+   * and the shared fold reads `effect-intent` and `effect-done` rows without their origin, so an
+   * `effect-done` row of any origin already takes an intent out of adopt's view. Adopt never fires
+   * such an intent. The lead's own commit intent is still fired by the commit arm, which records its
+   * ticket done only once the effect receiver has seen its key. */
   val declinedEffects: Set<String> = emptySet(),
   /** (seq, reason) for turns whose output was unusable — the degradation signal, kept apart
    * from [escalations] so a degrading model is countable rather than merely noisy. */
