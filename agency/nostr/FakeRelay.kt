@@ -231,3 +231,9 @@ fun waitUntil(timeoutMillis: Long, cond: () -> Boolean): Boolean {
   }
   return cond()
 }
+
+/** A loopback URL where nothing listens, so a connect there is refused. Port 1 is outside the
+ * ephemeral range that a port-0 bind draws from, and the tests here bind only port 0, so no test
+ * running alongside can take it. On a host where something listened on port 1, the cells that
+ * assert a refusal would fail. */
+const val REFUSED_URL = "ws://127.0.0.1:1"
