@@ -395,14 +395,46 @@ data class LeadState(
    * (advance the pipeline, launch the executor, drive the commit effect) must instead confirm
    * the digest the gate is open on NOW was the one released. Acting also needs that digest to
    * be the evidence the substrate recorded for the gate's kind, which this does not check: a
-   * gate open and released on any other digest approves nothing the substrate recorded, so the
-   * daemon's action checks ask both. The read-side mirror of [foldRelease]'s single-release
-   * guard — both test `payloadDigest in releasedDigests[gateId]`. Fail-closed: a gate not open
-   * is not approved. [pendingGates] deliberately keeps the epoch-blind [releasedGates] read; "do
-   * not re-surface a gate released at all this ticket" is a different question. */
+   * gate open and released on any other digest approves nothing the substrate recorded, so
+   * whatever decides on an approval asks [approvedOnEvidence], which checks both. The read-side
+   * mirror of [foldRelease]'s single-release guard — both test `payloadDigest in
+   * releasedDigests[gateId]`. Fail-closed: a gate not open is not approved. [pendingGates]
+   * deliberately keeps the epoch-blind [releasedGates] read; "do not re-surface a gate released
+   * at all this ticket" is a different question. */
   fun approvedOnCurrentDigest(gateId: String): Boolean {
     val gate = openGates[gateId] ?: return false
     return gate.payloadDigest in releasedDigests[gateId].orEmpty()
+  }
+
+  /** The digest recorded as the evidence a gate of [gateKind] binds to, in whatever form the
+   * journal holds it: the plan artifact's for the plan gate, the commit manifest's for the commit
+   * gate, none for any other kind or while none is recorded. */
+  fun recordedEvidence(gateKind: String): String? =
+    when (gateKind) {
+      GateKinds.PLAN_APPROVAL -> planArtifactSha
+      GateKinds.COMMIT_APPROVAL -> commitManifestDigest
+      else -> null
+    }
+
+  /** The digest the substrate recorded as the evidence a gate of [gateKind] binds to
+   * ([recordedEvidence]). A gate opens only on this digest, and a gate-open's nonce is minted only
+   * while the gate's digest still equals it. A recorded digest counts only in the form the
+   * substrate records one, and any other counts as none: a digest in another form was not recorded
+   * by the substrate, and a nonce bound to a blank one would make every later fold of the journal
+   * fail. */
+  fun evidenceDigest(gateKind: String): String? =
+    recordedEvidence(gateKind)?.takeIf { SHA256_HEX_RE.matches(it) }
+
+  /** Whether the [gateKind] gate of [ticket] is approved on the digest it is open on now, and that
+   * digest is the substrate's evidence for its kind ([evidenceDigest]). Everything that decides on
+   * an approval asks this, not [approvedOnCurrentDigest] alone: the daemon before it acts, and
+   * cognition before it proposes. The lead opens a gate only on its evidence, so a gate open on any
+   * other digest came from a journal the lead did not write, and a release on that digest approves
+   * nothing the substrate recorded. */
+  fun approvedOnEvidence(gateKind: String, ticket: String): Boolean {
+    val gateId = gateIdFor(gateKind, ticket)
+    val evidence = evidenceDigest(gateKind) ?: return false
+    return openGates[gateId]?.payloadDigest == evidence && approvedOnCurrentDigest(gateId)
   }
 
   /** The gate's currently-usable nonce: issued for THIS gate, bound to the digest the
@@ -508,6 +540,9 @@ private val SUBSTRATE_AUTHORED_KINDS =
  * length bound keeps a malformed ref from wedging the pipeline or polluting a namespace. */
 private val TICKET_REF_RE = Regex("[A-Za-z0-9._-]+")
 private const val MAX_TICKET_REF_LEN = 128
+
+/** The form the substrate records an evidence digest in: [sha256HexBytes]'s lowercase hex. */
+private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
 
 /** Whether the claim accepts [ref]: in [TICKET_REF_RE]'s charset and at most [MAX_TICKET_REF_LEN]
  * chars. The claim journals only a ref that passes, as a JSON string. The fold refuses a

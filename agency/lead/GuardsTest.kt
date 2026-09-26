@@ -335,43 +335,91 @@ class GuardsTest {
 
   @Test
   fun scriptedCognitionDoesNotExecuteOnAPlanReOpenedPastItsApproval() {
-    // AGENCY #28: the scripted playbook must ask "is the digest the plan gate is open on
-    // NOW approved?", not the epoch-blind "was this gate released at all this ticket?". A
-    // gate released on d1 and then re-opened on a NEW digest d2 is a fresh authorization
-    // surface that d1's release does not cover, so cognition must NOT treat the plan as
-    // approved and spawn the executor. Pure decide() cell: this state is exactly what
-    // leadFold yields for GATE_OPENED(d1) -> release(d1) -> GATE_OPENED(d2) (proven in
-    // AuthFoldTest), built directly here to isolate the consumer decision.
+    // The scripted playbook must ask "is the digest the plan gate is open on NOW approved?", not
+    // the epoch-blind "was this gate released at all this ticket?". A gate released on d1 and then
+    // re-opened on a new digest d2 is a fresh authorization surface that d1's release does not
+    // cover, so cognition must NOT treat the plan as approved and spawn the executor. Here d2 is
+    // the recorded plan, so the gate is open on its evidence and only the epoch decides. Pure
+    // decide() cell: this state is what leadFold yields for GATE_OPENED(d1) -> release(d1) ->
+    // GATE_OPENED(d2) (proven in AuthFoldTest), built directly here to isolate the decision.
     val ticket = "t1"
     val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, ticket)
+    val plan = "a".repeat(64)
+    val earlier = "b".repeat(64)
     val reOpenedPastApproval =
       LeadState(
         currentTicket = ticket,
-        planArtifactSha = "d1",
-        openGates = mapOf(planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, "d2", 9L)),
+        planArtifactSha = plan,
+        openGates = mapOf(planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, plan, 9L)),
         releasedGates = setOf(planGateId), // epoch-blind: released at all this ticket
-        releasedDigests = mapOf(planGateId to setOf("d1")), // but only ON d1, not the open d2
+        releasedDigests = mapOf(planGateId to setOf(earlier)), // only on d1, not the open one
       )
-    fun executeProposed(lead: LeadState): Boolean =
-      ScriptedCognition()
-        .decide(WakeContext(WakeReason.Adopted, lead, JournalState(), emptyList()))
-        .proposals
-        .any { it is Proposal.ProposePodSpawn && it.taskRef == "execute:$ticket" }
 
     assertFalse(
       "no executor on a plan re-opened past its approval",
-      executeProposed(reOpenedPastApproval),
+      executeProposed(reOpenedPastApproval, ticket),
     )
-    // Positive control: approve the CURRENT digest too and the executor IS spawned — so the
-    // refusal above is about the epoch, not some unrelated branch, and the fix has not simply
-    // wedged the pipeline shut.
+    // Positive control: the same gate released on the recorded plan it is open on, and the
+    // executor IS spawned — so the refusal above is about the epoch, not some unrelated branch,
+    // and the playbook has not simply been wedged shut.
     assertTrue(
-      "with the current digest approved, the executor is spawned",
+      "released on the recorded plan it is open on, the executor is spawned",
       executeProposed(
-        reOpenedPastApproval.copy(releasedDigests = mapOf(planGateId to setOf("d1", "d2")))
+        reOpenedPastApproval.copy(releasedDigests = mapOf(planGateId to setOf(earlier, plan))),
+        ticket,
       ),
     )
   }
+
+  @Test
+  fun scriptedCognitionDoesNotExecuteOnAPlanGateReleasedOnADigestThatIsNotTheRecordedPlan() {
+    // The daemon acts on a release only when the gate's digest is the substrate's evidence for
+    // its kind. The playbook asks the same question, so a plan gate open and released on a digest
+    // that is not the recorded plan does not read as an approved plan, and no executor is
+    // proposed that the daemon would only refuse.
+    val ticket = "t1"
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, ticket)
+    val plan = "a".repeat(64)
+    val notThePlan = "b".repeat(64)
+    val releasedOffThePlan =
+      LeadState(
+        currentTicket = ticket,
+        planArtifactSha = plan,
+        openGates =
+          mapOf(planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, notThePlan, 9L)),
+        releasedGates = setOf(planGateId),
+        releasedDigests = mapOf(planGateId to setOf(notThePlan)),
+      )
+    assertTrue(
+      "the gate is released on the digest it is open on",
+      releasedOffThePlan.approvedOnCurrentDigest(planGateId),
+    )
+    assertFalse(
+      "but that digest is not the recorded plan, so no executor is proposed",
+      executeProposed(releasedOffThePlan, ticket),
+    )
+    // A recorded plan that is not in the form the substrate records is no evidence either, even
+    // with the gate open and released on it.
+    val malformed = "not-a-digest"
+    assertFalse(
+      "nor on a recorded plan in another form",
+      executeProposed(
+        releasedOffThePlan.copy(
+          planArtifactSha = malformed,
+          openGates =
+            mapOf(planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, malformed, 9L)),
+          releasedDigests = mapOf(planGateId to setOf(malformed)),
+        ),
+        ticket,
+      ),
+    )
+  }
+
+  private fun executeProposed(lead: LeadState, ticket: String): Boolean =
+    ScriptedCognition()
+      .decide(WakeContext(WakeReason.Adopted, lead, JournalState(), emptyList()))
+      .proposals
+      .any { it is Proposal.ProposePodSpawn && it.taskRef == "execute:$ticket" }
 
   @Test
   fun executeSpawnIsRefusedWhenThePlanGateWasReOpenedPastItsApproval() {
@@ -696,17 +744,23 @@ class GuardsTest {
     // A journal the lead did not write opens the plan gate and releases it before any plan is
     // recorded. Until a plan is recorded, that digest may yet be the plan's, so nothing is escalated
     // as off its evidence, even when cognition proposes the executor. Once a plan is recorded and it
-    // is not that digest, the gate is escalated, once. The first two drives keep the planner in
-    // flight, so no plan is recorded; each drive's adopt abandons the pod the one before left in
-    // flight, and cognition proposes a new one.
+    // is not that digest, the gate is escalated, once. The first drive leaves the planner in
+    // flight. The second drive's adopt abandons it, and its cognition proposes no planner, so no
+    // plan is recorded. The playbook proposes no executor on a gate released off the evidence, so a
+    // cognition that proposes one anyway drives the second.
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     File(dir, "ticket.txt").writeText("t1\n")
     val held = FakePodRunner(holdCompletions = true)
-    val d = leadDaemon(dir, store, ScriptedCognition(), held)
-    d.driveUntilQuiescent() // t1 claimed, planner in flight
+    leadDaemon(dir, store, ScriptedCognition(), held).driveUntilQuiescent() // planner in flight
     val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
     val notThePlan = "0".repeat(64)
     store.gateOpened(planGateId, GateKinds.PLAN_APPROVAL, notThePlan)
+    val executeAnyway =
+      CognitionOutput(
+        listOf(Proposal.ProposePodSpawn("execute:t1")),
+        "buggy/hostile: launch the executor before any plan is recorded",
+      )
+    val d = leadDaemon(dir, store, ProgrammedCognition(mutableListOf(executeAnyway)), held)
     d.injectAuthRelease(planGateId, notThePlan)
     val f1 = d.driveUntilQuiescent()
     assertEquals("no plan is recorded yet", null, f1.lead.planArtifactSha)

@@ -32,8 +32,8 @@ object CognitionProtocol {
      ], "reasoning": "<one or two sentences>"}
     An empty proposals array means idle. Open a gate only on a digest shown in the state.
     Follow the pipeline: no plan artifact -> spawn planner; plan artifact and no plan
-    gate -> open plan-approval on its sha; plan approved and no manifest -> spawn
-    executor; manifest and no commit gate -> open commit-approval on its digest;
+    gate -> open plan-approval on its sha; plan gate approved=true and no manifest ->
+    spawn executor; manifest and no commit gate -> open commit-approval on its digest;
     otherwise idle and wait.
     """
       .trimIndent()
@@ -54,11 +54,22 @@ object CognitionProtocol {
     sb.appendLine("ticket: ${lead.currentTicket ?: "none"}  phase: ${lead.phase}")
     sb.appendLine("planArtifactSha: ${lead.planArtifactSha ?: "none"}")
     sb.appendLine("commitManifestDigest: ${lead.commitManifestDigest ?: "none"}")
+    // A gate reads approved only when it is one a stage of the current ticket waits on, and it is
+    // released on the digest it is open on, which is the substrate's evidence for its kind
+    // ([LeadState.approvedOnEvidence]). The daemon asks the same of each gate before it acts; the
+    // commit effect also asks it of the plan gate.
+    fun approved(gate: OpenGate): Boolean {
+      val ticket = lead.currentTicket ?: return false
+      return GateKinds.ALL.any { kind ->
+        gateIdFor(kind, ticket) == gate.gateId && lead.approvedOnEvidence(kind, ticket)
+      }
+    }
     sb.appendLine(
       "openGates: " +
-        lead.openGates.values.joinToString(", ") {
-          "${it.gateId}(digest=${it.payloadDigest}, approvedOnDigest=${lead.approvedOnCurrentDigest(it.gateId)})"
-        }
+        lead.openGates.values
+          .joinToString(", ") {
+            "${it.gateId}(digest=${it.payloadDigest}, approved=${approved(it)})"
+          }
           .ifEmpty { "none" }
     )
     sb.appendLine(
