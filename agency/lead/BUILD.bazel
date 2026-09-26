@@ -130,6 +130,25 @@ kt_jvm_test(
     ],
 )
 
+# The bound copy of a pod's artifact, read back before the plan record: disturbed copies at the
+# bound path after a crash, and snapshots at and over the limit the lead records. Two cells hold
+# snapshots of the whole limit, 32 MiB, in memory.
+kt_jvm_test(
+    name = "bound_artifact_test",
+    size = "small",
+    srcs = ["BoundArtifactTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.BoundArtifactTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":lead",
+        "//agency/pod",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
 kt_jvm_test(
     name = "thread_timer_service_test",
     size = "small",

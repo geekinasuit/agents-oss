@@ -664,6 +664,28 @@ class LeadDaemon(
       }
       is WakeEvent.PodDone -> {
         val c = ev.completion
+        // The lead reads a bound copy back whole before a record binds to it, so it records no
+        // snapshot larger than it reads back. A larger one is refused before anything else about the
+        // result is journaled, and its copy is never written, so a bound copy over the limit can only
+        // be one disturbed after it was written. The pod is abandoned, as for a failed bound write,
+        // and the playbook re-proposes.
+        if (c.snapshot.size > MAX_BOUND_ARTIFACT_BYTES) {
+          escalate(
+            "pod-completion snapshot too large for pod '${c.podId.take(80)}': ${c.snapshot.size} bytes, " +
+              "over the $MAX_BOUND_ARTIFACT_BYTES the lead reads back — abandoning the pod; the playbook " +
+              "re-proposes"
+          )
+          refold().lead.pods[c.podId]?.let { noteFailureAbandon(it.taskRef) }
+          store.append(
+            LeadKinds.POD_ABANDONED,
+            buildJsonObject {
+              put("podId", c.podId.take(MAX_JOURNALED_STRING))
+              put("reason", "snapshot-too-large")
+            },
+            origin = ORIGIN_SUBSTRATE,
+          )
+          return
+        }
         // Runner-supplied completion fields are semi-trusted infrastructure input (the
         // engine parses them out of adapter output): strings are bounded like every other
         // externally-fed journaled value, and the cost is journaled only when finite and
@@ -1130,6 +1152,57 @@ class LeadDaemon(
     data class Unresolved(val reason: String) : ArtifactResolution
   }
 
+  /** What [readBoundCopy] found at a bound path. */
+  private sealed interface BoundRead {
+    class Bytes(val bytes: ByteArray) : BoundRead
+
+    data object Missing : BoundRead
+
+    data object NotARegularFile : BoundRead
+
+    data class TooLarge(val size: Long) : BoundRead
+
+    data object Grew : BoundRead
+
+    class Fault(val error: Exception) : BoundRead
+  }
+
+  /**
+   * Read the bound copy at [path], which the lead wrote as a regular file, taking at most [limit]
+   * bytes. It runs on the single-writer loop thread, so a fault is a [BoundRead] value, never a
+   * throw, and what the check finds at the path decides whether it is opened at all.
+   *
+   * The path's last name is checked without following a link, and anything but a regular file is
+   * refused unopened, since opening a FIFO blocks and a device can be read without end. A copy
+   * larger than [limit] is refused from its size, unopened. The read takes at most one byte past
+   * [limit], so a copy that grows after the size check is never read whole, and the open follows
+   * no link at the last name either. [faultPoint] names the fault point between the check and the
+   * open. The path can still be swapped for a FIFO between the two, at its last name or through a
+   * directory above it. The open then blocks the loop thread until something opens the FIFO to
+   * write, and until then the lead takes no wake, a queued [shutdown] included. The pod engine's
+   * artifact read has the same race, but there it parks one supervisor thread and the loop runs on.
+   */
+  private fun readBoundCopy(path: String, limit: Int, faultPoint: String): BoundRead {
+    val attrs =
+      try {
+        Files.readAttributes(Path.of(path), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+      } catch (e: NoSuchFileException) {
+        return BoundRead.Missing
+      } catch (e: Exception) {
+        return BoundRead.Fault(e)
+      }
+    if (!attrs.isRegularFile) return BoundRead.NotARegularFile
+    if (attrs.size() > limit) return BoundRead.TooLarge(attrs.size())
+    faults.at(faultPoint)
+    val bytes =
+      try {
+        Files.newInputStream(Path.of(path), LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(limit + 1) }
+      } catch (e: Exception) {
+        return BoundRead.Fault(e)
+      }
+    return if (bytes.size > limit) BoundRead.Grew else BoundRead.Bytes(bytes)
+  }
+
   /**
    * Read the artifact a ceremony gate is open on from its lead-owned bound copy, for inlining into
    * the gate-open notice. The path is the immutable bound copy the fold recorded (plan artifact or
@@ -1151,19 +1224,14 @@ class LeadDaemon(
    * are judged after the digest matches, so what they refuse is intact. The size is judged first,
    * from the file alone, so `artifact-too-large` is also what a disturbed copy of that size gets.
    *
-   * The read runs on the single-writer loop thread, so a disturbed copy must not make it block or
-   * throw: a fault is an Unresolved value, never a throw that would escape and skip the marker. The
-   * lead wrote the bound copy as a regular file, so it opens nothing else: a link, a directory, a
-   * FIFO or a device at the path is refused unopened as a `read-fault`, since opening a FIFO blocks
-   * and a device can be read without end. Only the path's last name is checked that way; a link
-   * among the directories above it is followed, and the digest still decides what the operator
-   * reads. A copy larger than the capacity the sink declares ([artifactReadCap]) is refused from its
-   * size, unopened, as `artifact-too-large`. The read takes at most one byte past that capacity, so
-   * a copy that grows after the size check is never read whole: it is refused as
-   * `bound-artifact-changed`. The open does not follow a link at the last name either, so a link
-   * swapped in there after the check is refused as a `read-fault`. The path can still be swapped for
-   * a FIFO between the check and the open, at its last name or through a directory above it, and
-   * the open then blocks, as the pod engine's own artifact read can.
+   * The copy is read with [readBoundCopy], up to the capacity the sink declares ([artifactReadCap]),
+   * so a fault is an Unresolved value, never a throw that would escape and skip the marker. A link,
+   * a directory, a FIFO or a device at the path is refused unopened as a `read-fault`. A link swapped
+   * in there after the check is refused as one too, since the open follows no link, and so is a read
+   * that faults. A copy larger than the capacity is refused unopened as `artifact-too-large`, and one
+   * that grows past it while it is read as `bound-artifact-changed`. Only the path's last name is
+   * checked for a link; a link among the directories above it is followed, and the digest still
+   * decides what the operator reads.
    */
   private fun resolveGateArtifact(
     gateKind: String,
@@ -1176,34 +1244,22 @@ class LeadDaemon(
         GateKinds.COMMIT_APPROVAL -> lead.commitManifestPath
         else -> null
       } ?: return ArtifactResolution.Unresolved("no-bound-path")
-    val attrs =
-      try {
-        Files.readAttributes(Path.of(path), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-      } catch (e: NoSuchFileException) {
-        return ArtifactResolution.Unresolved("bound-artifact-missing")
-      } catch (e: Exception) {
-        return ArtifactResolution.Unresolved("read-fault:${e.message}")
-      }
-    if (!attrs.isRegularFile) return ArtifactResolution.Unresolved("read-fault:not a regular file")
-    if (attrs.size() > artifactReadCap) {
-      return ArtifactResolution.Unresolved(
-        "artifact-too-large:${attrs.size()} bytes, over the $artifactReadCap the sink carries"
-      )
-    }
-    faults.at("before-gate-artifact-read")
     val bytes =
-      try {
-        Files.newInputStream(Path.of(path), LinkOption.NOFOLLOW_LINKS).use {
-          it.readNBytes(artifactReadCap + 1)
-        }
-      } catch (e: Exception) {
-        return ArtifactResolution.Unresolved("read-fault:${e.message}")
+      when (val read = readBoundCopy(path, artifactReadCap, "before-gate-artifact-read")) {
+        is BoundRead.Bytes -> read.bytes
+        BoundRead.Missing -> return ArtifactResolution.Unresolved("bound-artifact-missing")
+        BoundRead.NotARegularFile ->
+          return ArtifactResolution.Unresolved("read-fault:not a regular file")
+        is BoundRead.TooLarge ->
+          return ArtifactResolution.Unresolved(
+            "artifact-too-large:${read.size} bytes, over the $artifactReadCap the sink carries"
+          )
+        BoundRead.Grew ->
+          return ArtifactResolution.Unresolved(
+            "bound-artifact-changed:grew past the $artifactReadCap bytes the sink carries while it was read"
+          )
+        is BoundRead.Fault -> return ArtifactResolution.Unresolved("read-fault:${read.error.message}")
       }
-    if (bytes.size > artifactReadCap) {
-      return ArtifactResolution.Unresolved(
-        "bound-artifact-changed:grew past the $artifactReadCap bytes the sink carries while it was read"
-      )
-    }
     if (sha256HexBytes(bytes) != payloadDigest) return ArtifactResolution.Unresolved("digest-mismatch")
     // Decoded strictly: a lenient decode swaps malformed bytes for U+FFFD, showing the operator
     // text the digest does not authorize, and showing distinct byte strings as the same text.
@@ -1232,46 +1288,87 @@ class LeadDaemon(
    * pod's own artifactPath is deliberately never touched here: re-reading the pod's path
    * after the digest was taken is the swap window the discipline exists to close.
    *
+   * The copy is read with [readBoundCopy], up to [MAX_BOUND_ARTIFACT_BYTES], so a fault at the
+   * bound path is a value, never a throw, and a copy the check finds is not a regular file is never
+   * opened. A normal wake reads the copy right after it is written. A crash between the result
+   * record and the record that binds the copy makes every restart read it again, so a copy
+   * disturbed in that window must abandon the pod, not stop the lead.
+   *
    * Missing bound copy (no boundPath recorded — a pre-bind-once row — or the file is gone:
    * host crash before the page flushed, external deletion) → the pod is abandoned (reason
    * journaled) and null returns; the playbook re-proposes from the missing evidence.
-   * Integrity mismatch — the lead's OWN storage disagreeing with the journaled digest — is
-   * NOT a lying pod (that cross-check happened at result-record time, against the
-   * snapshot): it means the bound store itself was disturbed, so the pod is abandoned and
-   * the mismatch escalated; nothing binds to bytes the record cannot vouch for.
+   * Anything else wrong with the copy is NOT a lying pod (that cross-check happened at
+   * result-record time, against the snapshot): it means the lead's OWN bound store was
+   * disturbed. That is anything but a regular file at the path, a link included, dangling or not;
+   * a read that faults; a copy larger than the limit, which the lead never writes; a copy that
+   * grows past the limit while it is read; or bytes that disagree with the journaled digest. The
+   * pod is abandoned and the disturbance escalated; nothing binds to bytes the record cannot vouch
+   * for.
    */
   private fun verifiedBoundArtifact(pod: PodRecord): VerifiedArtifact? {
-    val bound = pod.boundPath?.let { File(it) }
-    if (bound == null || !bound.exists()) {
-      noteFailureAbandon(pod.taskRef)
-      store.append(
-        LeadKinds.POD_ABANDONED,
-        buildJsonObject {
-          put("podId", pod.podId)
-          put("reason", "bound-artifact-missing at ${pod.boundPath ?: "(none recorded)"}")
-        },
-        origin = ORIGIN_SUBSTRATE,
-      )
+    val boundPath = pod.boundPath
+    if (boundPath == null) {
+      abandon(pod, "bound-artifact-missing at (none recorded)")
       return null
     }
-    val recomputed = sha256HexBytes(bound.readBytes())
+    val bytes =
+      when (val read = readBoundCopy(boundPath, MAX_BOUND_ARTIFACT_BYTES, "before-bound-artifact-read")) {
+        is BoundRead.Bytes -> read.bytes
+        BoundRead.Missing -> {
+          abandon(pod, "bound-artifact-missing at $boundPath")
+          return null
+        }
+        BoundRead.NotARegularFile -> return abandonDisturbed(pod, "not a regular file")
+        is BoundRead.TooLarge ->
+          return abandonDisturbed(
+            pod,
+            "${read.size} bytes, over the $MAX_BOUND_ARTIFACT_BYTES the lead reads back",
+          )
+        BoundRead.Grew ->
+          return abandonDisturbed(
+            pod,
+            "grew past the $MAX_BOUND_ARTIFACT_BYTES bytes the lead reads back while it was read",
+          )
+        is BoundRead.Fault ->
+          return abandonDisturbed(
+            pod,
+            "read fault: ${read.error::class.simpleName}: ${read.error.message?.take(200)}",
+          )
+      }
+    val recomputed = sha256HexBytes(bytes)
     if (recomputed != pod.resultDigest) {
       escalate(
         "bound-artifact integrity failure pod=${pod.podId}: journaled ${pod.resultDigest.orEmpty().take(16)} " +
           "vs on-disk ${recomputed.take(16)} at ${pod.boundPath} — abandoning; nothing binds to it"
       )
-      noteFailureAbandon(pod.taskRef)
-      store.append(
-        LeadKinds.POD_ABANDONED,
-        buildJsonObject {
-          put("podId", pod.podId)
-          put("reason", "bound-artifact-integrity-failure")
-        },
-        origin = ORIGIN_SUBSTRATE,
-      )
+      abandon(pod, "bound-artifact-integrity-failure")
       return null
     }
-    return VerifiedArtifact(bound.path, recomputed)
+    return VerifiedArtifact(File(boundPath).path, recomputed)
+  }
+
+  /** Escalate that [pod]'s bound copy was disturbed, as [detail] says, and abandon the pod. Returns
+   * null, for [verifiedBoundArtifact] to return: nothing binds to the copy. */
+  private fun abandonDisturbed(pod: PodRecord, detail: String): VerifiedArtifact? {
+    escalate(
+      "bound-artifact disturbed pod=${pod.podId}: $detail at ${pod.boundPath} — abandoning; " +
+        "nothing binds to it"
+    )
+    abandon(pod, "bound-artifact-disturbed: $detail")
+    return null
+  }
+
+  /** Abandon [pod] for [reason], counting it against its task's attempts in this process. */
+  private fun abandon(pod: PodRecord, reason: String) {
+    noteFailureAbandon(pod.taskRef)
+    store.append(
+      LeadKinds.POD_ABANDONED,
+      buildJsonObject {
+        put("podId", pod.podId)
+        put("reason", reason.take(MAX_JOURNALED_STRING))
+      },
+      origin = ORIGIN_SUBSTRATE,
+    )
   }
 
   /**
@@ -1723,6 +1820,18 @@ class LeadDaemon(
       is WakeEvent.AuthRelease -> WakeReason.GateReleased(ev.gateId)
       WakeEvent.Shutdown -> WakeReason.Adopted // unreachable: shutdown never reaches handleWake
     }
+
+  companion object {
+    /**
+     * The largest pod artifact the lead records, in bytes: 32 MiB, the most the ACP pod engine
+     * reads of an artifact unless it is built with a larger cap. The lead reads a pod's bound copy
+     * back whole, on its single loop thread, before the plan or commit record binds to it, so it
+     * refuses a completion whose snapshot is larger before it writes the copy. A bound copy larger
+     * than this was therefore disturbed after it was written, and is refused unread. A pod runner
+     * that delivers more gets those results refused, and the work proposed again.
+     */
+    const val MAX_BOUND_ARTIFACT_BYTES: Int = 32 shl 20
+  }
 }
 
 /** Ticket offer seam: a fixture file today; real ticket-index ops come later. */
