@@ -799,10 +799,10 @@ class LeadDaemon(
     // spent and would only announce a decided gate again.
     //
     // So the id and digest a nonce is bound to here are never blank, which the fold refuses, and
-    // are in the forms the lead itself writes: the id is a kind [evidenceDigest] knows and a ticket
-    // ref the claim accepts, and the digest is in the hex form the substrate records. A gate under
-    // any other id or digest came from a journal the lead did not write, or was opened for a claim
-    // that came from one, and the mint does not act on it.
+    // are in the forms the lead itself writes: the id is a kind [LeadState.evidenceDigest] knows
+    // and a ticket ref the claim accepts, and the digest is in the hex form the substrate records.
+    // A gate under any other id or digest came from a journal the lead did not write, or was
+    // opened for a claim that came from one, and the mint does not act on it.
     val wellFormedTicket = lead.currentTicket?.takeIf { isClaimableTicketRef(it) }
     if (leadAuth.hasApprovers && wellFormedTicket != null) {
       for (gate in lead.openGates.values) {
@@ -830,7 +830,7 @@ class LeadDaemon(
           if (gate.gateKind != kind) {
             "its recorded kind of ${gate.gateKind.length} chars is not the kind its id names"
           } else {
-            if (recordedEvidence(kind, lead) == null) continue
+            if (lead.recordedEvidence(kind) == null) continue
             mintRefusal(gate, lead) ?: continue
           }
         escalateStall(gate, refusal)
@@ -839,24 +839,25 @@ class LeadDaemon(
     }
 
     // A release is acted on only when the digest it approves is the substrate's evidence for the
-    // kind the gate's id names ([approvedOnEvidence]). The lead opens a gate only on that evidence,
-    // so a gate released on another digest came from a journal the lead did not write, and the stage
-    // it guards waits with nothing to say why. Such a gate is escalated once evidence is recorded for
-    // its kind, since until then its digest may yet be that evidence. It is escalated once per gate
-    // and digest, under the record the stall escalation above keeps ([LeadState.escalatedStalls]):
-    // no later pass or restart escalates it again, and a gate already escalated on that digest for
-    // another reason is not escalated again for its release. This runs under any auth, since such a
-    // journal can release a gate under any: under DENY_ALL a release needs no nonce, and under a
-    // ceremony auth the journal can issue the nonce too. The record, like the fold's released
-    // digests, does not tell one open of a gate from another: a gate such a journal re-opens on a
-    // digest it was escalated on before is not escalated again. Nor is it when such a journal moves
-    // the recorded evidence, and the earlier reason then quotes evidence that no longer holds.
+    // kind the gate's id names ([LeadState.approvedOnEvidence]). The lead opens a gate only on that
+    // evidence, so a gate released on another digest came from a journal the lead did not write,
+    // and the stage it guards waits with nothing to say why. Such a gate is escalated once evidence
+    // is recorded for its kind, since until then its digest may yet be that evidence. It is
+    // escalated once per gate and digest, under the record the stall escalation above keeps
+    // ([LeadState.escalatedStalls]): no later pass or restart escalates it again, and a gate
+    // already escalated on that digest for another reason is not escalated again for its release.
+    // This runs under any auth, since such a journal can release a gate under any: under DENY_ALL
+    // a release needs no nonce, and under a ceremony auth the journal can issue the nonce too. The
+    // record, like the fold's released digests, does not tell one open of a gate from another: a
+    // gate such a journal re-opens on a digest it was escalated on before is not escalated again.
+    // Nor is it when such a journal moves the recorded evidence, and the earlier reason then quotes
+    // evidence that no longer holds.
     if (wellFormedTicket != null) {
       for (kind in GateKinds.ALL) {
         val gate = lead.openGates[gateIdFor(kind, wellFormedTicket)] ?: continue
         if (!lead.approvedOnCurrentDigest(gate.gateId)) continue
         if (gate.payloadDigest in lead.escalatedStalls[gate.gateId].orEmpty()) continue
-        if (recordedEvidence(kind, lead) == null) continue
+        if (lead.recordedEvidence(kind) == null) continue
         val mismatch = evidenceMismatch(kind, gate.payloadDigest, lead) ?: continue
         escalateGate(
           gate,
@@ -954,7 +955,7 @@ class LeadDaemon(
     }
 
     // Propose the commit from a finished execute pod's manifest — same bound-copy rule.
-    val planApproved = approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket, lead)
+    val planApproved = lead.approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)
     if (planApproved && lead.commitManifestDigest == null) {
       val executor = lead.podFor("execute:$ticket")
       if (executor?.resultDigest != null) {
@@ -978,7 +979,7 @@ class LeadDaemon(
     // manifest — so a release for a gate that opened out of order, or on a digest the
     // substrate never recorded, can never fire an effect on evidence nobody approved.
     val commitApproved =
-      approvedOnEvidence(GateKinds.COMMIT_APPROVAL, ticket, lead) && planApproved
+      lead.approvedOnEvidence(GateKinds.COMMIT_APPROVAL, ticket) && planApproved
     if (commitApproved) {
       val effectKey = "apply-commit:$ticket"
       if (effectKey !in shared.intents) {
@@ -1023,36 +1024,6 @@ class LeadDaemon(
     return false
   }
 
-  /** The digest recorded as the evidence a gate of [gateKind] binds to, in whatever form the
-   * journal holds it: the plan artifact's for the plan gate, the commit manifest's for the commit
-   * gate, none for any other kind or while none is recorded. */
-  private fun recordedEvidence(gateKind: String, lead: LeadState): String? =
-    when (gateKind) {
-      GateKinds.PLAN_APPROVAL -> lead.planArtifactSha
-      GateKinds.COMMIT_APPROVAL -> lead.commitManifestDigest
-      else -> null
-    }
-
-  /** The digest the substrate recorded as the evidence a gate of [gateKind] binds to
-   * ([recordedEvidence]). A gate opens only on this digest, and a gate-open's nonce is minted only
-   * while the gate's digest still equals it. A recorded digest counts only in the form the
-   * substrate records one, and any other counts as none: a digest in another form was not recorded
-   * by the substrate, and a nonce bound to a blank one would make every later fold of the journal
-   * fail. */
-  private fun evidenceDigest(gateKind: String, lead: LeadState): String? =
-    recordedEvidence(gateKind, lead)?.takeIf { SHA256_HEX_RE.matches(it) }
-
-  /** Whether the [gateKind] gate of [ticket] is approved on the digest it is open on now, and that
-   * digest is the substrate's evidence for its kind ([evidenceDigest]). Each check that acts on an
-   * approval asks this, not [LeadState.approvedOnCurrentDigest] alone: the lead opens a gate only on
-   * its evidence, so a gate open on any other digest came from a journal the lead did not write, and
-   * a release on that digest approves nothing the substrate recorded. */
-  private fun approvedOnEvidence(gateKind: String, ticket: String, lead: LeadState): Boolean {
-    val gateId = gateIdFor(gateKind, ticket)
-    val evidence = evidenceDigest(gateKind, lead) ?: return false
-    return lead.openGates[gateId]?.payloadDigest == evidence && lead.approvedOnCurrentDigest(gateId)
-  }
-
   /** Journal a fresh single-use nonce bound to ([gateId], [payloadDigest]), the pair the release
    * fold checks it against, and return it. */
   private fun mintNonce(gateId: String, payloadDigest: String): String {
@@ -1071,12 +1042,12 @@ class LeadDaemon(
 
   /** Why a gate of [gateKind] open on [digest] is not open on the substrate's evidence for that kind,
    * or null when it is. Evidence must be recorded for the kind in the form the substrate records it
-   * ([evidenceDigest]), and [digest] must be that evidence. A digest that fails the check came from a
-   * journal the lead did not write, so the reason gives its length, never its text. */
+   * ([LeadState.evidenceDigest]), and [digest] must be that evidence. A digest that fails the check
+   * came from a journal the lead did not write, so the reason gives its length, never its text. */
   private fun evidenceMismatch(gateKind: String, digest: String, lead: LeadState): String? {
-    val evidence = evidenceDigest(gateKind, lead)
+    val evidence = lead.evidenceDigest(gateKind)
     return when {
-      recordedEvidence(gateKind, lead) == null -> "no evidence is recorded for its kind"
+      lead.recordedEvidence(gateKind) == null -> "no evidence is recorded for its kind"
       evidence == null -> "the evidence recorded for its kind is not in the form the substrate records"
       digest != evidence ->
         "its digest of ${digest.length} chars is not the recorded evidence ${evidence.take(16)}"
@@ -1609,7 +1580,7 @@ class LeadDaemon(
           if (ticket == null) continue
           val gateId = gateIdFor(p.gateKind, ticket)
           if (gateId in leadAtDecision.openGates || !seenGateIds.add(gateId)) continue
-          val expected = evidenceDigest(p.gateKind, leadAtDecision)
+          val expected = leadAtDecision.evidenceDigest(p.gateKind)
           if (expected == null || p.payloadDigest != expected) {
             escalate(
               if (p.gateKind !in GateKinds.ALL)
@@ -1685,10 +1656,10 @@ class LeadDaemon(
           // gate's digest may yet be the plan's, and the refusal asks for the plan's approval.
           if (
             p.taskRef == "execute:$ticket" &&
-              !approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket, leadAtDecision)
+              !leadAtDecision.approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)
           ) {
             val planGate = leadAtDecision.openGates[gateIdFor(GateKinds.PLAN_APPROVAL, ticket)]
-            val planRecorded = recordedEvidence(GateKinds.PLAN_APPROVAL, leadAtDecision) != null
+            val planRecorded = leadAtDecision.recordedEvidence(GateKinds.PLAN_APPROVAL) != null
             val offEvidence =
               if (planGate == null || !planRecorded) null
               else evidenceMismatch(GateKinds.PLAN_APPROVAL, planGate.payloadDigest, leadAtDecision)
@@ -2131,9 +2102,6 @@ private const val MAX_COGNITION_ATTEMPTS_CEILING = 5
  * is REFUSED, never truncated (accept means durable and intact). Generous for
  * fixture traffic; the real mailbox surface revisits it with the channel model. */
 private const val MAX_ACCEPTED_MAIL_CHARS = 64_000
-
-/** The form the substrate records an evidence digest in: [sha256HexBytes]'s lowercase hex. */
-private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
 
 /** Deterministic fault seam: the fixture exits 42 at a named instruction boundary. */
 fun interface FaultInjector {

@@ -213,37 +213,97 @@ class CognitionParsingTest {
 
   @Test
   fun renderContextShowsEpochPreciseApprovalNotBareGateMembership() {
-    // AGENCY #28, the model-facing consumer: the openGates line the model reads must show a
-    // gate re-opened past its approval as NOT approved. releasedGates still holds the gate
-    // (released at all this ticket), so the pre-fix epoch-blind render read approved-true on a
-    // fresh, unapproved digest — telling the model a plan was approved when d1's release does
-    // not cover the re-open onto d2. Same re-open state GuardsTest drives decide() with,
-    // rendered here to pin the projection the model actually sees.
+    // The model-facing consumer: the openGates line the model reads must show a gate re-opened
+    // past its approval as NOT approved. releasedGates still holds the gate (released at all this
+    // ticket), so an epoch-blind render would read approved=true on a fresh, unapproved digest —
+    // telling the model a plan was approved when d1's release does not cover the re-open onto d2.
+    // Here d2 is the recorded plan, so only the epoch decides. Same re-open state GuardsTest drives
+    // decide() with, rendered here to pin the projection the model actually sees.
     val ticket = "t1"
     val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, ticket)
+    val plan = "a".repeat(64)
+    val earlier = "b".repeat(64)
     val reOpenedPastApproval =
       LeadState(
         currentTicket = ticket,
-        planArtifactSha = "d1",
-        openGates = mapOf(planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, "d2", 9L)),
+        planArtifactSha = plan,
+        openGates = mapOf(planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, plan, 9L)),
         releasedGates = setOf(planGateId), // epoch-blind: released at all this ticket
-        releasedDigests = mapOf(planGateId to setOf("d1")), // but only ON d1, not the open d2
-      )
-    fun render(lead: LeadState) =
-      CognitionProtocol.renderContext(
-        WakeContext(WakeReason.Adopted, lead, JournalState(), emptyList())
+        releasedDigests = mapOf(planGateId to setOf(earlier)), // only on d1, not the open one
       )
 
     assertTrue(
-      "a plan re-opened onto d2 renders as unapproved on d2",
-      render(reOpenedPastApproval).contains("digest=d2, approvedOnDigest=false"),
+      "a plan gate re-opened onto another digest renders as unapproved",
+      render(reOpenedPastApproval).contains("digest=$plan, approved=false"),
     )
-    // Positive control: approve the CURRENT digest too and the same line reads approved — so
-    // the render tracks the open digest's approval, not some unrelated always-false branch.
+    // Positive control: the same gate released on the recorded plan it is open on reads approved
+    // — so the render tracks the open digest's approval, not some unrelated always-false branch.
     assertTrue(
-      "with d2 approved, the line reads approved",
-      render(reOpenedPastApproval.copy(releasedDigests = mapOf(planGateId to setOf("d1", "d2"))))
-        .contains("digest=d2, approvedOnDigest=true"),
+      "released on the recorded plan it is open on, the line reads approved",
+      render(reOpenedPastApproval.copy(releasedDigests = mapOf(planGateId to setOf(earlier, plan))))
+        .contains("digest=$plan, approved=true"),
     )
   }
+
+  @Test
+  fun renderContextShowsAGateReleasedOffItsEvidenceAsNotApproved() {
+    // The model is told a gate is approved only when the daemon would act on its release: the
+    // gate is released on the digest it is open on, and that digest is the substrate's evidence
+    // for the kind the gate's id names. A plan gate open and released on a digest that is not the
+    // recorded plan reads as not approved, so the model is not told to spawn an executor the
+    // daemon would refuse.
+    val ticket = "t1"
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, ticket)
+    val plan = "a".repeat(64)
+    val notThePlan = "b".repeat(64)
+    val releasedOffThePlan =
+      LeadState(
+        currentTicket = ticket,
+        planArtifactSha = plan,
+        openGates =
+          mapOf(planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, notThePlan, 9L)),
+        releasedGates = setOf(planGateId),
+        releasedDigests = mapOf(planGateId to setOf(notThePlan)),
+      )
+    assertTrue(
+      "released on the digest it is open on, which is not the plan, reads not approved",
+      render(releasedOffThePlan).contains("digest=$notThePlan, approved=false"),
+    )
+    // A gate under an id no stage of the current ticket waits on approves nothing, even open and
+    // released on the recorded plan while the current ticket's own plan gate is approved on it. Nor
+    // does the current ticket's commit gate, open on the recorded manifest and not released, read
+    // approved because its plan gate is.
+    val otherGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t2")
+    val commitGateId = gateIdFor(GateKinds.COMMIT_APPROVAL, ticket)
+    val manifest = "c".repeat(64)
+    val beside =
+      releasedOffThePlan.copy(
+        commitManifestDigest = manifest,
+        openGates =
+          mapOf(
+            planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, plan, 9L),
+            otherGateId to OpenGate(otherGateId, GateKinds.PLAN_APPROVAL, plan, 10L),
+            commitGateId to OpenGate(commitGateId, GateKinds.COMMIT_APPROVAL, manifest, 11L),
+          ),
+        releasedGates = setOf(planGateId, otherGateId),
+        releasedDigests = mapOf(planGateId to setOf(plan), otherGateId to setOf(plan)),
+      )
+    assertTrue(
+      "the current ticket's plan gate reads approved",
+      render(beside).contains("$planGateId(digest=$plan, approved=true"),
+    )
+    assertTrue(
+      "another ticket's plan gate beside it reads not approved",
+      render(beside).contains("$otherGateId(digest=$plan, approved=false"),
+    )
+    assertTrue(
+      "the current ticket's unreleased commit gate reads not approved",
+      render(beside).contains("$commitGateId(digest=$manifest, approved=false"),
+    )
+  }
+
+  private fun render(lead: LeadState) =
+    CognitionProtocol.renderContext(
+      WakeContext(WakeReason.Adopted, lead, JournalState(), emptyList())
+    )
 }
