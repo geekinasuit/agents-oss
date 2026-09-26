@@ -1000,6 +1000,104 @@ class GuardsTest {
     store.close()
   }
 
+  @Test
+  fun aDoneEntryTheReceiverHasNoRecordOfDoesNotFinishTheTicketUntilTheEffectFires() {
+    val dir = tmp.newFolder()
+    // A journal the lead did not write holds t1's commit intent and a done entry for it, written
+    // under the cognition origin, and no effect was applied. The lead walks t1 to both gates approved
+    // on their evidence. The done entry is not taken as the effect: the receiver has no record of the
+    // key, so the lead escalates once, fires the effect with its own message, and only then records
+    // t1 done. The rows' own text reaches neither the effect log nor the escalation.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val commitKey = "apply-commit:t1"
+    val marker = "foreign-row-text"
+    journalCognitionIntentAndDone(store, commitKey, marker)
+    val d = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner())
+    val f1 = d.driveUntilQuiescent()
+    d.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
+    val f2 = d.driveUntilQuiescent()
+    val manifest = f2.lead.commitManifestDigest!!
+    d.injectAuthRelease(gateIdFor(GateKinds.COMMIT_APPROVAL, "t1"), manifest)
+    val f = d.driveUntilQuiescent()
+    assertEquals("the effect fired", 1, EffectReceiver(dir.absolutePath).lineCountFor(commitKey))
+    assertEquals(
+      "one effect line, carrying the lead's own message",
+      listOf("EFFECT $commitKey apply-commit ticket=t1 manifest=$manifest"),
+      File(dir, "effects.log").readLines(),
+    )
+    assertEquals("and t1 is done", listOf("t1"), f.lead.doneTickets)
+    val rows = store.readAll()
+    val fired =
+      rows.indexOfFirst {
+        it.kind == "effect-done" &&
+          it.origin == ORIGIN_SUBSTRATE &&
+          "\"result\":\"Fired\"" in it.payloadJson
+      }
+    val done = rows.indexOfFirst { it.kind == LeadKinds.TICKET_DONE }
+    assertTrue("the lead journals the done entry of the effect it fired", fired >= 0)
+    assertTrue("t1 is recorded done only after that", done > fired)
+    val unconfirmed = unconfirmedDoneEntries(f.lead)
+    assertEquals("one escalation", 1, unconfirmed.size)
+    assertTrue("names the key", unconfirmed.single().startsWith("effect done entry for $commitKey "))
+    assertTrue("quotes no row text", f.lead.escalations.none { marker in it })
+    store.close()
+  }
+
+  @Test
+  fun aCrashBetweenTheUnconfirmedDoneEscalationAndTheFireEscalatesAgainAndFiresOnce() {
+    val dir = tmp.newFolder()
+    // As above, but the lead crashes after the escalation and before the fire. The restart finds the
+    // same state and escalates again: the escalation is at least once. The effect fires once, and t1
+    // is done.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val commitKey = "apply-commit:t1"
+    journalCognitionIntentAndDone(store, commitKey, "foreign-row-text")
+    val crash = FaultInjector {
+      if (it == "after-unconfirmed-done-escalated") throw RuntimeException("crash after escalating")
+    }
+    val d = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner(), faults = crash)
+    val f1 = d.driveUntilQuiescent()
+    d.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
+    val f2 = d.driveUntilQuiescent()
+    d.injectAuthRelease(gateIdFor(GateKinds.COMMIT_APPROVAL, "t1"), f2.lead.commitManifestDigest!!)
+    assertThrows(RuntimeException::class.java) { d.driveUntilQuiescent() }
+    val effects = EffectReceiver(dir.absolutePath)
+    assertEquals("the effect has not fired", 0, effects.lineCountFor(commitKey))
+    assertEquals("one escalation so far", 1, unconfirmedDoneEntries(d.refold().lead).size)
+
+    val f = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    assertEquals("the restart escalates again", 2, unconfirmedDoneEntries(f.lead).size)
+    assertEquals("the effect fired once", 1, effects.lineCountFor(commitKey))
+    assertEquals("and t1 is done", listOf("t1"), f.lead.doneTickets)
+    store.close()
+  }
+
+  /** Journals an effect intent and a done entry for [key] under the cognition origin, as a writer
+   * other than the lead could; [text] is the rows' own text. */
+  private fun journalCognitionIntentAndDone(store: SqliteStore, key: String, text: String) {
+    store.append(
+      "effect-intent",
+      buildJsonObject { put("message", text) },
+      ORIGIN_COGNITION,
+      idempotencyKey = key,
+    )
+    store.append(
+      "effect-done",
+      buildJsonObject {
+        put("key", key)
+        put("attempt", 1)
+        put("result", text)
+      },
+      ORIGIN_COGNITION,
+    )
+  }
+
+  /** The escalations that report a done entry the receiver has no record of. */
+  private fun unconfirmedDoneEntries(lead: LeadState): List<String> =
+    lead.escalations.filter { it.startsWith("effect done entry for ") }
+
   /** Re-folds [d]'s journal while its loop runs until [cond] holds, and returns that fold. */
   private fun awaitFold(
     d: LeadDaemon,

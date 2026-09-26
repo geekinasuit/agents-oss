@@ -9,6 +9,11 @@ import java.io.RandomAccessFile
  * receiver is the boundary contract demonstrator used by the durability scenarios; real
  * effect executors must honor the same shape.
  *
+ * The lead trusts this record over the journal's done entries: [seenKeys] must hold a key once
+ * [fire] has returned for it. A receiver that records asynchronously breaks that: the lead fires
+ * and escalates the key again on each mechanical pass of the wake, until its bound on passes
+ * stops the loop with an error.
+ *
  * `dedup=false` exists so scenario tests can run the POSITIVE CONTROL cell proving the
  * harness observes a double-fire when dedup is absent — a check that cannot see the
  * failure is not evidence.
