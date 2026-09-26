@@ -256,7 +256,9 @@ class RelayNotifierTest {
   // call, it would date every later notice at that time, and a relay that refuses events whose
   // created_at is older than some bound would refuse every notice once the process had run longer
   // than that. Each reading here is taken after the event before it, so a clock read at that event
-  // is never later than the reading, whichever side of a second boundary the two fall on.
+  // is never later than the reading, whichever side of a second boundary the two fall on. The
+  // reading after each call bounds that call's notice from above, so a default in another unit,
+  // which dates a notice far from now, fails too.
   @Test
   fun the_default_clock_is_read_on_each_call() {
     val fake = FakePublisher()
@@ -267,6 +269,7 @@ class RelayNotifierTest {
     val afterFirstCall = Instant.now().epochSecond
     Thread.sleep(1_100)
     notifier.notifyGateOpen(notice, setOf(key(recipASecret)), timeout)
+    val afterSecondCall = Instant.now().epochSecond
 
     assertEquals("one publish per call", 2, fake.published.size)
     val (first, second) = fake.published
@@ -275,8 +278,16 @@ class RelayNotifierTest {
       first.createdAt > afterBuild,
     )
     assertTrue(
+      "and not after the first call: ${first.createdAt} vs $afterFirstCall",
+      first.createdAt <= afterFirstCall,
+    )
+    assertTrue(
       "the second notice is dated after the first call: ${second.createdAt} vs $afterFirstCall",
       second.createdAt > afterFirstCall,
+    )
+    assertTrue(
+      "and not after the second call: ${second.createdAt} vs $afterSecondCall",
+      second.createdAt <= afterSecondCall,
     )
   }
 
