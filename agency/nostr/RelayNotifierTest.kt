@@ -1,6 +1,7 @@
 package com.geekinasuit.agency.nostr
 
 import java.time.Duration
+import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -13,8 +14,8 @@ import org.junit.Test
  * refused at construction, each recipient gets its own outcome (partial delivery is a liveness gap),
  * an oversize notice is NotEncodable for every recipient without publishing, all crypto completes
  * before any publish (the #45 phase separation), the gift-wrap timestamps (one notice time for the
- * whole fan-out, read again on each call, each seal backdated from its call's time by its own draw,
- * within two days by default), and a closed notifier fails its next notify closed.
+ * whole fan-out, read again on each call, by default too, each seal backdated from its call's time
+ * by its own draw, within two days by default), and a closed notifier fails its next notify closed.
  */
 class RelayNotifierTest {
   private val leadSecret = "0000000000000000000000000000000000000000000000000000000000000001"
@@ -249,6 +250,34 @@ class RelayNotifierTest {
         sealOf(wrap, recipASecret).createdAt,
       )
     }
+  }
+
+  // The default clock is read on each call. Read once, when the notifier is built or on its first
+  // call, it would date every later notice at that time, and a relay that refuses events whose
+  // created_at is older than some bound would refuse every notice once the process had run longer
+  // than that. Each reading here is taken after the event before it, so a clock read at that event
+  // is never later than the reading, whichever side of a second boundary the two fall on.
+  @Test
+  fun the_default_clock_is_read_on_each_call() {
+    val fake = FakePublisher()
+    val notifier = RelayNotifier(SecretKeyHex.ofHexString(leadSecret), fake)
+    val afterBuild = Instant.now().epochSecond
+    Thread.sleep(1_100)
+    notifier.notifyGateOpen(notice, setOf(key(recipASecret)), timeout)
+    val afterFirstCall = Instant.now().epochSecond
+    Thread.sleep(1_100)
+    notifier.notifyGateOpen(notice, setOf(key(recipASecret)), timeout)
+
+    assertEquals("one publish per call", 2, fake.published.size)
+    val (first, second) = fake.published
+    assertTrue(
+      "the first notice is dated after the notifier was built: ${first.createdAt} vs $afterBuild",
+      first.createdAt > afterBuild,
+    )
+    assertTrue(
+      "the second notice is dated after the first call: ${second.createdAt} vs $afterFirstCall",
+      second.createdAt > afterFirstCall,
+    )
   }
 
   @Test
