@@ -645,6 +645,71 @@ class GuardsTest {
   }
 
   @Test
+  fun theCommitEffectDoesNotFireWhileThePlanGateIsApprovedOnADigestThatIsNotTheRecordedPlan() {
+    val dir = tmp.newFolder()
+    // The commit effect asks for both gates approved on their evidence. Each gate is released on
+    // its own nonce, so this cell runs under a ceremony auth. The commit gate is released on the
+    // recorded manifest, and before the lead acts on it, a journal the lead did not write re-opens
+    // the plan gate on another digest, with a nonce bound to it, and that nonce is approved and
+    // released. The plan gate is then approved on the digest it is open on, which is not the
+    // recorded plan, so the commit effect must not fire.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val auth = ceremonyAuth()
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    val commitGateId = gateIdFor(GateKinds.COMMIT_APPROVAL, "t1")
+    val f1 = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner(), auth).driveUntilQuiescent()
+    store.approveAndRelease(f1.lead.issuedNonces.values.single { it.gateId == planGateId })
+    val f2 = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner(), auth).driveUntilQuiescent()
+    val manifest = f2.lead.commitManifestDigest
+    assertTrue("a manifest is recorded", manifest != null)
+    assertEquals(
+      "the commit gate is open on the recorded manifest",
+      manifest,
+      f2.lead.openGates[commitGateId]?.payloadDigest,
+    )
+    store.approveAndRelease(f2.lead.issuedNonces.values.single { it.gateId == commitGateId })
+    val notThePlan = "0".repeat(64)
+    val foreignNonce = "1".repeat(64)
+    store.gateOpened(planGateId, GateKinds.PLAN_APPROVAL, notThePlan)
+    store.append(
+      LeadKinds.NONCE_ISSUED,
+      buildJsonObject {
+        put("nonce", foreignNonce)
+        put("gateId", planGateId)
+        put("payloadDigest", notThePlan)
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    store.approveAndRelease(planGateId, notThePlan, foreignNonce)
+
+    // The restarted lead's cognition proposes nothing, so only the mechanical pass acts.
+    val idle = ProgrammedCognition(mutableListOf())
+    val f = leadDaemon(dir, store, idle, FakePodRunner(), auth).driveUntilQuiescent()
+    assertFalse("no commit intent is journaled", "apply-commit:t1" in f.shared.intents)
+    assertEquals(
+      "the commit effect did not fire",
+      0,
+      EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
+    )
+    assertTrue("the ticket is not done", f.lead.doneTickets.isEmpty())
+    assertTrue(
+      "the commit gate is approved on the recorded manifest",
+      f.lead.approvedOnEvidence(GateKinds.COMMIT_APPROVAL, "t1"),
+    )
+    assertTrue(
+      "the plan gate is approved on the digest it is open on",
+      f.lead.approvedOnCurrentDigest(planGateId),
+    )
+    assertEquals(
+      "one escalation names the plan gate as released off its evidence",
+      1,
+      releasedOffEvidence(f.lead, planGateId).size,
+    )
+    store.close()
+  }
+
+  @Test
   fun theCommitEffectDoesNotFireOnACommitGateApprovedOnADigestThatIsNotTheRecordedManifest() {
     val dir = tmp.newFolder()
     // The lead opens the commit gate only on the recorded manifest's digest. Here a journal the lead
