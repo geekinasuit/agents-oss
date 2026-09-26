@@ -362,11 +362,14 @@ data class LeadState(
   val misOriginedEntries: List<Pair<Long, String>> = emptyList(), // (seq, kind): substrate-authored kind with a non-substrate origin — never honored
   val statusTail: List<String> = emptyList(),
   val escalations: List<String> = emptyList(),
-  /** Gate id → the digests the gate was escalated as stalled on this ticket: open under a ceremony
-   * auth with no usable nonce, one the mint issues none for, and not released on that digest. Read
-   * from the gate and digest an [LeadKinds.ESCALATED] row names beside its reason, so the escalation
-   * and its record are one append. The mechanical pass reads it to escalate each gate and digest
-   * once, across restarts, which the capped [escalations] tail cannot promise. Ticket-scoped:
+  /** Gate id → the digests the gate was escalated on this ticket as holding up the stage it guards.
+   * A gate is escalated on a digest in three cases: it is open on the digest under a ceremony auth
+   * with no usable nonce, one the mint issues none for, and not released on it; it is released on
+   * the digest, and the digest is not the substrate's evidence for its kind; or it is the plan gate,
+   * open on a digest that is not the recorded plan, when an execute pod is proposed. Read from the
+   * gate and digest an [LeadKinds.ESCALATED] row names beside its reason, so the escalation and its
+   * record are one append. The daemon reads it to escalate each gate and digest once, across
+   * restarts, which the capped [escalations] tail cannot promise. Ticket-scoped:
    * [LeadKinds.TICKET_DONE] clears it. */
   val escalatedStalls: Map<String, Set<String>> = emptyMap(),
   /** (seq, reason) for turns whose output was unusable — the degradation signal, kept apart
@@ -462,7 +465,7 @@ data class LeadState(
  * view, not a record.) [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
  * an audit marker whose absence is itself a claim ("released under the ceremony"), so an
  * evicted entry would not lose the answer, it would invert it. [LeadState.escalatedStalls] is
- * uncapped too: evicting an entry escalates its stall again, the repeat it exists to suppress. All
+ * uncapped too: evicting an entry escalates its gate again, the repeat it exists to suppress. All
  * seven share the same bound: the ticket, not a tail — TICKET_DONE clears them — and their kinds are
  * origin-gated, so only the substrate and the authorization layer can grow them: a party
  * positioned to flood them could already write worse. */
@@ -639,10 +642,10 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
         )
       LeadKinds.ESCALATED -> {
         val escalated = s.copy(escalations = (s.escalations + p.str("reason")).takeLast(ANOMALY_TAIL))
-        // An escalation of a stalled gate names the gate and its digest beside the reason. Only two
-        // JSON strings are recorded: a row with any other value there is still an escalation, and at
-        // worst its stall is escalated again, never silenced. Any digest counts, blank or not, since
-        // it is the one the gate is open on.
+        // An escalation of a gate that holds up its stage names the gate and its digest beside the
+        // reason ([LeadState.escalatedStalls]). Only two JSON strings are recorded: a row with any
+        // other value there is still an escalation, and at worst its gate is escalated again, never
+        // silenced. Any digest counts, blank or not, since it is the one the gate is open on.
         val gateId = p.jsonStringOrNull("stalledGateId")
         val digest = p.jsonStringOrNull("stalledDigest")
         if (gateId == null || digest == null) escalated
