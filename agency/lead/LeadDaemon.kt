@@ -472,22 +472,13 @@ class LeadDaemon(
    * lead's own state, not the one the row carries. The shared fold accepts an intent row of any
    * origin and reads only its key, so a journal the lead did not write can hold any intent. One
    * that fails the question is not fired, and is escalated once ([LeadState.declinedEffects]). It
-   * stays pending, so a later adopt re-fires it once the question holds.
+   * stays pending: once the question holds, the commit arm fires it.
    */
   private fun redrivePendingEffects(shared: JournalState, lead: LeadState) {
     val ticket = lead.currentTicket
     for (key in shared.pendingEffectKeys) {
       if (ticket != null && key == commitEffectKey(ticket) && lead.approvedToCommit(ticket)) {
-        val result = effects.fire(key, commitEffectMessage(ticket, lead), dedupEffects)
-        store.append(
-          "effect-done",
-          buildJsonObject {
-            put("key", key)
-            put("attempt", 2)
-            put("result", result.toString())
-          },
-          origin = ORIGIN_SUBSTRATE,
-        )
+        fireCommitEffect(ticket, lead, attempt = 2)
         continue
       }
       val digest = sha256HexBytes(key.toByteArray(Charsets.UTF_8))
@@ -1029,31 +1020,41 @@ class LeadDaemon(
           idempotencyKey = effectKey,
         )
         faults.at("after-commit-intent")
-        val result = effects.fire(effectKey, commitEffectMessage(ticket, lead), dedupEffects)
-        faults.at("after-commit-effect")
-        store.append(
-          "effect-done",
-          buildJsonObject {
-            put("key", effectKey)
-            put("attempt", 1)
-            put("result", result.toString())
-          },
-          origin = ORIGIN_SUBSTRATE,
-        )
+        fireCommitEffect(ticket, lead, attempt = 1)
         return true
       }
-      if (effectKey in shared.doneKeys) {
-        store.append(
-          LeadKinds.TICKET_DONE,
-          buildJsonObject { put("ticketRef", ticket) },
-          origin = ORIGIN_SUBSTRATE,
-        )
-        faults.at("after-ticket-done")
+      if (effectKey !in shared.doneKeys) {
+        // An intent the lead did not journal in this run, e.g. one adopt declined while a gate
+        // was not yet approved on its evidence. It is fired now rather than at the next adopt.
+        fireCommitEffect(ticket, lead, attempt = 2)
         return true
       }
-      // intent exists but no done entry: adopt's re-drive owns that window
+      store.append(
+        LeadKinds.TICKET_DONE,
+        buildJsonObject { put("ticketRef", ticket) },
+        origin = ORIGIN_SUBSTRATE,
+      )
+      faults.at("after-ticket-done")
+      return true
     }
     return false
+  }
+
+  /** Fire [ticket]'s commit effect with the message built from the lead's own state, and journal
+   * its done entry. With [dedupEffects] set, the receiver fires a key at most once. */
+  private fun fireCommitEffect(ticket: String, lead: LeadState, attempt: Int) {
+    val key = commitEffectKey(ticket)
+    val result = effects.fire(key, commitEffectMessage(ticket, lead), dedupEffects)
+    faults.at("after-commit-effect")
+    store.append(
+      "effect-done",
+      buildJsonObject {
+        put("key", key)
+        put("attempt", attempt)
+        put("result", result.toString())
+      },
+      origin = ORIGIN_SUBSTRATE,
+    )
   }
 
   /** Journal a fresh single-use nonce bound to ([gateId], [payloadDigest]), the pair the release
