@@ -96,6 +96,7 @@ class GuardsTest {
     runner: PodRunner,
     auth: LeadAuth = LeadAuth.DENY_ALL,
     faults: FaultInjector = FaultInjector.NONE,
+    dedupEffects: Boolean = true,
   ) =
     LeadDaemon(
       store = store,
@@ -108,6 +109,7 @@ class GuardsTest {
       leadAuth = auth,
       timers = TimerService { _, _ -> },
       faults = faults,
+      dedupEffects = dedupEffects,
     )
 
   /** A gate-open row with the substrate's origin, as a journal the lead did not write can hold. */
@@ -1248,6 +1250,63 @@ class GuardsTest {
     assertEquals("the effect fired once", 1, effects.lineCountFor(commitKey))
     assertEquals("and t1 is done", listOf("t1"), f.lead.doneTickets)
     store.close()
+  }
+
+  @Test
+  fun aKillAtEachFaultPointOfTheUnconfirmedDoneBranchFiresTheEffectOnceAndFinishesTheTicket() {
+    // As above, with a receiver that does not deduplicate, so a second fire shows as a second
+    // effect line; the count of the lead's own done entries catches one either way. The lead is
+    // killed at each fault point the branch passes, then restarted: the effect has fired once and
+    // t1 is done. A kill after the fire and before the lead journals its done entry leaves the
+    // receiver's record beside the foreign done entry. The restart takes the receiver's record as
+    // the effect: it records t1 done with no done entry of its own and does not escalate again.
+    val commitKey = "apply-commit:t1"
+    val cases =
+      listOf(
+        // fault point, escalations after restart, done entries the lead journaled
+        Triple("after-unconfirmed-done-escalated", 2, 1),
+        Triple("after-commit-effect", 1, 0),
+        Triple("after-ticket-done", 1, 1),
+      )
+    for ((point, escalated, ownDone) in cases) {
+      val dir = tmp.newFolder()
+      val store = SqliteStore(dir.absolutePath, componentId = "lead")
+      File(dir, "ticket.txt").writeText("t1\n")
+      journalCognitionIntentAndDone(store, commitKey, "foreign-row-text")
+      val kill = FaultInjector { if (it == point) throw RuntimeException("killed at $point") }
+      val d =
+        leadDaemon(
+          dir,
+          store,
+          ScriptedCognition(),
+          FakePodRunner(),
+          faults = kill,
+          dedupEffects = false,
+        )
+      val f1 = d.driveUntilQuiescent()
+      d.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
+      val f2 = d.driveUntilQuiescent()
+      val manifest = f2.lead.commitManifestDigest!!
+      d.injectAuthRelease(gateIdFor(GateKinds.COMMIT_APPROVAL, "t1"), manifest)
+      assertThrows("killed at $point", RuntimeException::class.java) { d.driveUntilQuiescent() }
+
+      val f =
+        leadDaemon(dir, store, ScriptedCognition(), FakePodRunner(), dedupEffects = false)
+          .driveUntilQuiescent()
+      assertEquals(
+        "$point: the effect fired once",
+        1,
+        EffectReceiver(dir.absolutePath).lineCountFor(commitKey),
+      )
+      assertEquals("$point: t1 is done", listOf("t1"), f.lead.doneTickets)
+      assertEquals("$point: escalations", escalated, unconfirmedDoneEntries(f.lead).size)
+      assertEquals(
+        "$point: done entries the lead journaled",
+        ownDone,
+        store.readAll().count { it.kind == "effect-done" && it.origin == ORIGIN_SUBSTRATE },
+      )
+      store.close()
+    }
   }
 
   /** Journals an effect intent and a done entry for [key] under the cognition origin, as a writer
