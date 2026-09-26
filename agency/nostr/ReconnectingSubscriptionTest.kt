@@ -1,7 +1,6 @@
 package com.geekinasuit.agency.nostr
 
 import com.geekinasuit.agency.nostr.ReconnectingSubscription.Delivery
-import java.net.ServerSocket
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
@@ -100,8 +99,6 @@ class ReconnectingSubscriptionTest {
     Delivery.Received(RelayMessage.Event(subscriptionId, event))
 
   private fun zeroed(config: RelayConfig) = config.leadSecretKey.hexChars.all { it == Char(0) }
-
-  private fun refusedUrl(): String = "ws://127.0.0.1:" + ServerSocket(0).use { it.localPort }
 
   private fun clientEventId(frame: String): String =
     Json.parseToJsonElement(frame).jsonArray[1].jsonObject["id"]!!.jsonPrimitive.content
@@ -265,13 +262,12 @@ class ReconnectingSubscriptionTest {
 
   @Test
   fun `the delay before each attempt doubles up to the maximum, and each attempt waits for it`() {
-    val url = refusedUrl()
     val attempts = AtomicInteger()
     val subscription =
       subscription(
         {
           attempts.incrementAndGet()
-          RelayConnection(RelayConfig(url, SecretKeyHex.ofHexString(key)))
+          RelayConnection(RelayConfig(REFUSED_URL, SecretKeyHex.ofHexString(key)))
         },
         RelayAuth.None,
       )
@@ -310,7 +306,7 @@ class ReconnectingSubscriptionTest {
           session.sendClose()
         }
         // Two refused attempts first, so the delay has grown before the first relay is reached.
-        val connections = Connections(refusedUrl(), refusedUrl(), first.url, second.url)
+        val connections = Connections(REFUSED_URL, REFUSED_URL, first.url, second.url)
         val subscription = subscription(connections::next, RelayAuth.None)
 
         assertEquals(Duration.ofMillis(50), (subscription.next(wait) as Delivery.Unavailable).retryAfter)
@@ -541,13 +537,12 @@ class ReconnectingSubscriptionTest {
 
   @Test
   fun `a next whose timeout ends before the delay makes no attempt and reports nothing`() {
-    val url = refusedUrl()
     val attempts = AtomicInteger()
     val subscription =
       subscription(
         {
           attempts.incrementAndGet()
-          RelayConnection(RelayConfig(url, SecretKeyHex.ofHexString(key)))
+          RelayConnection(RelayConfig(REFUSED_URL, SecretKeyHex.ofHexString(key)))
         },
         RelayAuth.None,
         ReconnectingSubscription.Backoff(Duration.ofSeconds(5), Duration.ofSeconds(5)),

@@ -1,6 +1,5 @@
 package com.geekinasuit.agency.nostr
 
-import java.net.ServerSocket
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
@@ -235,17 +234,16 @@ class ReconnectingPublisherTest {
 
   @Test
   fun `a failed connect is reported and the next publish connects again`() {
-    // Bind and release a port, so that a connect there is refused.
-    val refused = ServerSocket(0).use { it.localPort }
     FakeRelay().use { relay ->
       relay.serve { session -> answer(session, event(2), accepted = true) }
-      val connections = Connections("ws://127.0.0.1:$refused", relay.url)
+      val connections = Connections(REFUSED_URL, relay.url)
       val publisher = publisher(connections, RelayAuth.None)
 
       val failed = publisher.publish(event(1), publishTimeout)
       assertTrue("expected Failed, got $failed", failed is PublishResult.Failed)
       assertTrue(
-        (failed as PublishResult.Failed).detail.startsWith("could not connect: connection refused")
+        "expected a refusal, got $failed",
+        (failed as PublishResult.Failed).detail.startsWith("could not connect: connection refused"),
       )
       assertTrue("the connection that did not connect is closed", zeroed(connections.configs[0]))
       assertEquals(PublishResult.Accepted, publisher.publish(event(2), publishTimeout))

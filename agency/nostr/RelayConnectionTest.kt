@@ -103,11 +103,7 @@ class RelayConnectionTest {
 
   @Test
   fun `connect to a closed port classifies as REFUSED, never throws`() {
-    // Bind then release a port so nothing is listening on it: a connect there is refused.
-    val probe = ServerSocket(0)
-    val port = probe.localPort
-    probe.close()
-    val result = RelayConnection(config("ws://127.0.0.1:$port")).connect(Duration.ofSeconds(2))
+    val result = RelayConnection(config(REFUSED_URL)).connect(Duration.ofSeconds(2))
     assertTrue("expected Failed, got $result", result is ConnectResult.Failed)
     assertEquals(ConnectFailure.REFUSED, (result as ConnectResult.Failed).failure)
   }
