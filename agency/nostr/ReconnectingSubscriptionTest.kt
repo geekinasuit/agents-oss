@@ -564,6 +564,30 @@ class ReconnectingSubscriptionTest {
   }
 
   @Test
+  fun `a next whose timeout has run out still makes an attempt that is due`() {
+    // A zero timeout has run out when next starts. An attempt that is due is made anyway: the first
+    // at once, and the next once its delay has passed.
+    val attempts = AtomicInteger()
+    val subscription =
+      subscription({ attempts.incrementAndGet(); throw IllegalStateException("no relay") }, RelayAuth.None)
+    assertEquals(
+      Delivery.Unavailable("could not create a connection: IllegalStateException", backoff.initial),
+      subscription.next(Duration.ZERO),
+    )
+    // Well past the 50 ms delay, so the second attempt is due when next starts.
+    Thread.sleep(backoff.initial.toMillis() * 4)
+    assertEquals(
+      Delivery.Unavailable(
+        "could not create a connection: IllegalStateException",
+        backoff.initial.multipliedBy(2),
+      ),
+      subscription.next(Duration.ZERO),
+    )
+    assertEquals(2, attempts.get())
+    subscription.close()
+  }
+
+  @Test
   fun `after an interruption the next attempt waits for its retryAfter`() {
     // Long enough that next(100 ms) still starts well before the delay passes when the test thread
     // stalls on a loaded machine.
@@ -596,6 +620,9 @@ class ReconnectingSubscriptionTest {
           millis >= delay.toMillis(),
         )
         first.assertScriptClean()
+        // Subscribed says the client sent the REQ, not that the second relay read it, so wait for
+        // that script to end before checking it.
+        assertTrue("the second relay's script ended", second.awaitScript(5_000))
         second.assertScriptClean()
         subscription.close()
       }
