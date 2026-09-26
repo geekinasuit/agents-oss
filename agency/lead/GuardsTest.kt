@@ -122,6 +122,23 @@ class GuardsTest {
       ORIGIN_SUBSTRATE,
     )
 
+  /** The escalations that report [gateId] as released on a digest that is not its evidence. */
+  private fun releasedOffEvidence(lead: LeadState, gateId: String): List<String> =
+    lead.escalations.filter { it.startsWith("gate released off its evidence for $gateId:") }
+
+  /** The escalations that refuse t1's executor because the plan gate [gateId] is open on a digest
+   * that is not the recorded plan. */
+  private fun executeRefusedOffEvidence(lead: LeadState, gateId: String): List<String> =
+    lead.escalations.filter {
+      it.startsWith(
+        "pod-spawn rejected: execute pod for 't1' proposed while $gateId is open off its evidence:"
+      )
+    }
+
+  /** Whether any escalation asks for the plan's approval before the executor runs. */
+  private fun asksForThePlansApproval(lead: LeadState): Boolean =
+    lead.escalations.any { it.contains("the plan must be approved before execution runs") }
+
   @Test
   fun gateOpenWithNoSubstrateEvidenceIsRejectedAndEscalated() {
     val dir = tmp.newFolder()
@@ -392,10 +409,14 @@ class GuardsTest {
       )
     val f3 = hostile.driveUntilQuiescent()
     assertTrue("no execute pod launched", hostileRunner.spawnedTaskRefs.isEmpty())
-    assertTrue(
-      "the execute-ordering guard escalated",
-      f3.lead.escalations.any { it.contains("execute") && it.contains("plan") },
+    // The plan was approved on its recorded digest before the gate was re-opened, so the refusal
+    // names the gate as open off its evidence rather than asking for the plan's approval.
+    assertEquals(
+      "the execute-ordering guard names the plan gate as open off its evidence",
+      1,
+      executeRefusedOffEvidence(f3.lead, planGateId).size,
     )
+    assertFalse("and does not ask for the plan's approval", asksForThePlansApproval(f3.lead))
     store.close()
   }
 
@@ -441,10 +462,18 @@ class GuardsTest {
       f.lead.planArtifactSha.let { it != null && it != notThePlan },
     )
     assertTrue("no execute pod launched", hostileRunner.spawnedTaskRefs.isEmpty())
-    assertTrue(
-      "the execute-ordering guard escalated",
-      f.lead.escalations.any { it.startsWith("pod-spawn rejected: execute pod for 't1'") },
+    // The pass before cognition's turn escalates the gate as released off its evidence, and the
+    // refusal of the executor finds that gate and digest already escalated.
+    assertEquals(
+      "one escalation names the plan gate as released off its evidence",
+      1,
+      releasedOffEvidence(f.lead, planGateId).size,
     )
+    assertTrue(
+      "the refused executor adds none",
+      executeRefusedOffEvidence(f.lead, planGateId).isEmpty(),
+    )
+    assertFalse("no escalation asks for the plan's approval", asksForThePlansApproval(f.lead))
     store.close()
   }
 
@@ -485,8 +514,15 @@ class GuardsTest {
     assertFalse("no release has approved it", f.lead.approvedOnCurrentDigest(planGateId))
     assertTrue("no execute pod launched", hostileRunner.spawnedTaskRefs.isEmpty())
     assertTrue(
-      "the execute-ordering guard escalated",
-      f.lead.escalations.any { it.startsWith("pod-spawn rejected: execute pod for 't1'") },
+      "the execute-ordering guard asks for the plan's approval",
+      f.lead.escalations.any {
+        it.startsWith("pod-spawn rejected: execute pod for 't1'") &&
+          it.contains("the plan must be approved before execution runs")
+      },
+    )
+    assertTrue(
+      "and names no gate as open off its evidence",
+      executeRefusedOffEvidence(f.lead, planGateId).isEmpty(),
     )
     store.close()
   }
@@ -534,12 +570,29 @@ class GuardsTest {
 
     // The restarted lead's cognition proposes nothing, so only the mechanical pass acts.
     val idle = ProgrammedCognition(mutableListOf())
-    val f = leadDaemon(dir, store, idle, FakePodRunner(), auth).driveUntilQuiescent()
+    val restarted = leadDaemon(dir, store, idle, FakePodRunner(), auth)
+    val f = restarted.driveUntilQuiescent()
     assertEquals("no commit is proposed", null, f.lead.commitManifestDigest)
     assertTrue(
       "the plan gate is approved on the digest it is open on",
       f.lead.approvedOnCurrentDigest(planGateId),
     )
+    assertEquals(
+      "one escalation names the plan gate as released off its evidence",
+      1,
+      releasedOffEvidence(f.lead, planGateId).size,
+    )
+
+    // The escalation's record keeps the gate and digest, so neither a later wake of the same lead
+    // nor a lead restarted on the same journal escalates them again.
+    restarted.injectMail("a later wake")
+    val later = restarted.driveUntilQuiescent()
+    assertEquals("none on a later wake", 1, releasedOffEvidence(later.lead, planGateId).size)
+    val again =
+      leadDaemon(dir, store, ProgrammedCognition(mutableListOf()), FakePodRunner(), auth)
+        .driveUntilQuiescent()
+    assertEquals("none after a restart", 1, releasedOffEvidence(again.lead, planGateId).size)
+    assertEquals("and still no commit is proposed", null, again.lead.commitManifestDigest)
     store.close()
   }
 
@@ -582,6 +635,151 @@ class GuardsTest {
       "the commit gate is approved on the digest it is open on",
       f.lead.approvedOnCurrentDigest(commitGateId),
     )
+    assertEquals(
+      "one escalation names the commit gate as released off its evidence",
+      1,
+      releasedOffEvidence(f.lead, commitGateId).size,
+    )
+
+    // The escalation's record keeps the gate and digest, so neither a later wake of the same lead
+    // nor a lead restarted on the same journal escalates them again.
+    d.injectMail("a later wake")
+    val later = d.driveUntilQuiescent()
+    assertEquals("none on a later wake", 1, releasedOffEvidence(later.lead, commitGateId).size)
+    val again = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    assertEquals("none after a restart", 1, releasedOffEvidence(again.lead, commitGateId).size)
+    assertEquals(
+      "and the commit effect still has not fired",
+      0,
+      EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
+    )
+    store.close()
+  }
+
+  @Test
+  fun anApprovalOnTheEvidenceAdvancesTheTicketWithNoEscalation() {
+    val dir = tmp.newFolder()
+    // Each gate is released on the digest the lead opened it on, which is the substrate's evidence
+    // for its kind, so each stage acts on its release: the executor runs, the commit effect fires,
+    // and the ticket is done, with nothing escalated on the way.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val d = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner())
+    val f1 = d.driveUntilQuiescent()
+    d.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
+    val f2 = d.driveUntilQuiescent()
+    assertTrue(
+      "the plan gate's release is acted on: a manifest is recorded",
+      f2.lead.commitManifestDigest != null,
+    )
+    assertEquals("nothing is escalated", emptyList<String>(), f2.lead.escalations)
+
+    d.injectAuthRelease(gateIdFor(GateKinds.COMMIT_APPROVAL, "t1"), f2.lead.commitManifestDigest!!)
+    val f = d.driveUntilQuiescent()
+    assertEquals(
+      "the commit gate's release is acted on: t1 is done",
+      listOf("t1"),
+      f.lead.doneTickets,
+    )
+    assertEquals(
+      "the commit effect fired once",
+      1,
+      EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
+    )
+    assertEquals("nothing is escalated", emptyList<String>(), f.lead.escalations)
+    store.close()
+  }
+
+  @Test
+  fun aGateReleasedBeforeItsEvidenceIsRecordedIsEscalatedOnlyOnceTheEvidenceIsNotItsDigest() {
+    val dir = tmp.newFolder()
+    // A journal the lead did not write opens the plan gate and releases it before any plan is
+    // recorded. Until a plan is recorded, that digest may yet be the plan's, so nothing is escalated
+    // as off its evidence, even when cognition proposes the executor. Once a plan is recorded and it
+    // is not that digest, the gate is escalated, once. The first two drives keep the planner in
+    // flight, so no plan is recorded; each drive's adopt abandons the pod the one before left in
+    // flight, and cognition proposes a new one.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val held = FakePodRunner(holdCompletions = true)
+    val d = leadDaemon(dir, store, ScriptedCognition(), held)
+    d.driveUntilQuiescent() // t1 claimed, planner in flight
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    val notThePlan = "0".repeat(64)
+    store.gateOpened(planGateId, GateKinds.PLAN_APPROVAL, notThePlan)
+    d.injectAuthRelease(planGateId, notThePlan)
+    val f1 = d.driveUntilQuiescent()
+    assertEquals("no plan is recorded yet", null, f1.lead.planArtifactSha)
+    assertTrue(
+      "the plan gate is released on the digest it is open on",
+      f1.lead.approvedOnCurrentDigest(planGateId),
+    )
+    assertTrue(
+      "cognition proposed the executor, and the refusal asked for the plan's approval",
+      asksForThePlansApproval(f1.lead),
+    )
+    assertTrue(
+      "nothing is escalated as off its evidence",
+      f1.lead.escalations.none { it.contains("off its evidence") },
+    )
+
+    val runner = FakePodRunner()
+    val f = leadDaemon(dir, store, ScriptedCognition(), runner).driveUntilQuiescent()
+    assertTrue(
+      "a plan is recorded, and it is not that digest",
+      f.lead.planArtifactSha.let { it != null && it != notThePlan },
+    )
+    assertEquals(
+      "one escalation names the plan gate as released off its evidence",
+      1,
+      releasedOffEvidence(f.lead, planGateId).size,
+    )
+    assertTrue(
+      "the refused executor adds none",
+      executeRefusedOffEvidence(f.lead, planGateId).isEmpty(),
+    )
+    assertEquals("only the planner ran", listOf("plan:t1"), runner.spawnedTaskRefs)
+    store.close()
+  }
+
+  @Test
+  fun anExecutorRefusedOnAPlanGateOpenOffItsEvidenceIsEscalatedOncePerGateAndDigest() {
+    val dir = tmp.newFolder()
+    // A journal the lead did not write re-opens the plan gate on a digest that is not the recorded
+    // plan, and nothing releases it there, so no pass escalates it. Cognition proposes the executor
+    // twice in one batch, again on a later wake, and again after a restart. Each proposal is
+    // refused, and the refusal is escalated once: the batch keeps the gates it escalated, and the
+    // escalation's record keeps the gate and digest across wakes and restarts.
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val f1 = leadDaemon(dir, store, ScriptedCognition(), FakePodRunner()).driveUntilQuiescent()
+    assertTrue("positive control: the honest walk recorded a plan", f1.lead.planArtifactSha != null)
+    val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    store.gateOpened(planGateId, GateKinds.PLAN_APPROVAL, "0".repeat(64))
+
+    fun executeTwice() =
+      CognitionOutput(
+        listOf(Proposal.ProposePodSpawn("execute:t1"), Proposal.ProposePodSpawn("execute:t1")),
+        "buggy/hostile: launch the executor on a plan gate open off the recorded plan",
+      )
+    val runner = FakePodRunner()
+    val script = mutableListOf(executeTwice(), executeTwice())
+    val hostile = leadDaemon(dir, store, ProgrammedCognition(script), runner)
+    val f = hostile.driveUntilQuiescent()
+    assertEquals(
+      "one escalation for the batch",
+      1,
+      executeRefusedOffEvidence(f.lead, planGateId).size,
+    )
+    hostile.injectMail("a later wake")
+    val later = hostile.driveUntilQuiescent()
+    assertEquals("none on a later wake", 1, executeRefusedOffEvidence(later.lead, planGateId).size)
+    val again =
+      leadDaemon(dir, store, ProgrammedCognition(mutableListOf(executeTwice())), runner)
+        .driveUntilQuiescent()
+    assertEquals("none after a restart", 1, executeRefusedOffEvidence(again.lead, planGateId).size)
+    assertTrue("no execute pod launched", runner.spawnedTaskRefs.isEmpty())
+    assertFalse("no refusal asks for the plan's approval", asksForThePlansApproval(again.lead))
     store.close()
   }
 

@@ -641,6 +641,10 @@ class NonceMintTest {
       "no gate was escalated as stalled",
       done.lead.escalations.none { it.startsWith("gate-open stalled") },
     )
+    assertTrue(
+      "nor as released off its evidence: each release was on the evidence for its kind",
+      done.lead.escalations.none { it.startsWith("gate released off its evidence") },
+    )
     store.close()
   }
 
