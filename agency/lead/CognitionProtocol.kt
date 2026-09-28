@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.lead
 
+import org.json.JSONException
 import org.json.JSONObject
 
 /**
@@ -108,7 +109,7 @@ object CognitionProtocol {
     val start = text.indexOf('{')
     val end = text.lastIndexOf('}')
     if (start < 0 || end <= start) {
-      return CognitionOutput.malformed("cognition output was not JSON", meta)
+      return CognitionOutput.malformed(MalformedReasons.NOT_JSON, meta)
     }
     return try {
       val obj = JSONObject(text.substring(start, end + 1))
@@ -121,39 +122,39 @@ object CognitionProtocol {
       // near-miss is silently a clean idle — the exact confusion this outcome exists to
       // end, one level up from a malformed element inside the array.
       if (arr == null && obj.has("proposals")) {
-        return CognitionOutput.malformed("'proposals' is present but is not an array", meta)
+        return CognitionOutput.malformed(MalformedReasons.PROPOSALS_NOT_ARRAY, meta)
       }
       if (arr != null) {
         for (i in 0 until arr.length()) {
           val p =
             arr.opt(i) as? JSONObject
-              ?: return CognitionOutput.malformed("a proposal is not an object", meta)
+              ?: return CognitionOutput.malformed(MalformedReasons.PROPOSAL_NOT_OBJECT, meta)
           when (p.optString("type")) {
-            "" -> return CognitionOutput.malformed("a proposal has no type", meta)
+            "" -> return CognitionOutput.malformed(MalformedReasons.PROPOSAL_NO_TYPE, meta)
             "pod-spawn" -> {
               val taskRef = p.required("taskRef")
               if (!TASK_REF_SHAPE.matches(taskRef))
-                return CognitionOutput.malformed("pod-spawn taskRef is not plan:/execute:<ticket>", meta)
+                return CognitionOutput.malformed(MalformedReasons.BAD_TASK_REF, meta)
               proposals += Proposal.ProposePodSpawn(taskRef)
             }
             "gate-open" -> {
               val kind = p.required("gateKind")
               if (kind !in GateKinds.ALL)
-                return CognitionOutput.malformed("gate-open names an unknown gate kind", meta)
+                return CognitionOutput.malformed(MalformedReasons.UNKNOWN_GATE_KIND, meta)
               proposals += Proposal.ProposeGateOpen(kind, p.required("payloadDigest"))
             }
             "status" -> proposals += Proposal.ProposeStatus(p.required("status"))
             "escalate" -> proposals += Proposal.ProposeEscalate(p.required("reason"))
-            else -> return CognitionOutput.malformed("unknown proposal type", meta)
+            else -> return CognitionOutput.malformed(MalformedReasons.UNKNOWN_TYPE, meta)
           }
         }
       }
       CognitionOutput(proposals, obj.optString("reasoning"), meta)
     } catch (e: MalformedProposal) {
-      CognitionOutput.malformed(e.message ?: "missing required proposal field", meta)
+      CognitionOutput.malformed(e.message!!, meta)
     } catch (e: Exception) {
-      // The class alone: the parser's message can quote the output it was reading.
-      CognitionOutput.malformed("cognition output failed to parse: ${e.javaClass.simpleName}", meta)
+      // Not the message: the parser's message can quote the output it was reading.
+      CognitionOutput.malformed(MalformedReasons.parseFailure(e), meta)
     }
   }
 
@@ -167,8 +168,7 @@ object CognitionProtocol {
    * folded state's call, never the parser's. */
   private val TASK_REF_SHAPE = Regex("""^(plan|execute):[A-Za-z0-9._-]+$""")
 
-  private class MalformedProposal(field: String) :
-    RuntimeException("proposal field '$field' is missing or blank")
+  private class MalformedProposal(field: String) : RuntimeException(MalformedReasons.missingField(field))
 
   /** Demands an actual non-blank JSON string. `optString` would stringify whatever it
    * found — a number, or a whole nested object — turning a wrong-shaped field into a
@@ -178,4 +178,37 @@ object CognitionProtocol {
     if (v !is String || v.isBlank()) throw MalformedProposal(field)
     return v
   }
+}
+
+/**
+ * Every reason the lead writes on a [LeadKinds.COGNITION_MALFORMED] row: [CognitionProtocol.parseOutput]'s
+ * classifications and the daemon's fallback. The fold holds a reason only when [isLeads] accepts
+ * it, so a row the lead did not write cannot put its own text in [LeadState.malformedCognition].
+ */
+object MalformedReasons {
+  const val NOT_JSON = "cognition output was not JSON"
+  const val PROPOSALS_NOT_ARRAY = "'proposals' is present but is not an array"
+  const val PROPOSAL_NOT_OBJECT = "a proposal is not an object"
+  const val PROPOSAL_NO_TYPE = "a proposal has no type"
+  const val BAD_TASK_REF = "pod-spawn taskRef is not plan:/execute:<ticket>"
+  const val UNKNOWN_GATE_KIND = "gate-open names an unknown gate kind"
+  const val UNKNOWN_TYPE = "unknown proposal type"
+  const val UNCLASSIFIED = "unclassified"
+  const val PARSE_FAILURE_PREFIX = "cognition output failed to parse: "
+  const val PARSE_FAILURE_JSON = PARSE_FAILURE_PREFIX + "JSONException"
+  const val PARSE_FAILURE_OTHER = PARSE_FAILURE_PREFIX + "an unexpected exception"
+
+  /** The fields [CognitionProtocol.parseOutput] requires; a missing one is named. */
+  val REQUIRED_FIELDS = setOf("taskRef", "gateKind", "payloadDigest", "status", "reason")
+
+  fun missingField(field: String): String = "proposal field '$field' is missing or blank"
+
+  /** A parse failure is named by a fixed reason, never by text taken from the exception. */
+  fun parseFailure(e: Throwable): String = if (e is JSONException) PARSE_FAILURE_JSON else PARSE_FAILURE_OTHER
+
+  private val FIXED =
+    setOf(NOT_JSON, PROPOSALS_NOT_ARRAY, PROPOSAL_NOT_OBJECT, PROPOSAL_NO_TYPE, BAD_TASK_REF, UNKNOWN_GATE_KIND,
+      UNKNOWN_TYPE, UNCLASSIFIED, PARSE_FAILURE_JSON, PARSE_FAILURE_OTHER) + REQUIRED_FIELDS.map(::missingField)
+
+  fun isLeads(reason: String): Boolean = reason in FIXED
 }

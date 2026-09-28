@@ -141,6 +141,47 @@ class CognitionParsingTest {
   }
 
   @Test
+  fun everyReasonTheParserWritesIsOneTheFoldHolds() {
+    // The fold holds a malformed-cognition reason only when MalformedReasons accepts it, so each
+    // reason parseOutput writes must be accepted, or the lead's own rows read as foreign.
+    val inputs =
+      listOf(
+        "not json at all",
+        """{"proposals":{}}""",
+        """{"proposals":[1]}""",
+        """{"proposals":[{}]}""",
+        """{"proposals":[{"type":"pod-spawn","taskRef":"deploy:t1"}]}""",
+        """{"proposals":[{"type":"gate-open","gateKind":"deploy","payloadDigest":"a"}]}""",
+        """{"proposals":[{"type":"$MARKER"}]}""",
+        """{"proposals":[],"$MARKER":1,"$MARKER":2}""",
+        """{"proposals":[{"type":"pod-spawn"}]}""",
+        """{"proposals":[{"type":"gate-open"}]}""",
+        """{"proposals":[{"type":"gate-open","gateKind":"plan-approval"}]}""",
+        """{"proposals":[{"type":"status"}]}""",
+        """{"proposals":[{"type":"escalate"}]}""",
+      )
+    val reasons = inputs.map { parse(it).malformed!! }
+    for ((input, reason) in inputs.zip(reasons)) {
+      assertTrue("'$reason' (from $input) is not a reason the fold holds", MalformedReasons.isLeads(reason))
+    }
+    // The duplicate-key input reaches the parser's catch.
+    assertTrue(MalformedReasons.PARSE_FAILURE_JSON in reasons)
+    // Each field in REQUIRED_FIELDS is one the parser still demands. A field the parser newly
+    // demands without listing it here is not caught: its reason is held by length.
+    assertEquals(
+      MalformedReasons.REQUIRED_FIELDS.map(MalformedReasons::missingField).toSet(),
+      reasons.filter { it.startsWith("proposal field ") }.toSet(),
+    )
+  }
+
+  @Test
+  fun aParseFailureIsNamedByAFixedReason() {
+    assertEquals(MalformedReasons.PARSE_FAILURE_JSON, MalformedReasons.parseFailure(org.json.JSONException(MARKER)))
+    assertEquals(MalformedReasons.PARSE_FAILURE_OTHER, MalformedReasons.parseFailure(IllegalStateException(MARKER)))
+    assertTrue(MalformedReasons.isLeads(MalformedReasons.PARSE_FAILURE_OTHER))
+  }
+
+  @Test
   fun oneNearMissInvalidatesTheWholeBatch() {
     // A model that got one proposal structurally wrong has not demonstrated it meant the
     // others: executing the good half of a bad batch is the silent partial fold the
