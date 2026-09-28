@@ -9,6 +9,7 @@ import java.util.concurrent.CompletableFuture
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 /**
@@ -29,8 +30,32 @@ class RelayConnectionTest {
    * 5 s on a CI runner that runs other targets alongside, so these two allow more. [waitUntil]
    * returns once the connection has failed, so a passing cell does not wait this out. With the
    * size or the depth guard missing, or both, the cells left waiting still end inside the target's
-   * 60 s timeout, so each reports its assertion rather than the target timing out. */
+   * 60 s timeout, so each reports its assertion rather than the target timing out: 20 s here, and
+   * 20 s plus [lateBreachGraceMillis] for the one cell that looks past it. */
   private val largeFrameWaitMillis = 20_000L
+
+  /** How much longer [awaitLargeFrameBreach] keeps looking after a miss, so the failure can say
+   * whether the breach came late (a slow runner) or not at all (a stall). */
+  private val lateBreachGraceMillis = 10_000L
+
+  /** Waits up to [largeFrameWaitMillis] for [conn] to fail, and returns null if it did. Each pass
+   * prints its time under the LARGE-FRAME-BREACH marker, so a CI log shows a runner's spread from
+   * passing runs. On a miss it keeps looking for [lateBreachGraceMillis] and returns what it saw:
+   * whether the breach came late and when, the failure reason, and whether the relay's send had
+   * returned. A send still blocked means the client stopped reading; a send that returned proves
+   * little, since a loopback socket's buffers can take the whole frame unread. */
+  private fun awaitLargeFrameBreach(cell: String, conn: RelayConnection, relay: FakeRelay): String? {
+    val start = System.nanoTime()
+    fun elapsedMillis() = (System.nanoTime() - start) / 1_000_000
+    if (waitUntil(largeFrameWaitMillis) { conn.hasFailed() }) {
+      println("LARGE-FRAME-BREACH $cell ${elapsedMillis()} ms")
+      return null
+    }
+    val late = waitUntil(lateBreachGraceMillis) { conn.hasFailed() }
+    val sendReturned = relay.awaitScript(1)
+    return (if (late) "breached late, at ${elapsedMillis()} ms" else "no breach by ${elapsedMillis()} ms") +
+      "; reason: ${conn.failureReason()}; relay send returned: $sendReturned"
+  }
 
   private fun config(url: String) = RelayConfig(relayUrl = url, leadSecretKey = SecretKeyHex.ofHexString(key))
 
@@ -388,10 +413,12 @@ class RelayConnectionTest {
       }
       val conn = RelayConnection(config(relay.url))
       assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      val start = System.nanoTime()
       assertTrue(
         "connection should have failed on the size bound",
         waitUntil(largeFrameWaitMillis) { conn.hasFailed() },
       )
+      println("LARGE-FRAME-BREACH size-bound ${(System.nanoTime() - start) / 1_000_000} ms")
       // "characters", not "exceeded": the SIZE and COUNT breaches both say "exceeded", so only the char
       // unit distinguishes the SIZE bound from the DEPTH ("depth") and COUNT ("unconsumed") breaches.
       assertTrue(conn.failureReason()!!.contains("characters"))
@@ -553,10 +580,9 @@ class RelayConnectionTest {
       }
       val conn = RelayConnection(config(relay.url))
       assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
-      assertTrue(
-        "a frame that continues past its closers must breach",
-        waitUntil(largeFrameWaitMillis) { conn.hasFailed() },
-      )
+      awaitLargeFrameBreach("continued-frame", conn, relay)?.let {
+        fail("a frame that continues past its closers must breach: $it")
+      }
       assertTrue(conn.failureReason()!!, conn.failureReason()!!.contains("depth"))
       conn.close()
     }
