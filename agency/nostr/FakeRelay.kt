@@ -278,6 +278,16 @@ fun waitUntil(timeoutMillis: Long, cond: () -> Boolean): Boolean {
   return cond()
 }
 
+/** Reasons a relay can give in an OK or CLOSED, each with the tail a detail built from it ends
+ * with: a standard prefix is kept and the text after it dropped, an empty reason adds nothing, and
+ * any other reason is withheld. Every case's relay text carries a marker no detail may hold. */
+val RELAY_REASON_CASES: List<Pair<String, String>> =
+  listOf(
+    "restricted: relay-chosen-marker" to ": restricted",
+    "relay-chosen-marker: restricted" to ": a reason without a standard prefix, its text withheld",
+    "" to "",
+  )
+
 /** A loopback URL where nothing listens, so a connect there is refused. Port 1 is outside the
  * ephemeral range that a port-0 bind draws from, and the tests here bind only port 0, so no test
  * running alongside can take it. On a host where something listened on port 1, the cells that

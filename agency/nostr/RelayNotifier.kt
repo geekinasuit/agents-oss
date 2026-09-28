@@ -61,7 +61,8 @@ sealed interface NotifyOutcome {
   /** The relay rejected the notice with [message] (OK false) — a verdict, not a transport fault. */
   data class Rejected(val message: String) : NotifyOutcome
 
-  /** The publish produced no relay verdict — a send fault, timeout, or closed socket ([detail]). */
+  /** The publish produced no relay verdict — a send fault, timeout, or closed socket, or no
+   * connection could be opened or authenticated ([detail], a [PublishResult.Failed]'s). */
   data class Failed(val detail: String) : NotifyOutcome
 
   /**
