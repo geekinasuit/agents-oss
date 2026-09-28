@@ -223,6 +223,25 @@ class RelayConnectionTest {
     }
   }
 
+  @Test
+  fun `an unclassified connect fault classifies as TRANSPORT without the server's text`() {
+    // Each answer makes the JDK throw an exception whose message quotes what the server sent, so
+    // the fallback detail must name the exception class alone.
+    val cases =
+      listOf(
+        // ProtocolException: Invalid status line: "<the server's line>"
+        "garbage $MARKER\r\n\r\n" to "ProtocolException",
+        // NumberFormatException: For input string: "<the server's value>"
+        "HTTP/1.1 200 OK\r\nContent-Length: $MARKER\r\n\r\n" to "NumberFormatException",
+      )
+    for ((answer, exceptionClass) in cases) {
+      val failed = handshakeFailure { _ -> answer }
+      assertEquals(ConnectFailure.TRANSPORT, failed.failure)
+      assertTrue("server text leaked: ${failed.detail}", !failed.detail.contains(MARKER))
+      assertEquals("connect failed: $exceptionClass", failed.detail)
+    }
+  }
+
   /** Connect to a raw server answering the upgrade with [response]'s text (given the correct
    * accept value), and return the failure, which each caller expects. */
   private fun handshakeFailure(response: (accept: String) -> String): ConnectResult.Failed =
