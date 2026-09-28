@@ -582,25 +582,35 @@ class AuthFoldTest {
   @Test
   fun reIssueOfANonceValueKeepsFirstBinding() {
     val s = open(newStoreDir())
+    // The two gate ids differ in length, so the text shows which entry's id it describes.
+    val rebindTarget = "gate-two"
     s.gateOpened("g1", "d1")
-    s.gateOpened("g2", "d2")
-    s.nonceIssued("n1", "g1", "d1")
-    s.nonceIssued("n1", "g2", "d2") // rebind attempt
+    s.gateOpened(rebindTarget, "d2")
+    val kept = s.nonceIssued("n1", "g1", "d1")
+    val rebind = s.nonceIssued("n1", rebindTarget, "d2") // rebind attempt
     val st = s.lead()
     assertEquals("g1", st.issuedNonces["n1"]?.gateId)
-    assertTrue(st.escalations.any { "re-issued" in it })
+    // The rebinding entry's gate id is described by its length, and the kept binding by its seq.
+    assertEquals(
+      listOf(
+        "nonce re-issued at seq=${rebind.seq} for a gate id of ${rebindTarget.length} chars — " +
+          "the binding at seq=${kept.seq} kept"
+      ),
+      st.escalations,
+    )
     // And the rebind target cannot be released with it.
-    s.release("g2", "d2", nonce = "n1")
-    assertFalse("g2" in s.lead().releasedGates)
+    s.release(rebindTarget, "d2", nonce = "n1")
+    assertFalse(rebindTarget in s.lead().releasedGates)
   }
 
   @Test
   fun issueForUnknownGateIsRecordedAndFlagged() {
     val s = open(newStoreDir())
-    s.nonceIssued("n1", "ghost", "d1")
+    val issued = s.nonceIssued("n1", "ghost", "d1")
     val st = s.lead()
     assertEquals("ghost", st.issuedNonces["n1"]?.gateId)
-    assertTrue(st.escalations.any { "unknown gate" in it })
+    // The unknown gate's id is the entry's own field, so it is described by its length.
+    assertEquals(listOf("nonce issued at seq=${issued.seq} for an unknown gate id of 5 chars"), st.escalations)
   }
 
   @Test
