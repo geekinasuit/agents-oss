@@ -178,7 +178,7 @@ class RelayConnectionAuthTest {
       )
     assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
     assertEquals(
-      AuthResult.Failed("connection failed: relay closed: 1000 'bye'"),
+      AuthResult.Failed("connection failed: relay closed: 1000"),
       conn.authenticate(Duration.ofSeconds(3)),
     )
     conn.close()
