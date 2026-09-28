@@ -14,7 +14,10 @@ sealed interface RelayAuth {
   data class Nip42(val timeout: Duration) : RelayAuth
 }
 
-/** A connection [openConnection] made ready, or why it could not. */
+/** A connection [openConnection] made ready, or why it could not. [Unavailable]'s detail quotes no
+ * text the relay sent, though a relay close's status code and a rejected handshake's HTTP status
+ * are the relay's numbers, and an authentication refusal's reason is kept to its standard NIP-01
+ * or NIP-42 prefix. */
 internal sealed interface OpenedConnection {
   class Ready(val connection: RelayConnection) : OpenedConnection
 
@@ -49,7 +52,7 @@ internal fun openConnection(
     val refusal =
       when (val result = conn.authenticate(auth.timeout)) {
         AuthResult.Authenticated -> null
-        is AuthResult.Refused -> "relay refused authentication: ${result.message}"
+        is AuthResult.Refused -> relayReasonDetail("relay refused authentication", result.message)
         is AuthResult.Failed -> "could not authenticate: ${result.detail}"
       }
     if (refusal != null) {

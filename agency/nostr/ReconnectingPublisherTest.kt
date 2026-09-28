@@ -505,13 +505,34 @@ class ReconnectingPublisherTest {
       val publisher = publisher(connections, RelayAuth.Nip42(authTimeout))
 
       assertEquals(
-        PublishResult.Failed("relay refused authentication: restricted: not on the list"),
+        PublishResult.Failed("relay refused authentication: restricted"),
         publisher.publish(event(1), publishTimeout),
       )
       assertTrue("the connection is closed", zeroed(connections.configs[0]))
       assertEquals(NOTHING, seen.poll(5, TimeUnit.SECONDS))
       relay.assertScriptClean()
       publisher.close()
+    }
+  }
+
+  @Test
+  fun `an auth refusal's Failed detail keeps only a standard prefix of the relay's reason`() {
+    for ((reason, detail) in RELAY_REASON_CASES) {
+      FakeRelay().use { relay ->
+        relay.serve { session ->
+          session.sendText("[\"AUTH\",\"challenge\"]")
+          val frame = session.nextClientText(3_000) ?: error("no AUTH from the client")
+          session.sendText("[\"OK\",\"${clientEventId(frame)}\",false,\"$reason\"]")
+        }
+        val publisher = publisher(Connections(relay.url), RelayAuth.Nip42(authTimeout))
+
+        assertEquals(
+          PublishResult.Failed("relay refused authentication$detail"),
+          publisher.publish(event(1), publishTimeout),
+        )
+        relay.assertScriptClean()
+        publisher.close()
+      }
     }
   }
 

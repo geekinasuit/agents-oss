@@ -93,11 +93,15 @@ class ReconnectingSubscription(
     data object Subscribed : Delivery
 
     /** The subscription ended: the connection recorded a fault, or the relay closed the
-     * subscription, as [detail] says. The next connection is tried once [retryAfter] has passed. */
+     * subscription, as [detail] says. The next connection is tried once [retryAfter] has passed.
+     * [detail] quotes no text the relay sent, though a relay close's status code is the relay's
+     * number, and a CLOSED's reason is kept to its standard NIP-01 or NIP-42 prefix. */
     data class Interrupted(val detail: String, val retryAfter: Duration) : Delivery
 
     /** A connection could not be opened, authenticated or subscribed on, as [detail] says. The next
-     * attempt comes once [retryAfter] has passed. */
+     * attempt comes once [retryAfter] has passed. [detail] quotes no text the relay sent, though a
+     * relay close's status code and a rejected handshake's HTTP status are the relay's numbers, and
+     * an authentication refusal's reason is kept to its standard NIP-01 or NIP-42 prefix. */
     data class Unavailable(val detail: String, val retryAfter: Duration) : Delivery
 
     /** [close] was called. Every later [next] returns this. */
@@ -184,7 +188,7 @@ class ReconnectingSubscription(
 
   private fun deliver(message: RelayMessage): Delivery {
     if (message is RelayMessage.Closed && message.subscriptionId == subscriptionId) {
-      return interrupt("relay closed the subscription: ${message.message}")
+      return interrupt(relayReasonDetail("relay closed the subscription", message.message))
     }
     if (message is RelayMessage.Eose && message.subscriptionId == subscriptionId) {
       delayMillis = backoff.initialMillis

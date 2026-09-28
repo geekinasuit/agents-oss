@@ -217,7 +217,7 @@ class ReconnectingSubscriptionTest {
 
         assertEquals(Delivery.Subscribed, subscription.next(wait))
         assertEquals(
-          Delivery.Interrupted("relay closed the subscription: error: shutting down", Duration.ofMillis(50)),
+          Delivery.Interrupted("relay closed the subscription: error", Duration.ofMillis(50)),
           subscription.next(wait),
         )
         assertTrue("the connection is closed", zeroed(connections.configs[0]))
@@ -378,13 +378,55 @@ class ReconnectingSubscriptionTest {
       val subscription = subscription(connections::next, RelayAuth.Nip42(authTimeout))
 
       assertEquals(
-        Delivery.Unavailable("relay refused authentication: restricted: not on the list", Duration.ofMillis(50)),
+        Delivery.Unavailable("relay refused authentication: restricted", Duration.ofMillis(50)),
         subscription.next(wait),
       )
       assertTrue("the connection is closed", zeroed(connections.configs[0]))
       assertEquals(NOTHING, seen.poll(5, TimeUnit.SECONDS))
       relay.assertScriptClean()
       subscription.close()
+    }
+  }
+
+  @Test
+  fun `a CLOSED's detail keeps only a standard prefix of the relay's reason`() {
+    for ((reason, detail) in RELAY_REASON_CASES) {
+      FakeRelay().use { relay ->
+        relay.serve { session ->
+          awaitReq(session)
+          session.sendText(closedFrame(SUB, reason))
+        }
+        val subscription = subscription(Connections(relay.url)::next, RelayAuth.None)
+
+        assertEquals(Delivery.Subscribed, subscription.next(wait))
+        assertEquals(
+          Delivery.Interrupted("relay closed the subscription$detail", Duration.ofMillis(50)),
+          subscription.next(wait),
+        )
+        relay.assertScriptClean()
+        subscription.close()
+      }
+    }
+  }
+
+  @Test
+  fun `an auth refusal's detail keeps only a standard prefix of the relay's reason`() {
+    for ((reason, detail) in RELAY_REASON_CASES) {
+      FakeRelay().use { relay ->
+        relay.serve { session ->
+          session.sendText("[\"AUTH\",\"challenge\"]")
+          val frame = session.nextClientText(3_000) ?: error("no AUTH from the client")
+          session.sendText("[\"OK\",\"${clientEventId(frame)}\",false,\"$reason\"]")
+        }
+        val subscription = subscription(Connections(relay.url)::next, RelayAuth.Nip42(authTimeout))
+
+        assertEquals(
+          Delivery.Unavailable("relay refused authentication$detail", Duration.ofMillis(50)),
+          subscription.next(wait),
+        )
+        relay.assertScriptClean()
+        subscription.close()
+      }
     }
   }
 

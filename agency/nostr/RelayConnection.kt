@@ -157,8 +157,11 @@ sealed interface PublishResult {
 
   /** No verdict: the event could not be sent, no matching OK arrived within the deadline, the socket
    * dropped, or the thread was interrupted while it waited. Fail-closed — never assume the event was
-   * stored. [detail] is the substrate's words: it quotes no text the relay sent, though a relay
-   * close's status code is the relay's number. */
+   * stored. [ReconnectingPublisher] also returns it when a connection could not be opened or
+   * authenticated, or the publisher was closed. [detail] is the substrate's words: it quotes no
+   * text the relay sent, though a relay close's status code and a rejected handshake's HTTP status
+   * are the relay's numbers, and an authentication refusal's reason is kept to its standard NIP-01
+   * or NIP-42 prefix. */
   data class Failed(val detail: String) : PublishResult
 }
 
@@ -868,6 +871,22 @@ internal fun handshakeCheckDetail(message: String?): String {
   }
   return "an unrecognised check, its text withheld"
 }
+
+// [lead], followed by what a detail may keep of [message], the reason a relay gave in an OK or a
+// CLOSED. The reason is the relay's text, so only its machine-readable prefix is kept: one of the
+// words NIP-01 and NIP-42 define, when it is the whole reason or a colon follows it directly. The
+// text after the prefix is dropped, and a reason without a standard prefix is withheld. An empty
+// reason adds nothing to [lead].
+internal fun relayReasonDetail(lead: String, message: String): String {
+  if (message.isEmpty()) return lead
+  val prefix = message.substringBefore(':')
+  if (prefix in RELAY_REASON_PREFIXES) return "$lead: $prefix"
+  return "$lead: a reason without a standard prefix, its text withheld"
+}
+
+// NIP-01's prefixes for OK and CLOSED, with NIP-42's auth-required ("restricted" is in both).
+private val RELAY_REASON_PREFIXES =
+  setOf("duplicate", "pow", "blocked", "rate-limited", "invalid", "restricted", "mute", "error", "auth-required")
 
 // The header names the JDK's handshake checks put in their texts: constants, never server-sent.
 private const val WS_HEADER =

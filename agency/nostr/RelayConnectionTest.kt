@@ -448,6 +448,52 @@ class RelayConnectionTest {
   }
 
   @Test
+  fun `relayReasonDetail keeps a standard prefix and drops the relay's words after it`() {
+    for (prefix in
+      listOf(
+        "duplicate",
+        "pow",
+        "blocked",
+        "rate-limited",
+        "invalid",
+        "restricted",
+        "mute",
+        "error",
+        "auth-required",
+      )) {
+      assertEquals("lead: $prefix", relayReasonDetail("lead", "$prefix: $MARKER"))
+      assertEquals("lead: $prefix", relayReasonDetail("lead", "$prefix:$MARKER"))
+      assertEquals("lead: $prefix", relayReasonDetail("lead", prefix))
+    }
+  }
+
+  @Test
+  fun `relayReasonDetail gives the bare lead for an empty reason`() {
+    assertEquals("lead", relayReasonDetail("lead", ""))
+  }
+
+  @Test
+  fun `relayReasonDetail withholds a reason without a standard prefix`() {
+    val withheld = "lead: a reason without a standard prefix, its text withheld"
+    for (message in
+      listOf(
+        MARKER,
+        "$MARKER: error",
+        // The prefix must match exactly: case, and a colon directly after it.
+        "Error: $MARKER",
+        "error : $MARKER",
+        "error $MARKER",
+        " error: $MARKER",
+        "errors: $MARKER",
+        "error-$MARKER: x",
+        // Not in NIP-01's list, though its own examples use it.
+        "unsupported: $MARKER",
+      )) {
+      assertEquals(withheld, relayReasonDetail("lead", message))
+    }
+  }
+
+  @Test
   fun `an unclassified connect fault classifies as TRANSPORT without the server's text`() {
     // Each answer makes the JDK throw an exception whose message quotes what the server sent, so
     // the fallback detail must name the exception class alone.
