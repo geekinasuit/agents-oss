@@ -1,6 +1,7 @@
 package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.shared.journal.EffectReceiver
+import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -291,13 +292,15 @@ class LeadScenarioTest {
     assertEquals(42, code)
     val (_, out2) = advance(dir)
     assertTrue("recovered after the orphaned intent: $out2", out2.contains("phase=PLAN_GATED"))
-    val r = replay(dir)
-    // replay surfaces only the escalation COUNT; the exact orphan text ("… orphaned for
-    // plan:t1") is asserted at the fold level (LeadFoldTest). Assert nonzero here, not an
-    // exact 1, so an added escalation on this path can't turn a real pass into a false fail.
+    // The sweep's own entry, folded from the journal it wrote: the fold quotes it in full only
+    // when the sweep wrote the lead's reason for this ticket's plan intent.
+    val escalations =
+      SqliteStore(dir, componentId = "lead").use { leadFold(it.readAll(), LeadAuth.DENY_ALL).escalations }
     assertTrue(
-      "the orphaned spawn intent must surface as a visible escalation: $r",
-      Regex("escalations=[1-9]").containsMatchIn(r),
+      "the orphaned spawn intent must surface as the lead's own quoted text: $escalations",
+      escalations.any {
+        Regex("spawn-intent orphaned at seq=\\d+ for plan:t1: " + Regex.escape(ORPHANED_SPAWN_REASON)).matches(it)
+      },
     )
     finishPipeline(dir)
     assertTerminal(dir)

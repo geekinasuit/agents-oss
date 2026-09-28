@@ -545,10 +545,7 @@ class LeadDaemon(
         LeadKinds.POD_SPAWN_ABANDONED,
         buildJsonObject {
           put("taskRef", taskRef)
-          put(
-            "reason",
-            "spawn intent orphaned at restart (pod may or may not have started; re-proposing)",
-          )
+          put("reason", ORPHANED_SPAWN_REASON)
         },
         origin = ORIGIN_SUBSTRATE,
       )
