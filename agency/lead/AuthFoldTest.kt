@@ -282,7 +282,7 @@ class AuthFoldTest {
     s.release("g1", "d1") // nonce-less on a gate that HAS one
     val st = s.lead()
     assertFalse("g1" in st.releasedGates)
-    assertEquals(1, st.staleReleases.size)
+    assertEquals(listOf("g1"), st.staleReleases.map { it.second })
   }
 
   @Test
@@ -347,7 +347,7 @@ class AuthFoldTest {
     s.release("g1", "d1") // nonce-less, no nonce ever issued for this gate
     val st = s.lead() // testAuth: non-empty allow-list
     assertFalse("g1" in st.releasedGates)
-    assertEquals(1, st.staleReleases.size)
+    assertEquals(listOf("g1"), st.staleReleases.map { it.second })
     assertTrue("g1" !in st.nonceLessReleases)
   }
 
@@ -364,7 +364,7 @@ class AuthFoldTest {
     assertTrue("g1" in preCeremony.releasedGates)
     val ceremony = s.leadWith(testAuth)
     assertFalse("g1" in ceremony.releasedGates)
-    assertEquals(1, ceremony.staleReleases.size)
+    assertEquals(listOf("g1"), ceremony.staleReleases.map { it.second })
   }
 
   @Test
@@ -386,7 +386,7 @@ class AuthFoldTest {
     s.release("g1", "d2", nonce = "n1")
     val st = s.lead()
     assertFalse("g1" in st.releasedGates)
-    assertEquals(2, st.staleReleases.size)
+    assertEquals(listOf("g1", "g1"), st.staleReleases.map { it.second })
 
     // The fresh nonce releases it.
     s.approvalFor("g1", "operator", "n2", "d2")
@@ -403,7 +403,7 @@ class AuthFoldTest {
     s.release("g2", "d1", nonce = "n1")
     val st = s.lead()
     assertFalse("g2" in st.releasedGates)
-    assertEquals(1, st.staleReleases.size)
+    assertEquals(listOf("g2"), st.staleReleases.map { it.second })
   }
 
   @Test
@@ -417,7 +417,7 @@ class AuthFoldTest {
     s.release("g1", "d1", nonce = "never-minted")
     val st = s.lead()
     assertFalse("g1" in st.releasedGates)
-    assertEquals(1, st.staleReleases.size)
+    assertEquals(listOf("g1"), st.staleReleases.map { it.second })
     assertTrue(st.consumedNonces.isEmpty())
   }
 
@@ -433,7 +433,7 @@ class AuthFoldTest {
     s.release("g1", "d1", nonce = "n-forged") // gate + digest agree; value never minted
     val st = s.lead()
     assertFalse("g1" in st.releasedGates)
-    assertEquals(1, st.staleReleases.size)
+    assertEquals(listOf("g1"), st.staleReleases.map { it.second })
     assertTrue("n-forged" !in st.consumedNonces)
     assertTrue("n1" !in st.consumedNonces)
   }
@@ -447,7 +447,7 @@ class AuthFoldTest {
     s.release("g1", "d1", nonce = "n1")
     val st = s.lead()
     assertFalse("g1" in st.releasedGates)
-    assertEquals(1, st.staleReleases.size)
+    assertEquals(listOf("g1"), st.staleReleases.map { it.second })
   }
 
   @Test
@@ -626,7 +626,7 @@ class AuthFoldTest {
     s.release("g1", "d1", nonce = "n1")
     val st = s.lead()
     assertFalse("g1" in st.releasedGates)
-    assertEquals(1, st.staleReleases.size)
+    assertEquals(listOf("g1"), st.staleReleases.map { it.second })
   }
 
   @Test
@@ -715,7 +715,7 @@ class AuthFoldTest {
     )
     val st = s.leadWith(LeadAuth.DENY_ALL)
     assertFalse("g1" in st.releasedGates)
-    assertEquals(1, st.staleReleases.size)
+    assertEquals(listOf("g1"), st.staleReleases.map { it.second })
     assertTrue("g2" in st.releasedGates)
     assertTrue("g2" in st.nonceLessReleases)
   }
@@ -870,7 +870,7 @@ class AuthFoldTest {
     assertTrue(st.verifiedApprovals.isEmpty())
     assertTrue(st.unverifiedApprovals.any { "no signed preimage" in it.second })
     assertFalse("g1" in st.releasedGates)
-    assertEquals(1, st.staleReleases.size)
+    assertEquals(listOf("g1"), st.staleReleases.map { it.second })
   }
 
   @Test
@@ -1027,7 +1027,7 @@ class AuthFoldTest {
     assertTrue("g1" in s.leadWith(granting).releasedGates)
     val refolded = s.leadWith(revoked)
     assertFalse("g1" in refolded.releasedGates)
-    assertEquals(1, refolded.staleReleases.size)
+    assertEquals(listOf("g1"), refolded.staleReleases.map { it.second })
   }
 
   @Test

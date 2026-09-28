@@ -324,7 +324,7 @@ data class LeadState(
    * keeps its old mark, and the mark's seq says which release it describes (never the
    * current one). */
   val nonceLessReleases: Map<String, Long> = emptyMap(),
-  val staleReleases: List<Pair<Long, String>> = emptyList(), // (seq, gateId) — auth origin, but digest mismatch, unknown gate, or nonce indiscipline (consumed/unknown/misbound/absent-where-required)
+  val staleReleases: List<Pair<Long, String>> = emptyList(), // (seq, open gate's id, or "an unknown gate id of N chars") — auth origin, but digest mismatch, unknown gate, or nonce indiscipline (consumed/unknown/misbound/absent-where-required)
   /** Every nonce issued this ticket, by value — consumed ones stay listed ([consumedNonces]
    * marks them) so a re-issue of a spent value is detectable as the anomaly it is. */
   val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
@@ -1009,8 +1009,11 @@ private fun foldRelease(
   val digest = p.strOrNull("payloadDigest")
   val nonce = p.strOrNull("nonce")
   val gate = s.openGates[gateId]
+  // An open gate's id is one the lead opened; a release naming no open gate carries an id the
+  // fold has checked nothing about, so it is recorded by its length.
+  val recordedId = if (gate == null) "an unknown gate id of ${gateId.length} chars" else gateId
   fun stale(): LeadState =
-    s.copy(staleReleases = (s.staleReleases + (e.seq to gateId)).takeLast(ANOMALY_TAIL))
+    s.copy(staleReleases = (s.staleReleases + (e.seq to recordedId)).takeLast(ANOMALY_TAIL))
   if (gate == null || digest != gate.payloadDigest) return stale()
   // Single-release per (gate, digest): a gate already released on THIS digest is decided, so
   // a second release folds stale rather than re-honoring — whether it carries a fresh nonce
