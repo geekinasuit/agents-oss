@@ -91,7 +91,8 @@ class LeadDaemon(
    * service this module supplies that fires nothing. Whether any other service fires is behaviour
    * the daemon cannot inspect, so it takes one on trust. A daemon under a non-ceremony auth still
    * takes NOOP. It mints no nonce, but it announces one a ceremony daemon left in the journal, and
-   * under NOOP a failed announce of that nonce is neither sent again nor escalated.
+   * under NOOP a failed announce of that nonce is never sent again. The gate is escalated instead,
+   * since no release can clear it under an auth with no approvers.
    *
    * A test passes a service it controls. Most pass NOOP, or under a ceremony auth one of their own
    * that fires nothing, and fire timers with [injectTimerDue]; some pass one that records or fires
@@ -866,6 +867,31 @@ class LeadDaemon(
             mintRefusal(gate, lead) ?: continue
           }
         escalateStall(gate, refusal)
+        return true
+      }
+    }
+
+    // A daemon under an auth with no approvers mints no nonce, but it can run over a journal a
+    // ceremony daemon wrote, and a gate issued a nonce there can never be released under it: a
+    // release that names no nonce folds stale once the gate holds an issued nonce, and one that names
+    // one needs a quorum no approver on its allow-list can meet ([foldRelease]). Nor is the gate
+    // escalated anywhere else, and under a timer service that fires nothing a failed announce of it is
+    // never sent again. So such a gate is escalated once per gate and digest, under the record the
+    // stall escalation above keeps ([LeadState.escalatedStalls]), whatever the timer service. Only a
+    // gate under an id the gate-open derives for the current ticket is escalated, so the id the
+    // reason quotes is one the lead derives.
+    if (!leadAuth.hasApprovers && wellFormedTicket != null) {
+      for (kind in GateKinds.ALL) {
+        val gate = lead.openGates[gateIdFor(kind, wellFormedTicket)] ?: continue
+        if (lead.approvedOnCurrentDigest(gate.gateId)) continue
+        if (gate.payloadDigest in lead.escalatedStalls[gate.gateId].orEmpty()) continue
+        if (lead.issuedNonces.values.none { it.gateId == gate.gateId }) continue
+        escalateGate(
+          gate,
+          "gate-open stalled for ${gate.gateId}: a nonce was issued for it, and the auth in force has " +
+            "no approvers — a release without a nonce is refused once one is issued, and a release " +
+            "with one needs a quorum no approver can meet, so no release can clear it",
+        )
         return true
       }
     }
