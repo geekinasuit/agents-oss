@@ -1,11 +1,14 @@
 package com.geekinasuit.agency.nostr
 
 import java.net.ServerSocket
+import java.nio.ByteBuffer
 import java.net.http.HttpClient
 import java.net.http.WebSocket
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -30,9 +33,9 @@ class RelayConnectionTest {
    * 5 s on a CI runner that runs other targets alongside, so these two allow more. [waitUntil]
    * returns once the connection has failed, so a passing cell does not wait this out. The target's
    * timeout is 60 s, and its worst case is both megabyte cells missing on one run: this wait for
-   * the size cell, this wait plus [lateBreachGraceMillis] for the continued-frame cell, and the
-   * rest of the target, about 50 s in all. Each cell then reports its assertion rather than the
-   * target timing out. */
+   * the size cell, this wait plus [lateBreachGraceMillis] and up to two [nudgeWaitMillis] for the
+   * continued-frame cell, and the rest of the target, about 52 s in all. Each cell then reports its
+   * assertion rather than the target timing out. */
   private val largeFrameWaitMillis = 20_000L
 
   /** How much longer [awaitLargeFrameBreach] keeps looking after a miss, so the failure can say
@@ -40,13 +43,43 @@ class RelayConnectionTest {
    * the connection in tens of milliseconds, so a failure in this window is already far out. */
   private val lateBreachGraceMillis = 5_000L
 
+  /** How long a stalled cell waits for [awaitLargeFrameBreach]'s nudge to be sent, and then watches
+   * the connection after it. A tail the nudge frees arrives and breaches in milliseconds, so this
+   * only bounds the no-change case. */
+  private val nudgeWaitMillis = 1_000L
+
   /** Waits up to [largeFrameWaitMillis] for [conn] to fail, and returns null if it did. Each pass
    * prints its time and failure reason under the LARGE-FRAME-BREACH marker, so a CI log shows a
    * runner's spread from passing runs. On a miss it keeps looking for [lateBreachGraceMillis] and
    * returns what it saw: whether the connection failed late and when, the failure reason, and how
    * far inbound delivery got ([RelayConnection.inboundProgress]), which says where a stall stopped:
-   * no onText call, a message still assembling, or a message delivered that never failed. */
-  private fun awaitLargeFrameBreach(cell: String, conn: RelayConnection): String? {
+   * no onText call, a message still assembling, or a message delivered that never failed.
+   *
+   * If the connection has still not failed (a stall), it prints the JDK version and any busy
+   * client or relay thread's stack under the LARGE-FRAME-STALL marker, and reports the JDK
+   * WebSocket's receive state ([describeReceiveState]) before and after a [nudge], which reports the
+   * relay's side and may send one more frame. The JDK has two receive layers, each with its own
+   * demand: the WebSocket, which calls the listener, and its transport, which reads the socket. In
+   * the JDK 21.0.6 source, the state reads as follows:
+   * - WebSocket `IDLE` with demand 0, transport demand 0: the listener did not request more
+   *   (WebSocketImpl.ReceiveTask, lines 464-469).
+   * - WebSocket `WAITING`, transport demand 1 or more and unread bytes over 0: the transport holds
+   *   bytes it has demand for and its loop is not running, so a pass was lost. A request restarts
+   *   the loop only when it raises demand from 0 (TransportImpl.request, line 287), and the loop
+   *   watches the socket only once it has no unread bytes (TransportImpl.ReceiveTask, lines
+   *   667-699), so nothing restarts it.
+   * - Transport `readState` `AVAILABLE` with no unread bytes: a read event was handled (ReadEvent,
+   *   line 771) but the pass it scheduled (line 772) did not run.
+   * - Transport `readState` `WAITING` with no unread bytes: it is waiting for the socket, and only
+   *   here can the nudge's frame add information, by making the socket readable again.
+   * - WebSocket `TEXT`: a text delivery was signalled (WebSocketImpl, line 794) and either the
+   *   listener has not returned from onText, or the pass that calls it (scheduled at line 861,
+   *   calling onText at line 443) did not run. A busy thread in the stack dump says the first.
+   * - Every character received and none delivered: the listener lost the message's end.
+   * The values are read one at a time, not as one snapshot, and the transport's unread-byte count
+   * is read from a plain field, so the Java memory model does not promise it is current. After a
+   * stall of seconds the state holds still, so in practice the values agree and are current. */
+  private fun awaitLargeFrameBreach(cell: String, conn: RelayConnection, nudge: () -> String): String? {
     val start = System.nanoTime()
     fun elapsedMillis() = (System.nanoTime() - start) / 1_000_000
     if (waitUntil(largeFrameWaitMillis) { conn.hasFailed() }) {
@@ -54,11 +87,99 @@ class RelayConnectionTest {
       return null
     }
     val late = waitUntil(lateBreachGraceMillis) { conn.hasFailed() }
-    return (if (late) "failed late, at ${elapsedMillis()} ms" else "no failure by ${elapsedMillis()} ms") +
-      "; reason: ${conn.failureReason()}; ${conn.inboundProgress()}"
+    val seen =
+      (if (late) "failed late, at ${elapsedMillis()} ms" else "no failure by ${elapsedMillis()} ms") +
+        "; reason: ${conn.failureReason()}; ${conn.inboundProgress()}"
+    if (late) return seen
+    printStalledThreads(cell)
+    val before = describeReceiveState(conn)
+    val nudgedAt = elapsedMillis()
+    val nudged = nudge()
+    val freed = waitUntil(nudgeWaitMillis) { conn.hasFailed() }
+    return "$seen; receive state: $before; at $nudgedAt ms, $nudged; then " +
+      (if (freed) "failed at ${elapsedMillis()} ms" else "no failure by ${elapsedMillis()} ms") +
+      "; reason: ${conn.failureReason()}; ${conn.inboundProgress()}; receive state: ${describeReceiveState(conn)}"
+  }
+
+  /** The JDK WebSocket's receive state for [conn], read by reflection: the target's --add-opens lets
+   * it into the JDK's websocket package. Each value is a failure where its read failed, so a report
+   * names what is unavailable and keeps the rest. A cell checks on every run that each value
+   * reads. */
+  private fun receiveState(conn: RelayConnection): List<Pair<String, Result<String>>> {
+    fun read(owner: Result<Any?>, name: String): Result<Any?> =
+      owner.mapCatching { o ->
+        checkNotNull(o) { "null owner" }.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(o)
+      }
+    val webSocket = read(Result.success(conn), "webSocket")
+    val transport = read(webSocket, "transport")
+    return listOf(
+      "WebSocket" to webSocket.mapCatching { checkNotNull(it).javaClass.name },
+      "state" to read(webSocket, "state").mapCatching { (it as AtomicReference<*>).get().toString() },
+      "demand" to read(webSocket, "demand").mapCatching { it.toString() },
+      "transport" to transport.mapCatching { checkNotNull(it).javaClass.name },
+      "readState" to read(transport, "readState").mapCatching { it.toString() },
+      "transport demand" to read(transport, "demand").mapCatching { it.toString() },
+      "unread bytes" to read(transport, "data").mapCatching { ((it as ByteBuffer?)?.remaining() ?: 0).toString() },
+    )
+  }
+
+  private fun describeReceiveState(conn: RelayConnection): String =
+    receiveState(conn).joinToString(", ") { (name, value) -> "$name ${value.getOrElse { "unavailable ($it)" }}" }
+
+  /** Prints the JDK version and the stacks of the client's threads (the HttpClient's and the common
+   * pool's) and the fake relay's, leaving out threads parked idle in a pool or a selector and saying
+   * how many it left out, so a CI stall shows any thread that is doing something. The threads are
+   * those of every client still open in the JVM, not only the stalled cell's, so a busy thread is
+   * not tied to a connection by this dump alone. */
+  private fun printStalledThreads(cell: String) {
+    println(
+      "LARGE-FRAME-STALL $cell java ${System.getProperty("java.version")}, " +
+        "vm ${System.getProperty("java.vm.version")}"
+    )
+    val idle = setOf("getTask", "awaitWork", "select")
+    val threads =
+      Thread.getAllStackTraces().filterKeys {
+        it.name.startsWith("HttpClient-") || it.name.startsWith("ForkJoinPool") || it.name.startsWith("fake-relay")
+      }
+    val (parked, busy) = threads.entries.partition { (_, frames) -> frames.any { it.methodName in idle } }
+    busy.forEach { (thread, frames) ->
+      println("LARGE-FRAME-STALL $cell thread \"${thread.name}\" ${thread.state}")
+      frames.take(12).forEach { println("LARGE-FRAME-STALL $cell     at $it") }
+    }
+    println("LARGE-FRAME-STALL $cell ${parked.size} idle threads left out")
   }
 
   private fun config(url: String) = RelayConfig(relayUrl = url, leadSecretKey = SecretKeyHex.ofHexString(key))
+
+  // The megabyte cells' stall report depends on reading the JDK's receive state, which a JDK update
+  // or a missing --add-opens would break silently until the next stall; this checks on every run
+  // that each value reads, and that an idle connection reads as the stall report's KDoc says the
+  // JDK 21.0.6 source leaves one (the listener's demand already passed down to the transport, which
+  // is waiting for the socket), so a JDK whose values mean something else fails here.
+  @Test
+  fun `the stall probe can read the JDK WebSocket's receive state`() {
+    FakeRelay().use { relay ->
+      relay.serve {}
+      val conn = RelayConnection(config(relay.url))
+      assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      val idle =
+        mapOf(
+          "state" to "WAITING",
+          "demand" to "0",
+          "readState" to "WAITING",
+          "transport demand" to "1",
+          "unread bytes" to "0",
+        )
+      fun values() = receiveState(conn).associate { (name, value) -> name to value.getOrNull() }.filterKeys { it in idle }
+      waitUntil(5_000) { values() == idle }
+      println("LARGE-FRAME-PROBE java ${System.getProperty("java.version")}: ${describeReceiveState(conn)}")
+      receiveState(conn).forEach { (name, value) ->
+        assertTrue("$name did not read: ${value.exceptionOrNull()}", value.isSuccess)
+      }
+      assertEquals("an idle connection's receive state", idle, values())
+      conn.close()
+    }
+  }
 
   // preparationBudget is the pure deadline-budget arithmetic authenticate() uses after signing to
   // tell "the client ran out of time preparing the frame" from "the relay never answered". Native-
@@ -574,14 +695,43 @@ class RelayConnectionTest {
       // before the parse. Had the parser overflowed instead, the connection would still fail, but as
       // a transport error naming StackOverflowError — so the reason is what tells the two apart.
       val continued = "[1]".repeat(349_525)
-      relay.serve { session ->
+      val session = AtomicReference<FakeRelay.Session?>(null)
+      val sendOutcome = AtomicReference("still in sendText")
+      relay.serve { s ->
+        session.set(s)
         try {
-          session.sendText(continued)
-        } catch (_: Exception) {}
+          s.sendText(continued)
+          sendOutcome.set("sendText returned")
+        } catch (e: Exception) {
+          sendOutcome.set("sendText threw $e")
+        }
       }
       val conn = RelayConnection(config(relay.url))
       assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
-      awaitLargeFrameBreach("continued-frame", conn)?.let {
+      // The nudge pings only once sendText has returned, since a relay still in it holds the
+      // session's send lock. The ping's own write runs on a thread the cell waits on for at most
+      // [nudgeWaitMillis], so a full send buffer cannot hold the cell past its report.
+      val nudge = {
+        val outcome = sendOutcome.get()
+        "relay $outcome; " +
+          if (outcome != "sendText returned") {
+            "no ping sent"
+          } else {
+            val pinged = AtomicReference("ping still sending")
+            thread(isDaemon = true) {
+              pinged.set(
+                try {
+                  session.get()!!.sendPing()
+                  "sent a ping"
+                } catch (e: Exception) {
+                  "ping threw $e"
+                }
+              )
+            }.join(nudgeWaitMillis)
+            pinged.get()
+          }
+      }
+      awaitLargeFrameBreach("continued-frame", conn, nudge)?.let {
         fail("a frame that continues past its closers must breach: $it")
       }
       assertTrue(conn.failureReason()!!, conn.failureReason()!!.contains("depth"))

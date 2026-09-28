@@ -264,6 +264,9 @@ kt_jvm_test(
     name = "relay_connection_test",
     size = "small",
     srcs = ["RelayConnectionTest.kt"],
+    # Lets a stalled megabyte cell read the JDK WebSocket's receive state by reflection, to say where
+    # an undelivered tail is held; a cell checks on every run that the read works.
+    jvm_flags = ["--add-opens=java.net.http/jdk.internal.net.http.websocket=ALL-UNNAMED"],
     test_class = "com.geekinasuit.agency.nostr.RelayConnectionTest",
     # associates (not deps) on :relay so these native-free cells can reach preparationBudget, the
     # internal deadline-budget helper authenticate() uses — a friend of the module, still native-free
