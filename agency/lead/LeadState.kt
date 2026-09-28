@@ -363,10 +363,13 @@ data class LeadState(
   val statusTail: List<String> = emptyList(),
   val escalations: List<String> = emptyList(),
   /** Gate id → the digests the gate was escalated on this ticket as holding up the stage it guards.
-   * A gate is escalated on a digest in three cases: it is open on the digest under a ceremony auth
-   * with no usable nonce, one the mint issues none for, and not released on it; it is released on
-   * the digest, and the digest is not the substrate's evidence for its kind; or it is the plan gate,
-   * open on a digest that is not the recorded plan, when an execute pod is proposed. Read from the
+   * A gate is escalated on a digest in four cases: it is open on the digest under a ceremony auth
+   * with no usable nonce, one the mint issues none for, and not released on it; it is open on the
+   * digest under an auth with no approvers, holds an issued nonce, and is not released on it, so no
+   * release can clear it; it is released on the digest, and the digest is not the substrate's
+   * evidence for its kind; or it is the plan gate, open on a digest that is not the recorded plan,
+   * when an execute pod is proposed. The record keeps the gate and digest, not the case, so a gate
+   * escalated on a digest for one case is not escalated on it again for another. Read from the
    * gate and digest an [LeadKinds.ESCALATED] row names beside its reason, so the escalation and its
    * record are one append. The daemon reads it to escalate each gate and digest once, across
    * restarts, which the capped [escalations] tail cannot promise. Ticket-scoped:
