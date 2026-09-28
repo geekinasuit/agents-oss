@@ -291,9 +291,13 @@ class RelayConnection(
       t = t.cause
       depth++
     }
+    // The exception class alone: an unclassified fault's message can quote what the server sent
+    // (the JDK's "Invalid status line" quotes the relay's status line whole, and a bad
+    // Content-Length surfaces as a NumberFormatException quoting its value), and the detail is the
+    // substrate's words.
     return ConnectResult.Failed(
       ConnectFailure.TRANSPORT,
-      "connect failed: ${cause.javaClass.simpleName}: ${cause.message}",
+      "connect failed: ${cause.javaClass.simpleName}",
     )
   }
 
