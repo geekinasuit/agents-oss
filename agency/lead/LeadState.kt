@@ -913,12 +913,15 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
       // A turn that produced garbage was billed exactly like one that produced a decision, so
       // its cost accrues on the same terms: a model that ONLY emits near-misses would
       // otherwise spend against a cap that never moves.
-      LeadKinds.COGNITION_MALFORMED ->
+      // The reason is held only when it is one the lead writes; any other is described by its length.
+      LeadKinds.COGNITION_MALFORMED -> {
+        val reason = p.str("reason")
+        val held = if (MalformedReasons.isLeads(reason)) reason else "a reason of ${reason.length} chars"
         s.copy(
           cognitionSpendUsd = s.cognitionSpendUsd + accruedCost(p),
-          malformedCognition =
-            (s.malformedCognition + (e.seq to p.str("reason"))).takeLast(ANOMALY_TAIL),
+          malformedCognition = (s.malformedCognition + (e.seq to held)).takeLast(ANOMALY_TAIL),
         )
+      }
       // Shared + unknown kinds: not this state machine's business (schema-version KDoc
       // above). Also the state-inert lead kinds (POD_EVENT): journaled audit rows the fold
       // deliberately never consumes — their origin was already policed by the gate above.

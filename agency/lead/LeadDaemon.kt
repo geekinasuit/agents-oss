@@ -670,7 +670,7 @@ class LeadDaemon(
         // must not be able to overwrite the substrate's own account of what happened.
         for ((k, v) in out.meta) put(k, v.take(MAX_JOURNALED_STRING))
         put("strategy", cognition.name)
-        put("reason", (out.malformed ?: "unclassified").take(MAX_JOURNALED_STRING))
+        put("reason", (out.malformed ?: MalformedReasons.UNCLASSIFIED).take(MAX_JOURNALED_STRING))
         put("attempt", attempt)
       },
       origin = ORIGIN_SUBSTRATE,
