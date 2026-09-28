@@ -2,6 +2,7 @@ package com.geekinasuit.agency.nostr
 
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
@@ -22,16 +23,17 @@ import kotlin.concurrent.thread
  * fragmentation, ingress-bound, and (in 3b-2) hostile-relay behaviour, where full control over the
  * exact bytes and their timing is the whole point.
  *
- * Usage: construct it (binds an ephemeral port; read [url]), register a [serve] script that runs on
+ * Usage: construct it (binds an ephemeral port of 127.0.0.1; read [url]), register a [serve] script that runs on
  * its own thread once the client connects, then point a [RelayConnection] at [url]. The script and
  * the connection's authenticate() run concurrently, which is required — the NIP-42 exchange needs
  * the relay side to send a challenge, read the client's response, and answer while authenticate()
  * blocks waiting.
  */
 class FakeRelay : AutoCloseable {
-  private val server = ServerSocket(0)
+  private val server = loopbackServerSocket()
   val port: Int = server.localPort
   val url: String = "ws://127.0.0.1:$port"
+  val boundAddress: InetAddress get() = server.inetAddress
 
   @Volatile private var accepted: Socket? = null
   @Volatile private var script: Thread? = null
@@ -232,8 +234,9 @@ internal fun readUpgradeRequest(sock: Socket): String {
  * until [close].
  */
 class HandshakeResponder(response: (accept: String) -> String) : AutoCloseable {
-  private val server = ServerSocket(0)
+  private val server = loopbackServerSocket()
   val url: String = "ws://127.0.0.1:${server.localPort}"
+  val boundAddress: InetAddress get() = server.inetAddress
   @Volatile private var accepted: Socket? = null
 
   init {
@@ -257,6 +260,12 @@ class HandshakeResponder(response: (accept: String) -> String) : AutoCloseable {
     } catch (_: Exception) {}
   }
 }
+
+/** A server socket on an ephemeral port of 127.0.0.1, the address every test URL names. A wildcard
+ * bind can share its port with another process's bind on 127.0.0.1 (macOS allows it), and a connect
+ * to 127.0.0.1 then reaches that process, not the test's server. Bound on 127.0.0.1, the test's
+ * server refuses a later loopback bind on its port and wins a connect over a wildcard one. */
+fun loopbackServerSocket(): ServerSocket = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
 
 /** Poll [cond] until it holds or [timeoutMillis] passes, and return whether it held. What a [FakeRelay]
  * script sends lands on the client's listener thread, so a cell waits for its effect this way. */
