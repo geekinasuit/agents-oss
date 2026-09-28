@@ -358,7 +358,8 @@ class LeadFoldTest {
     s.release(gate, "ffff", ORIGIN_AUTH_LAYER)
     var lead = s.lead()
     assertTrue(lead.releasedGates.isEmpty())
-    assertEquals(1, lead.staleReleases.size)
+    // The gate is open, so its id is the lead's and is kept.
+    assertEquals(listOf(gate), lead.staleReleases.map { it.second })
     assertEquals(TicketPhase.PLAN_GATED, lead.phase)
 
     // The shared fold HONORS it (provenance is its only check) — the digest binding is
@@ -376,10 +377,27 @@ class LeadFoldTest {
   fun releaseForUnknownGateIsStaleNotHonored() {
     val s = newStore()
     s.claim("t1")
-    s.release("no-such-gate", "aa11", ORIGIN_AUTH_LAYER)
+    val release = s.release(MARKER, "aa11", ORIGIN_AUTH_LAYER)
     val lead = s.lead()
     assertTrue(lead.releasedGates.isEmpty())
-    assertEquals(1, lead.staleReleases.size)
+    // No gate is open under that id, so the id is the entry's own and is recorded by its length.
+    assertEquals(listOf(release.seq to "an unknown gate id of ${MARKER.length} chars"), lead.staleReleases)
+    s.close()
+  }
+
+  @Test
+  fun aLateReleaseOfAGateClosedByTicketDoneIsRecordedByLength() {
+    // TICKET_DONE clears the open gates, and the fold keeps no history of them, so a release that
+    // arrives afterward cannot be told from one naming an invented id: both take the length form.
+    val s = newStore()
+    s.claim("t1")
+    val gate = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    s.gateOpened(gate, GateKinds.PLAN_APPROVAL, "aa11")
+    s.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
+    val release = s.release(gate, "aa11", ORIGIN_AUTH_LAYER)
+    val lead = s.lead()
+    assertTrue(lead.releasedGates.isEmpty())
+    assertEquals(listOf(release.seq to "an unknown gate id of ${gate.length} chars"), lead.staleReleases)
     s.close()
   }
 
