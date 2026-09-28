@@ -225,6 +225,15 @@ class RelayConnection(
   // life. AtomicReference so the listener thread and the caller thread agree on the first cause.
   private val failure = AtomicReference<String?>(null)
 
+  // How far inbound delivery has got, so a test can say where a delivery stopped: onText calls,
+  // characters received in them, complete messages handed to deliver(), and messages the depth
+  // check passed to the parser. Written only by the listener, whose calls the JDK runs one at a
+  // time, so a plain increment is safe; @Volatile so another thread reads a recent value.
+  @Volatile private var textCalls = 0L
+  @Volatile private var charsReceived = 0L
+  @Volatile private var messagesDelivered = 0L
+  @Volatile private var depthChecksPassed = 0L
+
   @Volatile private var webSocket: WebSocket? = null
   private val connectCalled = AtomicBoolean(false)
   private val closed = AtomicBoolean(false)
@@ -505,6 +514,13 @@ class RelayConnection(
    * that stalled past its deadline). */
   fun failureReason(): String? = failure.get()
 
+  /** Inbound progress so far, for a test's diagnostic: onText calls, characters received, messages
+   * delivered (handed to the depth check), and messages that passed the depth check (handed on to
+   * the parser). The counts are cumulative over the connection. */
+  internal fun inboundProgress(): String =
+    "onText calls: $textCalls, chars received: $charsReceived, messages delivered: $messagesDelivered, " +
+      "passed the depth check: $depthChecksPassed"
+
   /** Close the socket. Idempotent and bounded: a graceful close that does not complete in time is
    * dropped with an abort, and so is one whose wait is interrupted. An interrupt pending when close
    * is called, or arriving while it waits, is still pending when it returns. Never throws. */
@@ -671,6 +687,8 @@ class RelayConnection(
     }
 
     override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? {
+      textCalls++
+      charsReceived += data.length
       // SIZE bound on the ACCUMULATED buffer, checked on every fragment: the breach can arrive
       // mid-message (before last==true), at which point there is no message boundary to resync on,
       // so we abort rather than keep reading. Per-message; NO lifetime-total cap (unlike
@@ -699,6 +717,7 @@ class RelayConnection(
     }
 
     private fun deliver(webSocket: WebSocket, text: String) {
+      messagesDelivered++
       // DEPTH bound, applied BEFORE the parser: deep enough nesting makes kotlinx's parser recurse
       // until it StackOverflows (the check's KDoc says which nesting), so a frame that may nest deeper
       // than MAX_JSON_DEPTH breaches before the parse. [jsonMayNestDeeperThan] counts only STRUCTURAL
@@ -713,6 +732,7 @@ class RelayConnection(
         breach(webSocket, "inbound message failed the JSON depth check (max $MAX_JSON_DEPTH levels)")
         return
       }
+      depthChecksPassed++
       // TOTAL parse: null on any malformed input. Junk from a relay is noise the fold never trusts,
       // so drop it and keep the connection — only a bounds breach (an attack) closes the socket.
       // The depth guard above is PREVENTION, and it is deliberately the ONLY protection against a

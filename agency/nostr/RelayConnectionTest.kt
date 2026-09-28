@@ -9,6 +9,7 @@ import java.util.concurrent.CompletableFuture
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 /**
@@ -27,10 +28,35 @@ class RelayConnectionTest {
   /** How long a cell that sends about a megabyte waits for the connection to fail on it. The other
    * failure waits allow 5 s. A megabyte cell takes tens of milliseconds locally, but one has missed
    * 5 s on a CI runner that runs other targets alongside, so these two allow more. [waitUntil]
-   * returns once the connection has failed, so a passing cell does not wait this out. With the
-   * size or the depth guard missing, or both, the cells left waiting still end inside the target's
-   * 60 s timeout, so each reports its assertion rather than the target timing out. */
+   * returns once the connection has failed, so a passing cell does not wait this out. The target's
+   * timeout is 60 s, and its worst case is both megabyte cells missing on one run: this wait for
+   * the size cell, this wait plus [lateBreachGraceMillis] for the continued-frame cell, and the
+   * rest of the target, about 50 s in all. Each cell then reports its assertion rather than the
+   * target timing out. */
   private val largeFrameWaitMillis = 20_000L
+
+  /** How much longer [awaitLargeFrameBreach] keeps looking after a miss, so the failure can say
+   * whether the connection failed late (a slow runner) or not at all (a stall). Passing cells fail
+   * the connection in tens of milliseconds, so a failure in this window is already far out. */
+  private val lateBreachGraceMillis = 5_000L
+
+  /** Waits up to [largeFrameWaitMillis] for [conn] to fail, and returns null if it did. Each pass
+   * prints its time and failure reason under the LARGE-FRAME-BREACH marker, so a CI log shows a
+   * runner's spread from passing runs. On a miss it keeps looking for [lateBreachGraceMillis] and
+   * returns what it saw: whether the connection failed late and when, the failure reason, and how
+   * far inbound delivery got ([RelayConnection.inboundProgress]), which says where a stall stopped:
+   * no onText call, a message still assembling, or a message delivered that never failed. */
+  private fun awaitLargeFrameBreach(cell: String, conn: RelayConnection): String? {
+    val start = System.nanoTime()
+    fun elapsedMillis() = (System.nanoTime() - start) / 1_000_000
+    if (waitUntil(largeFrameWaitMillis) { conn.hasFailed() }) {
+      println("LARGE-FRAME-BREACH $cell ${elapsedMillis()} ms: ${conn.failureReason()}")
+      return null
+    }
+    val late = waitUntil(lateBreachGraceMillis) { conn.hasFailed() }
+    return (if (late) "failed late, at ${elapsedMillis()} ms" else "no failure by ${elapsedMillis()} ms") +
+      "; reason: ${conn.failureReason()}; ${conn.inboundProgress()}"
+  }
 
   private fun config(url: String) = RelayConfig(relayUrl = url, leadSecretKey = SecretKeyHex.ofHexString(key))
 
@@ -388,10 +414,12 @@ class RelayConnectionTest {
       }
       val conn = RelayConnection(config(relay.url))
       assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+      val start = System.nanoTime()
       assertTrue(
         "connection should have failed on the size bound",
         waitUntil(largeFrameWaitMillis) { conn.hasFailed() },
       )
+      println("LARGE-FRAME-BREACH size-bound ${(System.nanoTime() - start) / 1_000_000} ms: ${conn.failureReason()}")
       // "characters", not "exceeded": the SIZE and COUNT breaches both say "exceeded", so only the char
       // unit distinguishes the SIZE bound from the DEPTH ("depth") and COUNT ("unconsumed") breaches.
       assertTrue(conn.failureReason()!!.contains("characters"))
@@ -553,10 +581,9 @@ class RelayConnectionTest {
       }
       val conn = RelayConnection(config(relay.url))
       assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
-      assertTrue(
-        "a frame that continues past its closers must breach",
-        waitUntil(largeFrameWaitMillis) { conn.hasFailed() },
-      )
+      awaitLargeFrameBreach("continued-frame", conn)?.let {
+        fail("a frame that continues past its closers must breach: $it")
+      }
       assertTrue(conn.failureReason()!!, conn.failureReason()!!.contains("depth"))
       conn.close()
     }
