@@ -962,7 +962,7 @@ class RelayConnectionTest {
       )
     assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
     assertEquals(
-      PublishResult.Failed("connection failed: relay closed: 1000 'bye'"),
+      PublishResult.Failed("connection failed: relay closed: 1000"),
       conn.publish(testEvent(id), Duration.ofSeconds(3)),
     )
     conn.close()
@@ -1032,7 +1032,7 @@ class RelayConnectionTest {
     val result = conn.publish(testEvent("99".repeat(32)), earlyEndDeadline)
     val millis = (System.nanoTime() - started) / 1_000_000
     val stillInterrupted = Thread.interrupted()
-    assertEquals(PublishResult.Failed("connection failed: relay closed: 1000 'bye'"), result)
+    assertEquals(PublishResult.Failed("connection failed: relay closed: 1000"), result)
     assertTrue("the interrupt is still set when publish returns", stillInterrupted)
     assertCameBackWellInsideTheDeadline(millis)
     conn.close()
@@ -1057,8 +1057,78 @@ class RelayConnectionTest {
     val result = conn.publish(testEvent("13".repeat(32)), earlyEndDeadline)
     val millis = (System.nanoTime() - started) / 1_000_000
     assertTrue("the double never saw publish waiting for the OK", double.closedWhileWaiting)
-    assertEquals(PublishResult.Failed("connection failed: relay closed: 1000 'bye'"), result)
+    assertEquals(PublishResult.Failed("connection failed: relay closed: 1000"), result)
     assertCameBackWellInsideTheDeadline(millis)
+    conn.close()
+  }
+
+  @Test
+  fun `a relay's close reason stays out of every Failed detail`() {
+    // A status other than 1000, so the detail's number is shown to be the relay's.
+    assertEveryFailedDetail(
+      { listener, ws -> listener.onClose(ws, 4000, MARKER) },
+      "connection failed: relay closed: 4000",
+    )
+  }
+
+  @Test
+  fun `a transport error's message stays out of every Failed detail`() {
+    assertEveryFailedDetail(
+      { listener, ws -> listener.onError(ws, java.io.IOException(MARKER)) },
+      "connection failed: transport error: IOException",
+    )
+  }
+
+  @Test
+  fun `a failed send's message stays out of its Failed detail`() {
+    val conn =
+      RelayConnection(
+        config("ws://127.0.0.1:1"),
+        webSocketClient { FailedSendWebSocket(java.io.IOException(MARKER)) },
+      )
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+    assertEquals(
+      PublishResult.Failed("could not send event: IOException"),
+      conn.publish(testEvent("15".repeat(32)), Duration.ofSeconds(3)),
+    )
+    assertEquals(
+      SubscribeResult.Failed("could not send CLOSE: IOException"),
+      conn.closeSubscription("sub", Duration.ofSeconds(3)),
+    )
+    conn.close()
+  }
+
+  @Test
+  fun `a send that throws keeps its message out of its Failed detail`() {
+    val conn =
+      RelayConnection(
+        config("ws://127.0.0.1:1"),
+        webSocketClient { ThrowingSendWebSocket(IllegalStateException(MARKER)) },
+      )
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+    assertEquals(
+      PublishResult.Failed("could not send event: IllegalStateException"),
+      conn.publish(testEvent("16".repeat(32)), Duration.ofSeconds(3)),
+    )
+    conn.close()
+  }
+
+  // The double reports [fault] during publish's send, so the connection has failed by the time
+  // publish waits for the OK; closeSubscription and authenticate then meet the fault at their entry.
+  // Each of the three results carries [detail] exactly.
+  private fun assertEveryFailedDetail(fault: (WebSocket.Listener, WebSocket) -> Unit, detail: String) {
+    val conn =
+      RelayConnection(
+        config("ws://127.0.0.1:1"),
+        webSocketClient { listener -> FaultOnSendWebSocket(listener, fault) },
+      )
+    assertEquals(ConnectResult.Connected, conn.connect(Duration.ofSeconds(2)))
+    assertEquals(
+      PublishResult.Failed(detail),
+      conn.publish(testEvent("14".repeat(32)), Duration.ofSeconds(3)),
+    )
+    assertEquals(SubscribeResult.Failed(detail), conn.closeSubscription("sub", Duration.ofSeconds(3)))
+    assertEquals(AuthResult.Failed(detail), conn.authenticate(Duration.ofSeconds(3)))
     conn.close()
   }
 
@@ -1197,6 +1267,29 @@ private class UnsentCloseWebSocket : DoubleWebSocket() {
 private class CloseOnSendWebSocket(private val listener: WebSocket.Listener) : DoubleWebSocket() {
   override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> {
     listener.onClose(this, WebSocket.NORMAL_CLOSURE, "bye")
+    return CompletableFuture.completedFuture<WebSocket>(this)
+  }
+}
+
+// A WebSocket double whose every send completes exceptionally with [error].
+private class FailedSendWebSocket(private val error: Throwable) : DoubleWebSocket() {
+  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> =
+    CompletableFuture.failedFuture(error)
+}
+
+// A WebSocket double whose every sendText throws [error] instead of returning a future.
+private class ThrowingSendWebSocket(private val error: RuntimeException) : DoubleWebSocket() {
+  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> =
+    throw error
+}
+
+// A WebSocket double whose send reports [fault] to the listener before it completes.
+private class FaultOnSendWebSocket(
+  private val listener: WebSocket.Listener,
+  private val fault: (WebSocket.Listener, WebSocket) -> Unit,
+) : DoubleWebSocket() {
+  override fun sendText(data: CharSequence, last: Boolean): CompletableFuture<WebSocket> {
+    fault(listener, this)
     return CompletableFuture.completedFuture<WebSocket>(this)
   }
 }

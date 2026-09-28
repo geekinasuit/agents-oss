@@ -141,7 +141,8 @@ sealed interface AuthResult {
 
   /** The handshake could not complete: no challenge arrived, no matching OK arrived, the event
    * could not be signed or sent, the connection failed mid-handshake, or the thread was interrupted
-   * while it waited. Fail-closed. */
+   * while it waited. Fail-closed. [detail] is the substrate's words: it quotes no text the relay
+   * sent, though a relay close's status code is the relay's number. */
   data class Failed(val detail: String) : AuthResult
 }
 
@@ -156,7 +157,8 @@ sealed interface PublishResult {
 
   /** No verdict: the event could not be sent, no matching OK arrived within the deadline, the socket
    * dropped, or the thread was interrupted while it waited. Fail-closed — never assume the event was
-   * stored. */
+   * stored. [detail] is the substrate's words: it quotes no text the relay sent, though a relay
+   * close's status code is the relay's number. */
   data class Failed(val detail: String) : PublishResult
 }
 
@@ -169,8 +171,11 @@ sealed interface SubscribeResult {
   /** The REQ (or CLOSE) frame was sent. */
   object Sent : SubscribeResult
 
-  /** The frame could not be sent: not connected, the socket dropped, or the send timed out.
-   * Fail-closed — the subscription is not established. */
+  /** The frame could not be sent: not connected, the connection had already failed (a relay close,
+   * a transport error, a bounds breach, an earlier send that stalled), or the send faulted, timed
+   * out or was interrupted.
+   * Fail-closed — the subscription is not established. [detail] is the substrate's words: it
+   * quotes no text the relay sent, though a relay close's status code is the relay's number. */
   data class Failed(val detail: String) : SubscribeResult
 }
 
@@ -661,8 +666,11 @@ class RelayConnection(
       val reason = "send interrupted"
       breach(ws, reason)
       reason
+    } catch (e: ExecutionException) {
+      // The send's own fault, by class alone, as in the listener's onError.
+      (e.cause ?: e).javaClass.simpleName
     } catch (e: Exception) {
-      "${e.javaClass.simpleName}: ${e.message}"
+      e.javaClass.simpleName
     }
 
   private fun breach(ws: WebSocket, reason: String) {
@@ -765,12 +773,16 @@ class RelayConnection(
       }
     }
 
+    // The exception class alone: its message can quote what the relay sent, and the recorded fault
+    // is the substrate's words. That also drops the JDK's own text (a "Connection reset", say);
+    // the class names the kind of fault.
     override fun onError(webSocket: WebSocket, error: Throwable) {
-      failure.compareAndSet(null, "transport error: ${error.javaClass.simpleName}: ${error.message}")
+      failure.compareAndSet(null, "transport error: ${error.javaClass.simpleName}")
     }
 
+    // The status code alone: the reason is the relay's close-frame text.
     override fun onClose(webSocket: WebSocket, statusCode: Int, reason: String): CompletionStage<*>? {
-      failure.compareAndSet(null, "relay closed: $statusCode '$reason'")
+      failure.compareAndSet(null, "relay closed: $statusCode")
       return null
     }
   }
