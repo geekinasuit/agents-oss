@@ -14,7 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: bazel test
-        run: bazel test //...
+        run: bazel test --test_output=all //...
+      - name: relay_connection_test x30, parallel
+        if: ${{ !cancelled() }}
+        run: bazel test --nocache_test_results --runs_per_test=30 --test_output=all //agency/nostr:relay_connection_test
+      - name: relay_connection_test x15, serial
+        if: ${{ !cancelled() }}
+        run: bazel test --nocache_test_results --runs_per_test=15 --local_test_jobs=1 --test_output=all //agency/nostr:relay_connection_test
       # The script suite is deliberately outside bazel (the release tool and its tests are
       # .main.kts files); the runner self-locates, so this tests the checked-out tree.
       - name: script tests
