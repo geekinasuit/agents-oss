@@ -531,6 +531,11 @@ data class LeadState(
  * party positioned to flood them could already write worse. */
 private const val ANOMALY_TAIL = 100
 
+/** The one reason the lead writes on a [LeadKinds.POD_SPAWN_ABANDONED] entry; the fold quotes
+ * a reason only when it is this one. */
+const val ORPHANED_SPAWN_REASON =
+  "spawn intent orphaned at restart (pod may or may not have started; re-proposing)"
+
 /** The lead kinds only the substrate ever authors. Any of these
  * arriving with a non-substrate origin is never honored — see the foldOne provenance gate.
  * COGNITION_PROPOSED is excluded (legitimately cognition-origin); GATE_RELEASED is not a
@@ -826,10 +831,21 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
         s.copy(pendingSpawnIntents = s.pendingSpawnIntents + (p.str("taskRef") to e.seq))
       LeadKinds.POD_SPAWN_ABANDONED -> {
         val taskRef = p.str("taskRef")
+        val reason = p.str("reason")
+        // The lead writes this only for a pending intent, with its one fixed reason; a field
+        // the lead did not write is described by its length. Pending is not enough for the
+        // ref: the fold holds any intent's ref, and the lead intends only this ticket's
+        // plan or execute pod.
+        val cur = s.currentTicket
+        val ref =
+          if (taskRef in s.pendingSpawnIntents && cur != null && taskRef in setOf("plan:$cur", "execute:$cur"))
+            taskRef
+          else "an unknown task ref of ${taskRef.length} chars"
+        val why = if (reason == ORPHANED_SPAWN_REASON) reason else "a reason of ${reason.length} chars"
         s.copy(
           pendingSpawnIntents = s.pendingSpawnIntents - taskRef,
           escalations =
-            (s.escalations + "spawn-intent orphaned for $taskRef: ${p.str("reason")}")
+            (s.escalations + "spawn-intent orphaned at seq=${e.seq} for $ref: $why")
               .takeLast(ANOMALY_TAIL),
         )
       }

@@ -789,23 +789,89 @@ class LeadFoldTest {
       },
       ORIGIN_SUBSTRATE,
     )
+    val abandon = s.spawnAbandoned("plan:t1", ORPHANED_SPAWN_REASON)
+    val lead = s.lead()
+    assertTrue("intent cleared", lead.pendingSpawnIntents.isEmpty())
+    assertEquals(
+      "the lead's own orphan entry is quoted in full",
+      listOf("spawn-intent orphaned at seq=${abandon.seq} for plan:t1: $ORPHANED_SPAWN_REASON"),
+      lead.escalations,
+    )
+    s.close()
+  }
+
+  @Test
+  fun anOrphanForNoPendingIntentNamesItsTaskRefByLengthNotByText() {
+    val s = newStore()
+    s.claim("t1")
+    // A ref of the form the lead intends, but with no intent pending: only the pending check
+    // can refuse it.
+    val abandon = s.spawnAbandoned("plan:t1", ORPHANED_SPAWN_REASON)
+    assertEquals(
+      listOf(
+        "spawn-intent orphaned at seq=${abandon.seq} for an unknown task ref of 7 chars: " +
+          ORPHANED_SPAWN_REASON
+      ),
+      s.lead().escalations,
+    )
+    s.close()
+  }
+
+  @Test
+  fun anOrphanOfAnIntentTheLeadWouldNotWriteNamesItsTaskRefByLengthNotByText() {
+    val s = newStore()
+    s.claim("t1")
+    // A pending intent, but not for this ticket's plan or execute pod: the lead's sweep would
+    // abandon it with the lead's own reason, so pending alone must not vouch for the ref.
     s.append(
-      LeadKinds.POD_SPAWN_ABANDONED,
+      LeadKinds.POD_SPAWN_INTENDED,
       buildJsonObject {
-        put("taskRef", "plan:t1")
-        put("reason", "spawn intent orphaned at restart")
+        put("taskRef", MARKER)
+        put("artifactPath", "/tmp/plan-t1")
       },
       ORIGIN_SUBSTRATE,
     )
-    val lead = s.lead()
-    assertTrue("intent cleared", lead.pendingSpawnIntents.isEmpty())
-    assertTrue(
-      "the orphan is a visible escalation",
-      lead.escalations.any { it.contains("orphaned for plan:t1") },
+    val abandon = s.spawnAbandoned(MARKER, ORPHANED_SPAWN_REASON)
+    assertEquals(
+      listOf(
+        "spawn-intent orphaned at seq=${abandon.seq} for an unknown task ref of ${MARKER.length} chars: " +
+          ORPHANED_SPAWN_REASON
+      ),
+      s.lead().escalations,
+    )
+    s.close()
+  }
+
+  @Test
+  fun anOrphanWithAReasonTheLeadDoesNotWriteNamesItByLengthNotByText() {
+    val s = newStore()
+    s.claim("t1")
+    s.append(
+      LeadKinds.POD_SPAWN_INTENDED,
+      buildJsonObject {
+        put("taskRef", "plan:t1")
+        put("artifactPath", "/tmp/plan-t1")
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    val abandon = s.spawnAbandoned("plan:t1", MARKER)
+    assertEquals(
+      listOf("spawn-intent orphaned at seq=${abandon.seq} for plan:t1: a reason of ${MARKER.length} chars"),
+      s.lead().escalations,
     )
     s.close()
   }
 }
+
+private fun JournalStore.spawnAbandoned(taskRef: String, reason: String): JournalEntry =
+  append(
+    LeadKinds.POD_SPAWN_ABANDONED,
+    buildJsonObject {
+      put("taskRef", taskRef)
+      put("reason", reason)
+    },
+    ORIGIN_SUBSTRATE,
+  )
 
 // A field value no anomaly text may quote.
 private const val MARKER = "entry-chosen-marker"
