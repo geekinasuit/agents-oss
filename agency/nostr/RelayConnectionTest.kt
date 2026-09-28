@@ -155,6 +155,18 @@ class RelayConnectionTest {
         "Sec-WebSocket-Protocol: $MARKER" to "Unexpected subprotocol",
         "Sec-WebSocket-Extensions: $MARKER" to "Response field 'Sec-WebSocket-Extensions' present",
         "Sec-WebSocket-Accept: $MARKER" to "Response field 'Sec-WebSocket-Accept' multivalued",
+        // The JDK passes a value holding ": " straight into its text, so the cut must stop at the
+        // first ": ", not the last.
+        "Sec-WebSocket-Protocol: $MARKER: x" to "Unexpected subprotocol",
+        "Sec-WebSocket-Extensions: $MARKER: x" to
+          "Response field 'Sec-WebSocket-Extensions' present",
+        // A second value for a field the JDK requires to be single.
+        "Upgrade: $MARKER" to "Response field 'Upgrade' multivalued",
+        "Connection: $MARKER" to "Response field 'Connection' multivalued",
+        "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Version: $MARKER" to
+          "Response field 'Sec-WebSocket-Version' multivalued",
+        "Sec-WebSocket-Protocol: a\r\nSec-WebSocket-Protocol: $MARKER" to
+          "Response field 'Sec-WebSocket-Protocol' multivalued",
       )
     for ((extraHeader, check) in cases) {
       val failed =
@@ -163,6 +175,47 @@ class RelayConnectionTest {
         }
       assertEquals(ConnectFailure.HANDSHAKE, failed.failure)
       assertTrue("server value leaked: ${failed.detail}", !failed.detail.contains(MARKER))
+      assertEquals("handshake rejected: $check", failed.detail)
+    }
+  }
+
+  @Test
+  fun `a handshake check that quotes no server text reaches the detail whole`() {
+    // The kept texts, produced end to end by the JDK rather than written as literals, so a JDK
+    // that rewords one fails here instead of quietly degrading the detail to "withheld".
+    val cases =
+      listOf<Pair<(String) -> String, String>>(
+        { _: String -> "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n" } to
+          "Unexpected HTTP response status code 404",
+        // A second code, so the kept form is pinned as any three digits, not one status.
+        { _: String -> "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n" } to
+          "Unexpected HTTP response status code 500",
+        { accept: String ->
+          "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n" +
+            "Sec-WebSocket-Accept: $accept\r\n\r\n"
+        } to "Response field missing: Upgrade",
+        { accept: String ->
+          "HTTP/1.1 101 Switching Protocols\r\nUpgrade: $MARKER\r\nConnection: Upgrade\r\n" +
+            "Sec-WebSocket-Accept: $accept\r\n\r\n"
+        } to "Bad response field: Upgrade",
+        { accept: String ->
+          "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
+            "Sec-WebSocket-Accept: $accept\r\n\r\n"
+        } to "Response field missing: Connection",
+        { accept: String ->
+          "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: $MARKER\r\n" +
+            "Sec-WebSocket-Accept: $accept\r\n\r\n"
+        } to "Bad response field: Connection",
+        { _: String ->
+          "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+        } to "Response field missing: Sec-WebSocket-Accept",
+        { accept: String ->
+          "${UPGRADE_OK}Sec-WebSocket-Accept: $accept\r\nSec-WebSocket-Version: $MARKER\r\n\r\n"
+        } to "Bad response field: Sec-WebSocket-Version",
+      )
+    for ((response, check) in cases) {
+      val failed = handshakeFailure(response)
+      assertEquals(ConnectFailure.HANDSHAKE, failed.failure)
       assertEquals("handshake rejected: $check", failed.detail)
     }
   }
@@ -197,6 +250,15 @@ class RelayConnectionTest {
       "Unexpected subprotocol",
       handshakeCheckDetail("Unexpected subprotocol: a\n$MARKER"),
     )
+    // A value holding ": " is cut at the first one: the check is constant text and ends there.
+    assertEquals(
+      "Unexpected subprotocol",
+      handshakeCheckDetail("Unexpected subprotocol: $MARKER: x"),
+    )
+    assertEquals(
+      "Response field 'Sec-WebSocket-Extensions' present",
+      handshakeCheckDetail("Response field 'Sec-WebSocket-Extensions' present: [$MARKER: x]"),
+    )
   }
 
   @Test
@@ -217,6 +279,12 @@ class RelayConnectionTest {
         "Response field missing: $MARKER",
         "Response field '$MARKER' present: [x]",
         "Response field '$MARKER' multivalued: [x, y]",
+        // The field form's verb is the JDK's too: only present or multivalued.
+        "Response field 'Upgrade' absent: [x]",
+        // A cut form's check ends exactly where the JDK's words end: text run on past it is not
+        // that check, even when a ": " follows.
+        "Unexpected subprotocol$MARKER: x",
+        "Response field 'Upgrade' present$MARKER: x",
         "Unexpected subprotocol $MARKER",
       )) {
       assertEquals(withheld, handshakeCheckDetail(text))
