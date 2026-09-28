@@ -125,8 +125,11 @@ object CognitionProtocol {
       }
       if (arr != null) {
         for (i in 0 until arr.length()) {
-          val p = arr.getJSONObject(i)
-          when (val type = p.optString("type")) {
+          val p =
+            arr.opt(i) as? JSONObject
+              ?: return CognitionOutput.malformed("a proposal is not an object", meta)
+          when (p.optString("type")) {
+            "" -> return CognitionOutput.malformed("a proposal has no type", meta)
             "pod-spawn" -> {
               val taskRef = p.required("taskRef")
               if (!TASK_REF_SHAPE.matches(taskRef))
@@ -141,11 +144,7 @@ object CognitionProtocol {
             }
             "status" -> proposals += Proposal.ProposeStatus(p.required("status"))
             "escalate" -> proposals += Proposal.ProposeEscalate(p.required("reason"))
-            else ->
-              return CognitionOutput.malformed(
-                "unknown proposal type '${type.take(40)}'",
-                meta,
-              )
+            else -> return CognitionOutput.malformed("unknown proposal type", meta)
           }
         }
       }
@@ -153,7 +152,8 @@ object CognitionProtocol {
     } catch (e: MalformedProposal) {
       CognitionOutput.malformed(e.message ?: "missing required proposal field", meta)
     } catch (e: Exception) {
-      CognitionOutput.malformed("cognition output failed to parse: ${e.message}", meta)
+      // The class alone: the parser's message can quote the output it was reading.
+      CognitionOutput.malformed("cognition output failed to parse: ${e.javaClass.simpleName}", meta)
     }
   }
 

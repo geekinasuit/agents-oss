@@ -1635,7 +1635,7 @@ class GuardsTest {
       CognitionOutput(
         listOf(Proposal.ProposeStatus("should never be executed")),
         meta = mapOf("sessionId" to "sess-bad", "costUsd" to "0.01"),
-        malformed = "unknown proposal type 'delete-everything'",
+        malformed = "unknown proposal type",
       )
     val rig = Rig(dir, mutableListOf(junk, junk.copy()), ticket = null)
     val folded = rig.daemon.driveUntilQuiescent()
@@ -1659,7 +1659,7 @@ class GuardsTest {
     // exhausted (one), NOT one per malformed turn: a degrading model must stay countable
     // in malformedCognition rather than drowning the escalation channel.
     assertEquals(2, folded.lead.malformedCognition.size)
-    assertTrue(folded.lead.malformedCognition.all { it.second.contains("unknown proposal type") })
+    assertTrue(folded.lead.malformedCognition.all { it.second == "unknown proposal type" })
     assertEquals(1, folded.lead.escalations.count { it.contains("unusable output") })
 
     // A billed turn is a billed turn: spend accrues even though nothing was decided.

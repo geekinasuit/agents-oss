@@ -83,6 +83,32 @@ class CognitionParsingTest {
   }
 
   @Test
+  fun anUnknownProposalTypeIsNotQuotedInTheReason() {
+    val out = parse("""{"proposals":[{"type":"$MARKER"}]}""")
+    assertEquals("unknown proposal type", out.malformed)
+  }
+
+  @Test
+  fun aParseFailureNamesTheExceptionClassNotItsMessage() {
+    // The parser's message for a duplicate key quotes the key.
+    val out = parse("""{"proposals":[],"$MARKER":1,"$MARKER":2}""")
+    assertEquals("cognition output failed to parse: JSONException", out.malformed)
+  }
+
+  @Test
+  fun aProposalThatIsNotAnObjectIsNamedAsSuch() {
+    val out = parse("""{"proposals":["$MARKER"]}""")
+    assertEquals("a proposal is not an object", out.malformed)
+  }
+
+  @Test
+  fun aProposalWithNoTypeIsNamedAsSuch() {
+    for (proposal in listOf("{}", """{"type":""}""", """{"type":null}""")) {
+      assertEquals(proposal, "a proposal has no type", parse("""{"proposals":[$proposal]}""").malformed)
+    }
+  }
+
+  @Test
   fun missingRequiredFieldIsMalformed() {
     val out = parse("""{"proposals":[{"type":"status"}]}""") // no status text
     assertTrue(out.malformed!!.contains("status"))
@@ -307,3 +333,6 @@ class CognitionParsingTest {
       WakeContext(WakeReason.Adopted, lead, JournalState(), emptyList())
     )
 }
+
+// Text the model chose, which no malformed reason may repeat.
+private const val MARKER = "model-chosen-marker"
