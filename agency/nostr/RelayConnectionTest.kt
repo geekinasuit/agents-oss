@@ -1,6 +1,5 @@
 package com.geekinasuit.agency.nostr
 
-import java.net.ServerSocket
 import java.nio.ByteBuffer
 import java.net.http.HttpClient
 import java.net.http.WebSocket
@@ -264,10 +263,20 @@ class RelayConnectionTest {
   }
 
   @Test
+  fun `FakeRelay, HandshakeResponder and loopbackServerSocket bind the loopback address`() {
+    // A wildcard bind can share its port with another process's bind on 127.0.0.1, and a connect to
+    // 127.0.0.1 then reaches that process instead.
+    val loopback = java.net.InetAddress.getByName("127.0.0.1")
+    FakeRelay().use { assertEquals(loopback, it.boundAddress) }
+    HandshakeResponder { "" }.use { assertEquals(loopback, it.boundAddress) }
+    loopbackServerSocket().use { assertEquals(loopback, it.inetAddress) }
+  }
+
+  @Test
   fun `connect to a server that never completes the handshake classifies as TIMEOUT`() {
     // A raw server that accepts the socket but never sends the 101 upgrade: the WebSocket handshake
     // never completes, so the connect deadline fires.
-    ServerSocket(0).use { silent ->
+    loopbackServerSocket().use { silent ->
       val accepter =
         Thread {
           try {
