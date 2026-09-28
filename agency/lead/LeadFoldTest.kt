@@ -506,7 +506,45 @@ class LeadFoldTest {
     assertTrue(lead.pods.isEmpty()) // still dropped: no spawn record to attach to
     // …but never silently (AGENCY-021): the drop is the backstop for
     // the pod-completion accept-exemption, so it surfaces like every other anomaly.
-    assertTrue(lead.escalations.any { it.contains("unknown pod 'ghost'") })
+    assertTrue(lead.escalations.any { it.contains("unknown pod id") })
+    s.close()
+  }
+
+  @Test
+  fun anUnknownPodsResultNamesItsIdByLengthNotByText() {
+    val s = newStore()
+    s.claim("t1")
+    s.podResult(MARKER, "dd44")
+    val text = s.lead().escalations.single()
+    assertTrue(
+      text,
+      Regex(
+          "pod-result at seq=\\d+ for an unknown pod id of ${MARKER.length} chars — dropped " +
+            "\\(a result must follow its pod's spawn record\\)"
+        )
+        .matches(text),
+    )
+    s.close()
+  }
+
+  @Test
+  fun anUnknownPodsAbandonNamesItsIdByLengthNotByText() {
+    val s = newStore()
+    s.claim("t1")
+    s.append(
+      LeadKinds.POD_ABANDONED,
+      buildJsonObject {
+        put("podId", MARKER)
+        put("reason", "lead-restart")
+      },
+      ORIGIN_SUBSTRATE,
+    )
+    val text = s.lead().escalations.single()
+    assertTrue(
+      text,
+      Regex("pod-abandoned at seq=\\d+ for an unknown pod id of ${MARKER.length} chars — dropped \\(no spawn record\\)")
+        .matches(text),
+    )
     s.close()
   }
 
@@ -768,3 +806,6 @@ class LeadFoldTest {
     s.close()
   }
 }
+
+// A field value no anomaly text may quote.
+private const val MARKER = "entry-chosen-marker"

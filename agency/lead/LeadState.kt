@@ -763,7 +763,9 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
       // PodRunner.spawn) but dropped VISIBLY, consistent with the other anomaly views
       // (AGENCY-021): this fold path is the backstop for the
       // accept-exemption on pod completions, and a backstop that fires silently would be
-      // exactly the no-trace loss that fix exists to end.
+      // exactly the no-trace loss that fix exists to end. The lead's own code never writes
+      // such an entry, so nothing vouches for its fields: the anomaly names the entry by its
+      // seq and the refused pod id by its length, as the nonce re-issue below does its gate id.
       LeadKinds.POD_RESULT_RECORDED -> {
         val podId = p.str("podId")
         val pod = s.pods[podId]
@@ -771,7 +773,8 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
           s.copy(
             escalations =
               (s.escalations +
-                  "pod-result for unknown pod '$podId' at seq=${e.seq} — dropped (a result must follow its pod's spawn record)")
+                  ("pod-result at seq=${e.seq} for an unknown pod id of ${podId.length} chars — dropped " +
+                    "(a result must follow its pod's spawn record)"))
                 .takeLast(ANOMALY_TAIL)
           )
         else {
@@ -811,7 +814,8 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
           s.copy(
             escalations =
               (s.escalations +
-                  "pod-abandoned for unknown pod '$podId' at seq=${e.seq} — dropped (no spawn record)")
+                  ("pod-abandoned at seq=${e.seq} for an unknown pod id of ${podId.length} chars — dropped " +
+                    "(no spawn record)"))
                 .takeLast(ANOMALY_TAIL)
           )
         else s.copy(pods = s.pods + (podId to pod.copy(abandonedReason = p.str("reason"))))
@@ -838,19 +842,21 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
             s.copy(
               escalations =
                 (s.escalations +
-                    "nonce re-issued at seq=${e.seq} for gate '${issued.gateId}' — first binding kept")
+                    ("nonce re-issued at seq=${e.seq} for a gate id of ${issued.gateId.length} chars — " +
+                      "the binding at seq=${s.issuedNonces.getValue(issued.nonce).issuedSeq} kept"))
                   .takeLast(ANOMALY_TAIL)
             )
           else -> {
             // Recorded even when the gate is unknown (the substrate's assertion stands in
             // the record; a release still needs an open gate whose digest agrees), but an
-            // issue-before-open is contract drift worth seeing.
+            // issue-before-open is contract drift worth seeing. The lead mints only for an open
+            // gate, so the unknown id is the entry's own: it is described by its length.
             val flagged =
               if (issued.gateId !in s.openGates)
                 s.copy(
                   escalations =
                     (s.escalations +
-                        "nonce issued at seq=${e.seq} for unknown gate '${issued.gateId}'")
+                        "nonce issued at seq=${e.seq} for an unknown gate id of ${issued.gateId.length} chars")
                       .takeLast(ANOMALY_TAIL)
                 )
               else s
