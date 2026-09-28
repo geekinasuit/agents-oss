@@ -1070,4 +1070,257 @@ class AuthFoldTest {
     assertFalse("g1" in st.releasedGates)
     assertTrue(st.unverifiedApprovals.any { "does not verify" in it.second })
   }
+
+  // -- diagnostic texts quote only what the lead vouches for -------------------------------
+
+  /** One anomaly branch: [build] appends the entries that reach it and returns the seq of the
+   * entry under test; [target] names the diagnostic list that branch grows, and [expect], when
+   * set, a phrase the entry must hold, for branches that share a list and a seq shape. */
+  private class AnomalyCase(
+    val branch: String,
+    val target: String,
+    val expect: String? = null,
+    val build: JournalStore.() -> Long,
+  )
+
+  private fun mark(field: String) = "Qz9$field"
+
+  private val markerRe = Regex("Qz9[A-Za-z]+")
+
+  /** Every list the cell scans, keyed by name; `null` where the list holds no seq. [reached]
+   * reads the same map, so a list left out here also fails the case that targets it. */
+  private fun lists(st: LeadState): Map<String, List<Pair<Long?, String>>> =
+    mapOf(
+      "escalations" to st.escalations.map { null to it },
+      "unverifiedApprovals" to st.unverifiedApprovals,
+      "staleReleases" to st.staleReleases,
+      "misOriginedEntries" to st.misOriginedEntries,
+      "malformedCognition" to st.malformedCognition,
+    )
+
+  // Each built entry also carries a field no fold arm reads, so a text that quotes a whole payload
+  // is seen too.
+  private fun JournalStore.entry(kind: String, origin: String, vararg fields: Pair<String, String>): Long =
+    append(kind, buildJsonObject { for ((k, v) in fields) put(k, v); put("extra", mark("Extra")) }, origin).seq
+
+  private fun JournalStore.evidenceApproval(evidence: JsonObject, vararg flat: Pair<String, String>): Long =
+    append(
+      LeadKinds.APPROVAL_RECORDED,
+      buildJsonObject {
+        for ((k, v) in flat) put(k, v)
+        put("evidence", JsonObject(evidence + ("extra" to JsonPrimitive(mark("Extra")))))
+        put("extra", mark("Extra"))
+      },
+      ORIGIN_AUTH_LAYER,
+    ).seq
+
+  private fun reached(st: LeadState, case: AnomalyCase, seq: Long): Boolean =
+    lists(st)[case.target].orEmpty().any { (entrySeq, text) ->
+      val atSeq = if (entrySeq == null) "seq=$seq " in text || text.endsWith("seq=$seq") else entrySeq == seq
+      atSeq && (case.expect == null || case.expect in text)
+    }
+
+  @Test
+  fun noDiagnosticQuotesAFieldTheLeadDoesNotVouchFor() {
+    // Every string field below carries its own marker. The fold's diagnostic lists may quote a
+    // marker only when the text is one the lead vouches for:
+    //  - an ESCALATED row's reason, stalledGateId, stalledDigest and declinedEffectDigest are
+    //    passthrough by design (LeadState.escalations "does not try to be stronger than the
+    //    journal"); only the reason reaches a list, and it is the positive control below.
+    //  - a gate id inside a preimage whose signature re-verified against an allow-listed key.
+    // A STATUS_WRITTEN status is passthrough too, but lands in statusTail, not a diagnostic list.
+    val escReason = mark("EscalatedReason")
+    val vouchedGate = mark("VouchedGate")
+    val allowed = setOf(escReason, vouchedGate)
+
+    val shaVerifier =
+      // A signature holds a marker too (hex has no q or z): the lead vouches for none of its text.
+      ApprovalVerifier { _, _, signature, preimage -> signature == mark("Sig") + sha256Hex(preimage) }
+    val auth = LeadAuth(allowListOf("operator"), shaVerifier, oneOfOne("operator"))
+    val operatorPk = pubKeyFor("operator")
+    fun evidence(
+      pk: String,
+      gate: String,
+      digest: String,
+      nonce: String,
+      preimage: String?,
+      signature: String? = preimage?.let { mark("Sig") + sha256Hex(it) },
+      scheme: String = mark("Scheme"),
+    ): JsonObject = buildJsonObject {
+      put("schemeId", scheme)
+      put("publicKey", pk)
+      if (signature != null) put("signature", signature)
+      put("carrierArtifactId", mark("Carrier"))
+      put("gateId", gate)
+      put("payloadDigest", digest)
+      put("nonce", nonce)
+      if (preimage != null) put("signedPreimage", preimage)
+    }
+    val flat = arrayOf(
+      "gateId" to mark("FlatGate"),
+      "principalId" to mark("FlatPrincipal"),
+      "nonce" to mark("FlatNonce"),
+      "payloadDigest" to mark("FlatDigest"),
+    )
+
+    // A signature that verifies under an allow-listed key, then one field that disagrees with the
+    // preimage; every field before it agrees, so each case reaches its own refusal. The committed
+    // values are marked too: none of these refusals has cause to quote even a vouched one.
+    val (cGate, cDigest, cNonce) = Triple(mark("CommittedGate"), mark("CommittedDigest"), mark("CommittedNonce"))
+    fun agreementCase(
+      refusal: String,
+      evPk: String = operatorPk,
+      evGate: String = cGate,
+      evDigest: String = cDigest,
+      evNonce: String = cNonce,
+      gate: String = cGate,
+      principal: String = "operator",
+      nonce: String = cNonce,
+      digest: String = cDigest,
+    ) =
+      AnomalyCase("verified signature, but $refusal", "unverifiedApprovals", expect = refusal) {
+        val preimage = committedPreimage(operatorPk, cGate, cDigest, cNonce)
+        evidenceApproval(
+          evidence(evPk, evGate, evDigest, evNonce, preimage, scheme = "test"),
+          "gateId" to gate,
+          "principalId" to principal,
+          "nonce" to nonce,
+          "payloadDigest" to digest,
+        )
+      }
+    val agreementCases =
+      listOf(
+        agreementCase("evidence publicKey disagrees", evPk = mark("Pk")),
+        agreementCase("evidence gateId disagrees", evGate = mark("GateId")),
+        agreementCase("evidence payloadDigest disagrees", evDigest = mark("Digest")),
+        agreementCase("evidence nonce disagrees", evNonce = mark("Nonce")),
+        agreementCase("payload gateId disagrees", gate = mark("GateId")),
+        agreementCase("payload nonce disagrees", nonce = mark("Nonce")),
+        agreementCase("payload payloadDigest disagrees", digest = mark("Digest")),
+        agreementCase("payload principalId disagrees", principal = mark("Principal")),
+      )
+
+    val cases =
+      listOf(
+        AnomalyCase("pod result for an unknown pod", "escalations") {
+          entry(LeadKinds.POD_RESULT_RECORDED, ORIGIN_SUBSTRATE,
+            "podId" to mark("PodId"), "artifactPath" to mark("Artifact"), "resultDigest" to mark("Result"))
+        },
+        AnomalyCase("pod abandoned for an unknown pod", "escalations") {
+          entry(LeadKinds.POD_ABANDONED, ORIGIN_SUBSTRATE, "podId" to mark("PodId"), "reason" to mark("Reason"))
+        },
+        AnomalyCase("spawn intent orphaned with no pending intent", "escalations") {
+          entry(LeadKinds.POD_SPAWN_ABANDONED, ORIGIN_SUBSTRATE, "taskRef" to mark("TaskRef"), "reason" to mark("Reason"))
+        },
+        AnomalyCase("spawn intent orphaned for the lead's intent, with a reason it did not write", "escalations") {
+          entry(LeadKinds.TICKET_CLAIMED, ORIGIN_SUBSTRATE, "ticketRef" to "t1")
+          entry(LeadKinds.POD_SPAWN_INTENDED, ORIGIN_SUBSTRATE, "taskRef" to "plan:t1")
+          entry(LeadKinds.POD_SPAWN_ABANDONED, ORIGIN_SUBSTRATE, "taskRef" to "plan:t1", "reason" to mark("Reason"))
+        },
+        AnomalyCase("nonce issued for an unknown gate", "escalations") {
+          nonceIssued(mark("Nonce"), mark("GateId"), mark("Digest")).seq
+        },
+        AnomalyCase("nonce re-issued", "escalations") {
+          gateOpened("g1", "d1")
+          nonceIssued(mark("Nonce"), "g1", "d1")
+          nonceIssued(mark("Nonce"), mark("GateId"), mark("Digest")).seq
+        },
+        AnomalyCase("consume of an unknown nonce", "escalations") {
+          nonceConsumed(mark("Nonce"), mark("Reason")).seq
+        },
+        AnomalyCase("stale release for an unknown gate", "staleReleases") {
+          release(mark("GateId"), mark("Digest"), nonce = mark("Nonce")).seq
+        },
+        AnomalyCase("stale release on a digest the open gate does not hold", "staleReleases") {
+          gateOpened("g1", "d1")
+          release("g1", mark("Digest"), nonce = mark("Nonce")).seq
+        },
+        AnomalyCase("substrate-authored kind with another origin", "misOriginedEntries") {
+          entry(LeadKinds.POD_RESULT_RECORDED, ORIGIN_COGNITION, "podId" to mark("PodId"), "resultDigest" to mark("Result"))
+        },
+        AnomalyCase("approval with another origin", "misOriginedEntries") {
+          approval(mark("GateId"), mark("Principal"), mark("Nonce"), mark("Digest"), origin = ORIGIN_SUBSTRATE).seq
+        },
+        AnomalyCase("malformed cognition", "malformedCognition") {
+          entry(LeadKinds.COGNITION_MALFORMED, ORIGIN_SUBSTRATE, "reason" to mark("Reason"))
+        },
+        AnomalyCase("approval with no evidence", "unverifiedApprovals") {
+          approval(mark("GateId"), mark("Principal"), mark("Nonce"), mark("Digest")).seq
+        },
+        AnomalyCase("approval whose evidence misses a field", "unverifiedApprovals") {
+          evidenceApproval(
+            evidence(mark("Pk"), mark("GateId"), mark("Digest"), mark("Nonce"), mark("Preimage"), signature = null),
+            *flat,
+          )
+        },
+        AnomalyCase("approval with no preimage", "unverifiedApprovals") {
+          evidenceApproval(
+            evidence(mark("Pk"), mark("GateId"), mark("Digest"), mark("Nonce"), preimage = null, signature = mark("Sig")),
+            *flat,
+          )
+        },
+        AnomalyCase("approval with a preimage that is not canonical", "unverifiedApprovals") {
+          evidenceApproval(evidence(mark("Pk"), mark("GateId"), mark("Digest"), mark("Nonce"), mark("Preimage")), *flat)
+        },
+        AnomalyCase("approval whose evidence has a field that is not a string", "unverifiedApprovals") {
+          val ev = evidence(mark("Pk"), mark("GateId"), mark("Digest"), mark("Nonce"), mark("Preimage"))
+          evidenceApproval(JsonObject(ev + ("nonce" to JsonPrimitive(7))), *flat)
+        },
+        AnomalyCase("approval whose evidence has a blank field", "unverifiedApprovals") {
+          evidenceApproval(evidence(mark("Pk"), "  ", mark("Digest"), mark("Nonce"), mark("Preimage")), *flat)
+        },
+        AnomalyCase("approval whose signature does not verify", "unverifiedApprovals") {
+          val preimage = committedPreimage(mark("Pk"), mark("GateId"), mark("Digest"), mark("Nonce"))
+          evidenceApproval(
+            evidence(mark("Pk"), mark("GateId"), mark("Digest"), mark("Nonce"), preimage, signature = mark("Sig")),
+            *flat,
+          )
+        },
+        AnomalyCase("approval signed by a key not in the allow-list", "unverifiedApprovals") {
+          val preimage = committedPreimage(mark("Pk"), mark("GateId"), mark("Digest"), mark("Nonce"))
+          evidenceApproval(evidence(mark("Pk"), mark("GateId"), mark("Digest"), mark("Nonce"), preimage), *flat)
+        },
+        // These two resolve through the allow-list, whose keys are under the scheme "test".
+        *agreementCases.toTypedArray(),
+        AnomalyCase("verified approval for an unknown gate and an unminted nonce", "escalations") {
+          val preimage = committedPreimage(operatorPk, vouchedGate, mark("Digest"), mark("Nonce"))
+          evidenceApproval(
+            evidence(operatorPk, vouchedGate, mark("Digest"), mark("Nonce"), preimage, scheme = "test"),
+            "gateId" to vouchedGate,
+            "principalId" to "operator",
+            "nonce" to mark("Nonce"),
+            "payloadDigest" to mark("Digest"),
+          )
+        },
+        AnomalyCase("escalation (passthrough; positive control)", "escalations") {
+          entry(LeadKinds.ESCALATED, ORIGIN_SUBSTRATE,
+            "reason" to escReason, "stalledGateId" to mark("StalledGate"),
+            "stalledDigest" to mark("StalledDigest"), "declinedEffectDigest" to mark("Declined"))
+        },
+      )
+
+    val failures = mutableListOf<String>()
+    for (case in cases) {
+      open(newStoreDir()).use { s ->
+        val seq = case.build(s)
+        val st = s.leadWith(auth)
+        if (case.target == "escalations" && case.branch.startsWith("escalation ")) {
+          if (st.escalations.none { escReason in it }) failures += "${case.branch}: the passthrough reason was not found"
+        } else if (!reached(st, case, seq)) {
+          failures += "${case.branch}: seq=$seq did not reach ${case.target}" + (case.expect?.let { " with '$it'" } ?: "")
+        }
+        for ((list, entries) in lists(st)) {
+          for ((_, text) in entries) {
+            // Case-insensitive, so a lower-cased marker, or one cut down from its end, is still seen.
+            val rest = allowed.fold(text) { t, a -> t.replace(a, "") }
+            if (rest.contains("qz9", ignoreCase = true)) {
+              val named = markerRe.findAll(rest).map { it.value }.toList().ifEmpty { listOf("a marker") }
+              failures += "${case.branch}: $list quotes ${named.joinToString()} in \"$text\""
+            }
+          }
+        }
+      }
+    }
+    assertTrue(failures.joinToString("\n"), failures.isEmpty())
+  }
 }
