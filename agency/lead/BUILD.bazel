@@ -31,6 +31,7 @@ kt_jvm_library(
         "Cognition.kt",
         "CognitionProtocol.kt",
         "CognitionSelection.kt",
+        "DeadlinedReads.kt",
         "EnginePodRunner.kt",
         "GateOpenSink.kt",
         "LeadDaemon.kt",
@@ -140,6 +141,7 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.BoundArtifactTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
+        ":fifo_test_support",
         ":lead",
         "//agency/pod",
         "//agency/shared/journal",
@@ -147,6 +149,17 @@ kt_jvm_test(
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
+)
+
+# The deadline and the bound on reads left blocked, which the lead's bound-copy read runs under.
+# associates (not deps) on :lead, since DeadlinedReads is internal to it.
+kt_jvm_test(
+    name = "deadlined_reads_test",
+    size = "small",
+    srcs = ["DeadlinedReadsTest.kt"],
+    associates = [":lead"],
+    test_class = "com.geekinasuit.agency.lead.DeadlinedReadsTest",
+    deps = ["@maven//:junit_junit"],
 )
 
 kt_jvm_test(
@@ -175,6 +188,15 @@ kt_jvm_library(
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
+)
+
+# Swaps a FIFO in at a bound path and releases a read blocked on it, for the cells that check a
+# bound copy's read never holds the loop thread.
+kt_jvm_library(
+    name = "fifo_test_support",
+    testonly = True,
+    srcs = ["FifoTestSupport.kt"],
+    deps = [":lead"],
 )
 
 kt_jvm_test(
@@ -214,12 +236,14 @@ kt_jvm_test(
     name = "notify_gate_open_test",
     size = "small",
     srcs = ["NotifyGateOpenTest.kt"],
+    # Associated with :lead so a cell can park a read in the daemon's own bound-read pool.
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.NotifyGateOpenTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
         # A ceremony auth makes hasApprovers hold, so a nonce mints and the notify arm fires.
         ":ceremony_test_support",
-        ":lead",
+        ":fifo_test_support",
         "//agency/pod",
         "//agency/shared/journal",
         "@maven//:junit_junit",

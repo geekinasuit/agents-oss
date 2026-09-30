@@ -343,6 +343,11 @@ data class LeadState(
    * called once per attempt, never once per pass. [notifiedNonces] takes precedence: a nonce in it
    * is not sent again whatever this holds. Ticket-scoped: [LeadKinds.TICKET_DONE] clears it. */
   val failedAnnounces: Map<String, Int> = emptyMap(),
+  /** Nonce → how many of the attempts in [failedAnnounces] were not attempts at all: the bound copy
+   * was not read, for a cause outside it (a marker with `notRead`). The daemon counts only the
+   * rest toward the bound on a failing sink's attempts. Ticket-scoped: [LeadKinds.TICKET_DONE]
+   * clears it. */
+  val notReadAnnounces: Map<String, Int> = emptyMap(),
   /** gateId → approvals that RE-VERIFIED at fold time (signature over preimage, key in the
    * allow-list, committed binding agreeing with the flat copies). The set a release's quorum
    * is evaluated over — an approval that did not verify never lands here, so the flat
@@ -705,6 +710,7 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
           consumedNonces = emptySet(),
           notifiedNonces = emptySet(),
           failedAnnounces = emptyMap(),
+          notReadAnnounces = emptyMap(),
           escalatedStalls = emptyMap(),
           verifiedApprovals = emptyMap(),
           unverifiedApprovals = emptyList(),
@@ -903,10 +909,15 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
         // attempt; any other is final. A marker without the field is final, which is also how a
         // binary that does not retry reads one that has it. The substrate is the sole writer and
         // announces only a nonce it just resolved open, so no gate/issue cross-check is warranted.
+        // A retry marker that also says the copy was not read counts in [notReadAnnounces] too.
         val nonce = p.str("nonce")
         if (p.marksRetry())
           s.copy(
-            failedAnnounces = s.failedAnnounces + (nonce to (s.failedAnnounces[nonce] ?: 0) + 1)
+            failedAnnounces = s.failedAnnounces + (nonce to (s.failedAnnounces[nonce] ?: 0) + 1),
+            notReadAnnounces =
+              if (p.marksTrue("notRead"))
+                s.notReadAnnounces + (nonce to (s.notReadAnnounces[nonce] ?: 0) + 1)
+              else s.notReadAnnounces,
           )
         else s.copy(notifiedNonces = s.notifiedNonces + nonce)
       }
@@ -1202,7 +1213,10 @@ private fun kotlinx.serialization.json.JsonObject.jsonStringOrNull(k: String): S
 /** Whether a notify marker says its announce will be sent again: only a JSON `true` in `retry`
  * does. Absent, null, a string, or any other value reads as final, the outcome that sends nothing
  * again, so a malformed field can cost a retry but never cause one. */
-private fun kotlinx.serialization.json.JsonObject.marksRetry(): Boolean {
-  val el = this["retry"] as? kotlinx.serialization.json.JsonPrimitive ?: return false
+private fun kotlinx.serialization.json.JsonObject.marksRetry(): Boolean = marksTrue("retry")
+
+/** Whether the field [k] holds a JSON `true`; any other value, or none, reads as false. */
+private fun kotlinx.serialization.json.JsonObject.marksTrue(k: String): Boolean {
+  val el = this[k] as? kotlinx.serialization.json.JsonPrimitive ?: return false
   return !el.isString && el.content == "true"
 }

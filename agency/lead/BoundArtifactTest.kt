@@ -9,11 +9,14 @@ import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -40,11 +43,17 @@ class BoundArtifactTest {
 
   private val limit = LeadDaemon.MAX_BOUND_ARTIFACT_BYTES
 
+  /** The deadline the cells that leave a read blocked pass, so each waits it out in well under a
+   * second. */
+  private val shortDeadlineMs = 200L
+
   private fun daemon(
     dir: File,
     store: SqliteStore,
     faults: FaultInjector = FaultInjector.NONE,
     podRunner: PodRunner = FakePodRunner(),
+    boundReadDeadlineMs: Long = LeadDaemon.DEFAULT_BOUND_READ_DEADLINE_MS,
+    maxParkedBoundReads: Int = LeadDaemon.DEFAULT_MAX_PARKED_BOUND_READS,
   ): LeadDaemon {
     File(dir, "ticket.txt").also { if (!it.exists()) it.writeText("t1\n") }
     return LeadDaemon(
@@ -58,6 +67,8 @@ class BoundArtifactTest {
       leadAuth = LeadAuth.DENY_ALL,
       timers = TimerService.NOOP,
       faults = faults,
+      boundReadDeadlineMs = boundReadDeadlineMs,
+      maxParkedBoundReads = maxParkedBoundReads,
     )
   }
 
@@ -118,8 +129,9 @@ class BoundArtifactTest {
     abandoned: Result,
     detail: String,
     faults: FaultInjector = FaultInjector.NONE,
+    boundReadDeadlineMs: Long = LeadDaemon.DEFAULT_BOUND_READ_DEADLINE_MS,
   ) {
-    val f = daemon(dir, store, faults = faults).driveUntilQuiescent()
+    val f = daemon(dir, store, faults = faults, boundReadDeadlineMs = boundReadDeadlineMs).driveUntilQuiescent()
     val escalation = escalations(store).single()
     assertTrue("the escalation names the pod: $escalation", escalation.contains(abandoned.podId))
     assertTrue("the escalation says what is wrong: $escalation", escalation.contains("$detail at ${abandoned.boundPath}"))
@@ -337,6 +349,135 @@ class BoundArtifactTest {
       faults = grow,
     )
     assertTrue("the copy grew at the read", grown)
+    store.close()
+  }
+
+  /** Swaps the copy at [path] for a FIFO at the fault point just before its read, once, standing in
+   * for whatever swapped it between the check and the open. [swapped] counts down when it has. */
+  private fun swapForAFifoOnce(path: String, swapped: CountDownLatch): FaultInjector =
+    FaultInjector {
+      if (it == "before-bound-artifact-read" && swapped.count > 0) {
+        replaceWithAFifo(path)
+        swapped.countDown()
+      }
+    }
+
+  // The timeout is well inside the target's own, so a read that blocks fails this cell alone
+  // rather than stopping every cell after it.
+  @Test(timeout = 20_000)
+  fun aBoundCopySwappedForAFifoAfterItsCheckIsAbandonedWithoutBlocking() {
+    // The check and the open are two steps, and the copy can be swapped for a FIFO between them.
+    // Opening a FIFO blocks until something opens its other end, and an open cannot be interrupted,
+    // so the open and the read run on a thread of their own, which the loop waits on for a deadline.
+    // A read unfinished by then is a disturbed copy, and the read stays blocked on its own thread.
+    assumeTrue("mkfifo required", canMakeAFifo())
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val result = crashAfterThePlannerResult(dir, store)
+    val swapped = CountDownLatch(1)
+    try {
+      assertARestartAbandonsTheDisturbedCopy(
+        dir,
+        store,
+        result,
+        "read did not finish within $shortDeadlineMs ms",
+        faults = swapForAFifoOnce(result.boundPath, swapped),
+        boundReadDeadlineMs = shortDeadlineMs,
+      )
+      assertEquals("the copy was swapped at the read", 0, swapped.count)
+      assertEquals("the read is still blocked, on a thread of its own", 1, boundReadThreads().size)
+    } finally {
+      if (swapped.count == 0L) releaseFifo(result.boundPath)
+    }
+    assertTrue("the read returned once the FIFO had a writer", awaitNoBoundReadThreads())
+    store.close()
+  }
+
+  @Test(timeout = 20_000)
+  fun aShutdownIsTakenWhileTheReadOfASwappedCopyIsBlocked() {
+    // A read that blocked the loop thread would hold every wake behind it, a queued shutdown
+    // included. The blocked read holds only its own thread, a daemon one, which does not keep the
+    // process running once the loop has stopped.
+    assumeTrue("mkfifo required", canMakeAFifo())
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val result = crashAfterThePlannerResult(dir, store)
+    val swapped = CountDownLatch(1)
+    val d =
+      daemon(
+        dir,
+        store,
+        faults = swapForAFifoOnce(result.boundPath, swapped),
+        boundReadDeadlineMs = shortDeadlineMs,
+      )
+    val loop = Thread { d.runLoop() }
+    loop.isDaemon = true
+    loop.start()
+    try {
+      assertTrue("the copy was swapped at the read", swapped.await(10, TimeUnit.SECONDS))
+      d.shutdown()
+      loop.join(10_000)
+      assertFalse("the loop took the shutdown", loop.isAlive)
+      val readers = boundReadThreads()
+      assertEquals("the read is still blocked, on a thread of its own", 1, readers.size)
+      assertTrue("the blocked read's thread does not keep the process running", readers.single().isDaemon)
+    } finally {
+      if (swapped.count == 0L) releaseFifo(result.boundPath)
+    }
+    assertTrue("the read returned once the FIFO had a writer", awaitNoBoundReadThreads())
+    store.close()
+  }
+
+  @Test(timeout = 20_000)
+  fun blockedReadsAreBoundedAndThePodsReadPastTheBoundAreRefusedUnopened() {
+    // Each read left blocked holds a thread until its FIFO gets a writer, so a store that kept being
+    // swapped would grow the lead's threads without end. Past the bound, the lead opens no bound copy
+    // at all, and abandons each pod whose copy it did not read. Those copies may well be intact, as
+    // the replacement pods' copies are here, so the refusal says the lead's reads are blocked, not
+    // that the copy was disturbed. Each abandon counts against the task's attempts, so the task stops
+    // being proposed once they run out. A restart holds no blocked reads, and reads a copy again.
+    assumeTrue("mkfifo required", canMakeAFifo())
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val result = crashAfterThePlannerResult(dir, store)
+    val swapped = CountDownLatch(1)
+    try {
+      val f =
+        daemon(
+            dir,
+            store,
+            faults = swapForAFifoOnce(result.boundPath, swapped),
+            boundReadDeadlineMs = shortDeadlineMs,
+            maxParkedBoundReads = 1,
+          )
+          .driveUntilQuiescent()
+      assertEquals(
+        "the swapped copy's pod was abandoned when its read did not finish",
+        "bound-artifact-disturbed: read did not finish within $shortDeadlineMs ms",
+        f.lead.pods[result.podId]?.abandonedReason,
+      )
+      val replacements = results(store).filter { it.podId != result.podId }
+      assertTrue("a replacement pod's result was recorded", replacements.isNotEmpty())
+      for (r in replacements) {
+        assertEquals(
+          "a replacement pod's copy was not read",
+          "bound-artifact-unread: blocked reads of the bound store are at the bound of 1",
+          f.lead.pods[r.podId]?.abandonedReason,
+        )
+      }
+      assertTrue(
+        "each unread copy was escalated as unread",
+        escalations(store).count { it.contains("bound-artifact unread pod=") } == replacements.size,
+      )
+      assertNull("no plan was recorded", f.lead.planArtifactPath)
+      assertEquals("one thread holds the one blocked read", 1, boundReadThreads().size)
+    } finally {
+      if (swapped.count == 0L) releaseFifo(result.boundPath)
+    }
+    assertTrue("the read returned once the FIFO had a writer", awaitNoBoundReadThreads())
+
+    val g = daemon(dir, store).driveUntilQuiescent()
+    assertEquals("a restart reads a copy and records the plan", TicketPhase.PLAN_GATED, g.lead.phase)
     store.close()
   }
 
