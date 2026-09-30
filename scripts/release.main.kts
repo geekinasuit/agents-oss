@@ -141,14 +141,20 @@ fun consumerSmoke(asset: File, moduleName: String, version: String) {
     File(workspace, ".bazelrc").writeText(
         "common --java_runtime_version=21\ncommon --tool_java_runtime_version=21\ntest --test_output=errors\n"
     )
-    // Its own output base under probeRoot, torn down with the rest, so the probe's Bazel
-    // analysis and action state never mingle with the developer's default output base.
+    // Its own output base and install base under probeRoot, torn down with the rest, so the
+    // probe's Bazel state never mingles with the developer's defaults, and a shared install base
+    // that something outside Bazel has emptied cannot fail the gate before it builds anything.
     val outputBase = File(probeRoot, "ob")
+    val installBase = File(probeRoot, "ib")
 
     println("consumer smoke: bazel test @$moduleName//... against the packaged tarball")
     val code = runStreaming(
         workspace,
-        "bazel", "--output_base=${outputBase.absolutePath}", "test", "@$moduleName//...",
+        "bazel",
+        "--output_base=${outputBase.absolutePath}",
+        "--install_base=${installBase.absolutePath}",
+        "test",
+        "@$moduleName//...",
     )
     if (code != 0) {
         fail("consumer smoke FAILED (exit $code) — the packaged module does not build/test as an external dependency")
