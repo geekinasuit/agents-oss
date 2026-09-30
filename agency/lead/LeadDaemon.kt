@@ -120,6 +120,14 @@ class LeadDaemon(
    * that samples deterministically re-emits the same near-miss, so retrying it only doubles
    * the bill. Such a strategy is wired with 1. */
   private val maxCognitionAttempts: Int = 2,
+  /** How long the loop thread waits for a bound copy to be opened and read ([readBoundCopy]). A
+   * copy the lead wrote, at most [MAX_BOUND_ARTIFACT_BYTES], reads in far less on a local disk, so
+   * a read still unfinished then is taken as a disturbed copy. This is what a copy swapped for a
+   * FIFO costs the loop per read. A test passes a short one. */
+  private val boundReadDeadlineMs: Long = DEFAULT_BOUND_READ_DEADLINE_MS,
+  /** How many bound-copy reads may stay blocked past their deadline, each holding a thread, before
+   * the next read is refused unopened ([readBoundCopy]). */
+  private val maxParkedBoundReads: Int = DEFAULT_MAX_PARKED_BOUND_READS,
 ) {
 
   init {
@@ -154,6 +162,11 @@ class LeadDaemon(
           "was $it"
       }
     }
+
+  /** Where [readBoundCopy] opens and reads a bound copy, off the loop thread. One per daemon: a
+   * supervisor restarts the lead as a new process, which holds no parked reads. Internal so a test
+   * can park a read of its own in it. */
+  internal val boundReads = DeadlinedReads(boundReadDeadlineMs, maxParkedBoundReads, BOUND_READ_THREAD_NAME)
 
   sealed interface WakeEvent {
     data object Adopted : WakeEvent
@@ -1178,12 +1191,17 @@ class LeadDaemon(
    * anywhere else in the loop.
    *
    * The marker is written on EVERY outcome, so the recovery arm never calls the sink again on its
-   * own. A failure the sink reports is the one outcome sent again: its marker says so, and its
+   * own. A failure the sink reports is sent again, and so is an artifact not read at all
+   * ([ArtifactResolution.NotRead]), whose cause lies outside the copy: the marker says so, and the
    * retry timer is armed at once, since the gate-open blocks the pipeline and no later wake may
    * come to arm it. The arm calls the sink again only when that timer fires, so a failing sink is
    * called once per attempt, never once per pass, with [ANNOUNCE_RETRY_DELAYS_MS] between
    * attempts. When the last of [MAX_ANNOUNCE_ATTEMPTS] attempts fails, the announce is escalated
-   * once and its marker is final. An announce no sink made ([AnnounceOutcome.NoSink]) is escalated
+   * once and its marker is final. An artifact not read is the exception: only whatever blocks the
+   * reads can end that, so it is escalated once at that attempt and sent again past it, at the
+   * last delay, until the copy is read. Such attempts are counted apart
+   * ([LeadState.notReadAnnounces]), so once the copy is read the sink still gets all of its
+   * attempts. An announce no sink made ([AnnounceOutcome.NoSink]) is escalated
    * at once, and its marker is final: no operator was asked for the approval the gate waits on.
    * These bounds count attempts whose marker landed: a crash between an attempt and its marker
    * sends that attempt again on restart, so an escalation that landed before the crash can land a
@@ -1217,6 +1235,7 @@ class LeadDaemon(
           )
           AnnounceOutcome.Failed("artifact-unresolved:${resolved.reason}")
         }
+        is ArtifactResolution.NotRead -> AnnounceOutcome.Failed("artifact-not-read:${resolved.reason}")
         is ArtifactResolution.Resolved ->
           try {
             gateOpenSink.announce(GateOpenSignal(gateId, payloadDigest, nonce, resolved.content))
@@ -1228,11 +1247,18 @@ class LeadDaemon(
             AnnounceOutcome.Failed("sink threw: ${e.message}")
           }
       }
-    // Only a failure the sink reported is sent again. An unresolved artifact was escalated above,
-    // and a delivery, or no sink wired, has nothing to send again.
-    val sinkFailure =
-      if (resolved is ArtifactResolution.Resolved) outcome as? AnnounceOutcome.Failed else null
-    val retry = sinkFailure != null && attempt < MAX_ANNOUNCE_ATTEMPTS
+    // A failure the sink reported is sent again, and so is a copy not read at all. An unresolved
+    // artifact was escalated above, and a delivery, or no sink wired, has nothing to send again.
+    // A copy not read is sent again past the attempt bound too: only the one blocking the reads can
+    // end the block, so a final marker would drop an intact announce for good, even across a restart.
+    val retryableFailure =
+      if (resolved is ArtifactResolution.Unresolved) null else outcome as? AnnounceOutcome.Failed
+    // Attempts that did not read the copy are counted apart, so they spend none of the attempts the
+    // sink gets once the copy is read.
+    val notRead = resolved is ArtifactResolution.NotRead
+    val notReadBefore = lead.notReadAnnounces[nonce] ?: 0
+    val sinkAttempt = attempt - notReadBefore
+    val retry = retryableFailure != null && (notRead || sinkAttempt < MAX_ANNOUNCE_ATTEMPTS)
     // An outcome that leaves the gate unannounced for good is escalated: here, or above for an
     // unresolved artifact. The `when` is exhaustive, so an outcome added later must say whether it
     // is escalated.
@@ -1245,9 +1271,14 @@ class LeadDaemon(
         // The detail is the sink's text, so it is cut short: the full text would push the rest of
         // the reason past the escalation's own bound. The marker keeps the detail up to that bound.
         is AnnounceOutcome.Failed ->
-          if (sinkFailure != null && !retry) {
-            "gate-open notify failed for $gateId ($gateKind) after $attempt attempts: " +
-              "${sinkFailure.detail.take(200)} — gate is open and blocking, operator not notified"
+          if (retryableFailure != null && !retry) {
+            "gate-open notify failed for $gateId ($gateKind) after $sinkAttempt attempts: " +
+              "${retryableFailure.detail.take(200)} — gate is open and blocking, operator not notified"
+          } else if (notRead && notReadBefore + 1 == MAX_ANNOUNCE_ATTEMPTS) {
+            "gate-open notify not sent for $gateId ($gateKind) after ${notReadBefore + 1} attempts: " +
+              "${retryableFailure?.detail?.take(200)} — the copy may be intact; the announce is " +
+              "sent again every ${ANNOUNCE_RETRY_DELAYS_MS.last() / 60_000} minutes until it is read, " +
+              "then gets the attempts any announce gets; the gate is open and blocking, operator not notified"
           } else {
             null
           }
@@ -1262,6 +1293,7 @@ class LeadDaemon(
         put("nonce", nonce)
         put("outcome", announceLabel(outcome).take(MAX_JOURNALED_STRING))
         if (retry) put("retry", true)
+        if (retry && notRead) put("notRead", true)
       },
       origin = ORIGIN_SUBSTRATE,
     )
@@ -1310,11 +1342,14 @@ class LeadDaemon(
 
   /** The outcome of reading a gate's inlined artifact: the verified [Resolved.content] to announce,
    * or an [Unresolved.reason] naming why the lead-owned bound copy cannot be inlined. The reason
-   * rides into the notify marker, which is the field an operator debugs a stuck gate from. */
+   * rides into the notify marker, which is the field an operator debugs a stuck gate from. A
+   * [NotRead] copy was not opened at all, for a cause outside the copy, so it is read again later. */
   private sealed interface ArtifactResolution {
     data class Resolved(val content: String) : ArtifactResolution
 
     data class Unresolved(val reason: String) : ArtifactResolution
+
+    data class NotRead(val reason: String) : ArtifactResolution
   }
 
   /** What [readBoundCopy] found at a bound path. */
@@ -1330,22 +1365,35 @@ class LeadDaemon(
     data object Grew : BoundRead
 
     class Fault(val error: Exception) : BoundRead
+
+    /** The open and read did not finish within [deadlineMs]; the read is left parked. */
+    data class TimedOut(val deadlineMs: Long) : BoundRead
+
+    /** The copy was not opened: [parked] earlier reads are still blocked, the most the daemon
+     * holds. Says nothing about this copy. */
+    data class Refused(val parked: Int) : BoundRead
   }
 
   /**
    * Read the bound copy at [path], which the lead wrote as a regular file, taking at most [limit]
-   * bytes. It runs on the single-writer loop thread, so a fault is a [BoundRead] value, never a
-   * throw, and what the check finds at the path decides whether it is opened at all.
+   * bytes. It is called on the single-writer loop thread, so a fault is a [BoundRead] value, never
+   * a throw, and what the check finds at the path decides whether it is opened at all.
    *
    * The path's last name is checked without following a link, and anything but a regular file is
    * refused unopened, since opening a FIFO blocks and a device can be read without end. A copy
    * larger than [limit] is refused from its size, unopened. The read takes at most one byte past
    * [limit], so a copy that grows after the size check is never read whole, and the open follows
    * no link at the last name either. [faultPoint] names the fault point between the check and the
-   * open. The path can still be swapped for a FIFO between the two, at its last name or through a
-   * directory above it. The open then blocks the loop thread until something opens the FIFO to
-   * write, and until then the lead takes no wake, a queued [shutdown] included. The pod engine's
-   * artifact read has the same race, but there it parks one supervisor thread and the loop runs on.
+   * open.
+   *
+   * The path can still be swapped for a FIFO between the check and the open, at its last name or
+   * through a directory above it, and the open then blocks until something opens the FIFO to
+   * write. So the open and the read run on a thread of their own ([boundReads]), and the loop
+   * waits for them at most [boundReadDeadlineMs]. A read unfinished by then is [BoundRead.TimedOut],
+   * and the loop takes its next wake, a queued [shutdown] included. A blocked open cannot be
+   * interrupted, so that read stays parked on its daemon thread until the FIFO gets a writer. While
+   * [maxParkedBoundReads] reads are parked, no copy is opened, and each read is
+   * [BoundRead.Refused], whatever the copy holds.
    */
   private fun readBoundCopy(path: String, limit: Int, faultPoint: String): BoundRead {
     val attrs =
@@ -1359,13 +1407,21 @@ class LeadDaemon(
     if (!attrs.isRegularFile) return BoundRead.NotARegularFile
     if (attrs.size() > limit) return BoundRead.TooLarge(attrs.size())
     faults.at(faultPoint)
-    val bytes =
-      try {
-        Files.newInputStream(Path.of(path), LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(limit + 1) }
-      } catch (e: Exception) {
-        return BoundRead.Fault(e)
+    val read =
+      boundReads.read<BoundRead> {
+        try {
+          val bytes =
+            Files.newInputStream(Path.of(path), LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(limit + 1) }
+          if (bytes.size > limit) BoundRead.Grew else BoundRead.Bytes(bytes)
+        } catch (e: Exception) {
+          BoundRead.Fault(e)
+        }
       }
-    return if (bytes.size > limit) BoundRead.Grew else BoundRead.Bytes(bytes)
+    return when (read) {
+      is DeadlinedReads.Outcome.Done -> read.value
+      DeadlinedReads.Outcome.TimedOut -> BoundRead.TimedOut(boundReadDeadlineMs)
+      is DeadlinedReads.Outcome.Refused -> BoundRead.Refused(read.parked)
+    }
   }
 
   /**
@@ -1396,7 +1452,10 @@ class LeadDaemon(
    * that faults. A copy larger than the capacity is refused unopened as `artifact-too-large`, and one
    * that grows past it while it is read as `bound-artifact-changed`. Only the path's last name is
    * checked for a link; a link among the directories above it is followed, and the digest still
-   * decides what the operator reads.
+   * decides what the operator reads. A read that does not finish within the deadline, as when a
+   * FIFO is swapped in after the check, is refused as a `read-fault` too, and the loop moves on. A
+   * read not started because the lead's earlier reads are still blocked is [ArtifactResolution.NotRead]
+   * as `read-refused`: that says nothing about the copy, so [announceAndMark] reads it again later.
    */
   private fun resolveGateArtifact(
     gateKind: String,
@@ -1424,6 +1483,9 @@ class LeadDaemon(
             "bound-artifact-changed:grew past the $artifactReadCap bytes the sink carries while it was read"
           )
         is BoundRead.Fault -> return ArtifactResolution.Unresolved("read-fault:${read.error.message}")
+        is BoundRead.TimedOut ->
+          return ArtifactResolution.Unresolved("read-fault:${unfinishedReadDetail(read)}")
+        is BoundRead.Refused -> return ArtifactResolution.NotRead("read-refused:${refusedReadDetail(read)}")
       }
     if (sha256HexBytes(bytes) != payloadDigest) return ArtifactResolution.Unresolved("digest-mismatch")
     // Decoded strictly: a lenient decode swaps malformed bytes for U+FFFD, showing the operator
@@ -1465,10 +1527,16 @@ class LeadDaemon(
    * Anything else wrong with the copy is NOT a lying pod (that cross-check happened at
    * result-record time, against the snapshot): it means the lead's OWN bound store was
    * disturbed. That is anything but a regular file at the path, a link included, dangling or not;
-   * a read that faults; a copy larger than the limit, which the lead never writes; a copy that
+   * a read that faults; a read that does not finish within the deadline, as when a FIFO is swapped
+   * in after the check; a copy larger than the limit, which the lead never writes; a copy that
    * grows past the limit while it is read; or bytes that disagree with the journaled digest. The
    * pod is abandoned and the disturbance escalated; nothing binds to bytes the record cannot vouch
    * for.
+   *
+   * A copy not read at all, because the lead's earlier reads of the bound store are still blocked
+   * at their bound, may be intact, so it is escalated as unread, not disturbed. Its pod is abandoned
+   * all the same, since nothing may bind to a copy the lead did not read, and the abandon counts
+   * against the task's attempts in this process, as a disturbed copy's does.
    */
   private fun verifiedBoundArtifact(pod: PodRecord): VerifiedArtifact? {
     val boundPath = pod.boundPath
@@ -1499,6 +1567,15 @@ class LeadDaemon(
             pod,
             "read fault: ${read.error::class.simpleName}: ${read.error.message?.take(200)}",
           )
+        is BoundRead.TimedOut -> return abandonDisturbed(pod, unfinishedReadDetail(read))
+        is BoundRead.Refused -> {
+          escalate(
+            "bound-artifact unread pod=${pod.podId}: ${refusedReadDetail(read)} at $boundPath — " +
+              "abandoning; nothing binds to it"
+          )
+          abandon(pod, "bound-artifact-unread: ${refusedReadDetail(read)}")
+          return null
+        }
       }
     val recomputed = sha256HexBytes(bytes)
     if (recomputed != pod.resultDigest) {
@@ -1511,6 +1588,16 @@ class LeadDaemon(
     }
     return VerifiedArtifact(File(boundPath).path, recomputed)
   }
+
+  /** What a bound-copy read that missed its deadline reports: only what was seen, that the open
+   * and read had not finished. */
+  private fun unfinishedReadDetail(read: BoundRead.TimedOut): String =
+    "read did not finish within ${read.deadlineMs} ms"
+
+  /** What a bound-copy read refused unopened reports: the lead's earlier reads are blocked, which
+   * says nothing about this copy. */
+  private fun refusedReadDetail(read: BoundRead.Refused): String =
+    "blocked reads of the bound store are at the bound of ${read.parked}"
 
   /** Escalate that [pod]'s bound copy was disturbed, as [detail] says, and abandon the pod. Returns
    * null, for [verifiedBoundArtifact] to return: nothing binds to the copy. */
@@ -2022,12 +2109,23 @@ class LeadDaemon(
     /**
      * The largest pod artifact the lead records, in bytes: 32 MiB, the most the ACP pod engine
      * reads of an artifact unless it is built with a larger cap. The lead reads a pod's bound copy
-     * back whole, on its single loop thread, before the plan or commit record binds to it, so it
+     * back whole, its single loop thread waiting on the read, before the plan or commit record binds to it, so it
      * refuses a completion whose snapshot is larger before it writes the copy. A bound copy larger
      * than this was therefore disturbed after it was written, and is refused unread. A pod runner
      * that delivers more gets those results refused, and the work proposed again.
      */
     const val MAX_BOUND_ARTIFACT_BYTES: Int = 32 shl 20
+
+    /** The default wait for a bound copy's open and read: 5 s, which a copy of
+     * [MAX_BOUND_ARTIFACT_BYTES] on a local disk never needs, and which a disturbed copy costs the
+     * loop thread per read. */
+    const val DEFAULT_BOUND_READ_DEADLINE_MS: Long = 5_000
+
+    /** The default number of bound-copy reads that may stay blocked past their deadline. */
+    const val DEFAULT_MAX_PARKED_BOUND_READS: Int = 4
+
+    /** The name of each thread a bound copy is opened and read on. */
+    const val BOUND_READ_THREAD_NAME: String = "lead-bound-read"
   }
 }
 
