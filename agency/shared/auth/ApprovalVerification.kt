@@ -27,6 +27,10 @@ fun interface ApprovalVerifier {
    * neither parses nor trusts anything but these four arguments. A verifier that consulted a
    * record's flat columns instead of the preimage it was handed would defeat the purpose of
    * being handed the preimage.
+   *
+   * The check is byte-level: a verifier does not know the preimage's purpose (the same port
+   * checks an authorization spec's root signature over other bytes). The approval domain tag
+   * ([APPROVAL_DOMAIN_TAG]) is enforced by [parseCommitted], which the fold runs first.
    */
   fun verifies(schemeId: String, publicKey: String, signature: String, preimage: String): Boolean
 }
@@ -53,7 +57,8 @@ object RejectingVerifier : ApprovalVerifier {
  * approval bound itself to. The mechanical layer trusts THESE, and treats the flat copies
  * beside them in a record as lookup indices to cross-check, never as authority — see
  * [ApprovalEvidence]'s KDoc for why a signature over a flattened record proves less than it
- * appears to.
+ * appears to. The preimage's domain tag is checked by the parse, not carried here: a value of
+ * this type exists only for a preimage tagged [APPROVAL_DOMAIN_TAG].
  */
 data class CommittedApproval(
   val publicKey: String,
@@ -67,11 +72,26 @@ data class CommittedApproval(
 private val CANONICAL = Json
 
 /**
- * The canonical serialization an approval signs: a JSON array of exactly
- * `[publicKey, gateId, payloadDigest, nonce]`, all strings, in that order. A fixed positional
- * array (not an object) so the bytes are canonical without depending on a field-ordering
- * convention — which is what lets an independent re-serialization of the same four values be
- * a CHECK on provenance rather than codec self-agreement.
+ * The domain tag every approval preimage leads with: it binds a signature to ONE purpose —
+ * "this is an Agency gate approval, structure version 1". Without it a signature over the four
+ * committed fields could be confused with one the same key made for some other purpose over a
+ * same-shaped message; with it, [parseCommitted] reads an approval only out of bytes that say
+ * they are one, so a signature made for anything else binds no gate.
+ *
+ * Part of the signed bytes: changing this value (or its position or encoding) invalidates
+ * EVERY existing approval signature. A new structure gets a new version suffix, never an
+ * in-place edit.
+ */
+const val APPROVAL_DOMAIN_TAG = "agency/gate-approval/v1"
+
+/**
+ * The canonical serialization an approval signs, and the ONE place it is built (signers,
+ * fixtures and the verifier's re-serialization all come through here): a JSON array of exactly
+ * `[APPROVAL_DOMAIN_TAG, publicKey, gateId, payloadDigest, nonce]`, all strings, in that order.
+ * A fixed positional array (not an object) so the bytes are canonical without depending on a
+ * field-ordering convention — which is what lets an independent re-serialization of the same
+ * values be a CHECK on provenance rather than codec self-agreement. The tag is encoded like
+ * every other field (a JSON string element), so the encoding stays unambiguous.
  */
 fun committedPreimage(
   publicKey: String,
@@ -83,6 +103,7 @@ fun committedPreimage(
     JsonArray.serializer(),
     JsonArray(
       listOf(
+        JsonPrimitive(APPROVAL_DOMAIN_TAG),
         JsonPrimitive(publicKey),
         JsonPrimitive(gateId),
         JsonPrimitive(payloadDigest),
@@ -93,11 +114,16 @@ fun committedPreimage(
 
 /**
  * Recovers the committed fields from a [committedPreimage] serialization, or null if the
- * bytes are not that shape: not a JSON array, not exactly four elements, any element not a
- * JSON string, or any field blank. Null is the fail-closed signal — the verifying layer
- * treats a preimage it cannot parse as unverifiable, never as a pass. Total and
- * deterministic: it never throws, so a hostile preimage folds to "unverified", not a boot
- * crash.
+ * bytes are not that shape: not a JSON array, not exactly five elements, any element not a
+ * JSON string, a first element other than exactly [APPROVAL_DOMAIN_TAG] (an untagged preimage
+ * or another purpose's tag included), any committed field blank, or bytes that are not exactly
+ * the [committedPreimage] encoding of their own fields (incidental whitespace, escaped
+ * characters, surrounding newlines). That last check makes the accepted bytes canonical: one
+ * set of fields has one signable preimage, so the golden vector pins what the parser accepts,
+ * not only what the builder emits. Null is the fail-closed
+ * signal — the verifying layer treats a preimage it cannot parse as unverifiable, never as a
+ * pass. Total and deterministic: it never throws, so a hostile preimage folds to
+ * "unverified", not a boot crash.
  *
  * Safe on untrusted text, which a preimage is until a signature over it verifies — and a
  * caller may parse before it verifies. A preimage that may nest deeper than the committed
@@ -113,10 +139,13 @@ fun parseCommitted(preimage: String): CommittedApproval? {
     } catch (_: Exception) {
       return null
     }
-  if (arr.size != 4) return null
-  val fields =
+  if (arr.size != 5) return null
+  val elements =
     arr.map { el -> (el as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null }
+  if (elements[0] != APPROVAL_DOMAIN_TAG) return null
+  val fields = elements.drop(1)
   if (fields.any { it.isBlank() }) return null
+  if (preimage != committedPreimage(fields[0], fields[1], fields[2], fields[3])) return null
   return CommittedApproval(
     publicKey = fields[0],
     gateId = fields[1],

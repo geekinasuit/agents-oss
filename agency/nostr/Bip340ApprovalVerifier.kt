@@ -17,6 +17,11 @@ import java.security.MessageDigest
  * substrate-neutral committed preimage, and never trusts the transport. The two are separate
  * BIP-340 uses over two different messages, by design.
  *
+ * The check is over the bytes alone: this verifier does not read the preimage, so the approval
+ * domain tag (APPROVAL_DOMAIN_TAG, the preimage's first element) is not enforced here — the same
+ * port also checks an authorization spec's root signature over other bytes. The fold enforces
+ * the tag by parsing the preimage (parseCommitted) before it trusts any committed field.
+ *
  * The coupling points inward, per the standing rule: this adapter depends on the auth port; the
  * auth module and the fold never depend on nostr and never see the string "bip340" as anything
  * but the opaque scheme tag they were handed. A non-bip340 scheme is refused here (fail-closed):
