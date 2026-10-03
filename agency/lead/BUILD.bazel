@@ -211,6 +211,7 @@ kt_jvm_test(
         "//agency/pod",
         "//agency/shared/journal",
         "@maven//:junit_junit",
+        "@maven//:org_json_json",
     ],
 )
 
@@ -276,6 +277,21 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.CognitionParsingTest",
     deps = [
         ":lead",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Hermetic: the Claude cognition strategy's presentation answers (spend cap, failed turn,
+# parsed turn) against a stand-in claude executable. No claude CLI required.
+kt_jvm_test(
+    name = "claude_cognition_test",
+    size = "small",
+    srcs = ["ClaudeCognitionTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.ClaudeCognitionTest",
+    deps = [
+        ":lead",
+        "//agency/shared/harness",
         "//agency/shared/journal",
         "@maven//:junit_junit",
     ],

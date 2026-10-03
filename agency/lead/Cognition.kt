@@ -65,8 +65,35 @@ sealed interface Proposal {
   data class ProposeEscalate(val reason: String) : Proposal
 }
 
+/**
+ * Whether the decider of a wake was presented the context it was handed: the evidence the daemon
+ * needs before it marks that context's mail delivered, which has no inverse.
+ *
+ * The vocabulary stops at "presented" on purpose. The substrate can establish that a model turn
+ * was SENT the rendered context and completed. It cannot establish that the model processed what
+ * it was sent, so no value here claims that.
+ */
+enum class ContextPresentation {
+  /** The decision was made with the context in front of the decider, as rendered: a model-backed
+   * strategy sent the rendered context in a turn that completed, or a strategy decided from the
+   * structured context itself. */
+  PRESENTED,
+
+  /** No decider was presented the context: no turn ran (a spend cap), or the turn failed. */
+  NOT_PRESENTED,
+
+  /** The strategy cannot say. Treated exactly as [NOT_PRESENTED]. */
+  UNKNOWN;
+
+  /** Only [PRESENTED] retires mail. */
+  val retiresMail: Boolean
+    get() = this == PRESENTED
+}
+
 /** One wake's cognition output: zero proposals = idle. [meta] carries strategy-specific
- * provenance (a model-backed strategy's sessionId and costUsd) into the journaled record. */
+ * provenance (a model-backed strategy's sessionId and costUsd) into the journaled record.
+ * [presentation] has no default: every strategy states whether its decider was presented the
+ * context, because the daemon retires mail only on [ContextPresentation.PRESENTED]. */
 data class CognitionOutput(
   val proposals: List<Proposal> = emptyList(),
   val reasoning: String = "",
@@ -86,14 +113,24 @@ data class CognitionOutput(
    * precisely the signal needed to notice that a smaller model is degrading.
    */
   val malformed: String? = null,
+  val presentation: ContextPresentation,
 ) {
   companion object {
-    val IDLE = CognitionOutput(emptyList(), "idle")
+    /** An idle decision. The caller says whether it was made on the context: a scripted idle
+     * was, a model-backed strategy idling at its spend cap without a turn was not. */
+    fun idle(presentation: ContextPresentation) = CognitionOutput(reasoning = "idle", presentation = presentation)
 
     /** Shared constructor for the malformed outcome — every model-backed strategy classifies
-     * unusable output the same way, and the daemon keys on [malformed] alone. */
+     * unusable output the same way, and the daemon keys on [malformed] alone. Its presentation
+     * is [ContextPresentation.UNKNOWN]: a malformed output is never a decision, and the daemon
+     * retires no mail on it whatever this says. */
     fun malformed(reason: String, meta: Map<String, String> = emptyMap()) =
-      CognitionOutput(reasoning = "unusable cognition output", meta = meta, malformed = reason)
+      CognitionOutput(
+        reasoning = "unusable cognition output",
+        meta = meta,
+        malformed = reason,
+        presentation = ContextPresentation.UNKNOWN,
+      )
   }
 }
 
@@ -122,13 +159,13 @@ class ScriptedCognition : CognitionStrategy {
 
   override fun decide(context: WakeContext): CognitionOutput {
     val lead = context.lead
-    val ticket = lead.currentTicket ?: return CognitionOutput.IDLE
+    val ticket = lead.currentTicket ?: return IDLE
 
     // A stale release is escalated once. The check looks for that escalation only, so an escalation
     // of another kind, such as a gate-open no sink announced, does not silence it. The escalations
     // are a capped tail: once enough later ones push this one out, it is raised again.
     if (lead.staleReleases.isNotEmpty() && STALE_RELEASE_REASON !in lead.escalations) {
-      return CognitionOutput(
+      return decided(
         listOf(Proposal.ProposeEscalate(STALE_RELEASE_REASON)),
         "a release did not match the gate as opened; a human should look",
       )
@@ -141,7 +178,7 @@ class ScriptedCognition : CognitionStrategy {
 
     return when {
       lead.planArtifactSha == null && !activePodFor("plan:$ticket") ->
-        CognitionOutput(
+        decided(
           listOf(
             Proposal.ProposePodSpawn("plan:$ticket"),
             Proposal.ProposeStatus("planning $ticket"),
@@ -149,7 +186,7 @@ class ScriptedCognition : CognitionStrategy {
           "no plan artifact and no planner in flight; spawning a planner pod",
         )
       lead.planArtifactSha != null && planGate == null ->
-        CognitionOutput(
+        decided(
           listOf(
             Proposal.ProposeGateOpen(GateKinds.PLAN_APPROVAL, lead.planArtifactSha),
             Proposal.ProposeStatus("plan ready for approval: $ticket"),
@@ -157,7 +194,7 @@ class ScriptedCognition : CognitionStrategy {
           "plan artifact recorded; opening the plan-approval gate on its digest",
         )
       planApproved && lead.commitManifestDigest == null && !activePodFor("execute:$ticket") ->
-        CognitionOutput(
+        decided(
           listOf(
             Proposal.ProposePodSpawn("execute:$ticket"),
             Proposal.ProposeStatus("executing $ticket"),
@@ -165,22 +202,32 @@ class ScriptedCognition : CognitionStrategy {
           "plan approved and no manifest yet; spawning the execute pod",
         )
       lead.commitManifestDigest != null && commitGate == null ->
-        CognitionOutput(
+        decided(
           listOf(
             Proposal.ProposeGateOpen(GateKinds.COMMIT_APPROVAL, lead.commitManifestDigest),
             Proposal.ProposeStatus("commit ready for approval: $ticket"),
           ),
           "commit manifest proposed; opening the commit-approval gate on its digest",
         )
-      else -> CognitionOutput.IDLE // waiting on a gate to be authorized or a pod to finish
+      else -> IDLE // waiting on a gate to be authorized or a pod to finish
     }
+  }
+
+  private companion object {
+    /** The playbook decides from the structured context itself, with no render in between, so
+     * every decision it makes, idling included, was made with that context in front of it. */
+    val IDLE = CognitionOutput.idle(ContextPresentation.PRESENTED)
+
+    fun decided(proposals: List<Proposal>, reasoning: String) =
+      CognitionOutput(proposals, reasoning, presentation = ContextPresentation.PRESENTED)
   }
 }
 
 /** Deterministic gate identity: one gate per (kind, ticket) — idempotent across re-proposals. */
 fun gateIdFor(gateKind: String, ticketRef: String): String = "$gateKind:$ticketRef"
 
-/** Test wrapper: counts [decide] calls — the zero-spend-while-idle assertion's probe. */
+/** Test wrapper: counts [decide] calls — the zero-spend-while-idle assertion's probe. Its
+ * output, presentation included, is the wrapped strategy's own. */
 class CountingCognition(private val inner: CognitionStrategy) : CognitionStrategy {
   @Volatile var calls: Int = 0
     private set

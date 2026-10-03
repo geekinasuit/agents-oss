@@ -60,9 +60,11 @@ class OpenAiCompatCognition(
         ),
         reasoning = "harness turn did not complete cleanly",
         meta = meta,
+        // The model never answered, so nothing decided on the context: its mail stays.
+        presentation = ContextPresentation.NOT_PRESENTED,
       )
     }
-    return CognitionProtocol.parseOutput(turn.text, meta)
+    return CognitionProtocol.parseOutput(turn.text, meta, ContextPresentation.PRESENTED)
   }
 
   companion object {

@@ -606,11 +606,14 @@ class LeadDaemon(
     // retry re-folded mid-wake: executing a proposal against a state cognition never saw
     // would judge it on different evidence than the judgment was made on.
     //
-    // No decision at all is not the same as a decision to idle, and the difference is the
-    // mail. An idle turn was SHOWN this wake's mail and chose not to act, so retiring it is
-    // right. A wake whose cognition never produced usable output chose nothing — marking its
-    // mail delivered would retire a work item on behalf of a turn that never judged it, and
-    // the delivered set has no inverse, so it would never be offered again.
+    // Mail is retired only when the deciding strategy was presented a context that showed it,
+    // whole or cut with the cut stated. The delivered set has no inverse, so a retired mail is
+    // never offered again: retiring it on behalf of a decider that never saw it discards a work
+    // item. So a wake whose cognition produced no usable output retires nothing, nor does a
+    // decision whose strategy reports its context was not presented (no turn ran, the turn
+    // failed) or cannot say. A presented decision retires only the mail its context showed
+    // ([CognitionProtocol.mailRenderedForRetirement]): mail past the render's cap stays
+    // undelivered for a later turn.
     val decision = decideWithRetry(reasonOf(ev), folded) ?: return
     val out = decision.out
     // Journal every decision that either proposes or carries strategy provenance (a
@@ -622,7 +625,9 @@ class LeadDaemon(
     if (out.proposals.isNotEmpty()) {
       executeProposals(out, decision.folded.lead)
     }
-    markMailDelivered(decision.folded.shared.undeliveredMail)
+    if (out.presentation.retiresMail) {
+      markMailDelivered(CognitionProtocol.mailRenderedForRetirement(decision.folded.shared.undeliveredMail))
+    }
   }
 
   /** A wake's cognition result together with the fold it was decided on — see
@@ -2084,8 +2089,8 @@ class LeadDaemon(
     )
   }
 
-  private fun markMailDelivered(undelivered: List<Pair<Long, String>>) {
-    for ((seq, _) in undelivered) {
+  private fun markMailDelivered(seqs: Set<Long>) {
+    for (seq in seqs) {
       store.append(
         "mailbox-delivered",
         buildJsonObject { put("appendSeq", seq) },
