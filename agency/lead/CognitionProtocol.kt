@@ -44,6 +44,58 @@ object CognitionProtocol {
   private const val MAX_MAIL_CHARS = 500
 
   /**
+   * One undelivered mail as [renderContext] shows it: [text] is the first [MAX_MAIL_CHARS] chars
+   * of a message [totalChars] long, which [line] quotes into the prompt.
+   *
+   * The bound is measured on the source text, before quoting. Cutting the quoted form instead
+   * could split an escape sequence. Quoting can grow a char to six (`JSONObject.quote` writes a
+   * control char, U+0080 to U+009F, and U+2000 to U+20FF as `\uXXXX`), so one rendered mail
+   * line can carry up to about 3,000 chars plus its prefix, not 500. The documented 20 × 500
+   * prompt bound on mail is therefore up to about 20 × 3,000 = 60,000 rendered chars. Size
+   * nothing from the 20 × 500 figure.
+   */
+  class ShownMail(val seq: Long, val text: String, val totalChars: Int) {
+    val whole: Boolean
+      get() = text.length == totalChars
+
+    /**
+     * The prompt line. The body is quoted as a JSON string, so its own text cannot close the
+     * quote, start a new line, or write into the renderer's bracketed prefix. The prefix carries
+     * the seq and, for a cut message, the cut with both lengths: `[seq, truncated: 500 of 3812
+     * chars]`. Since the body cannot reach the prefix, a mail cannot forge or hide that marker.
+     */
+    fun line(): String {
+      val prefix = if (whole) "[$seq]" else "[$seq, truncated: ${text.length} of $totalChars chars]"
+      return "  $prefix ${JSONObject.quote(text)}"
+    }
+  }
+
+  /**
+   * The mail a render shows: the first [MAX_MAIL_SHOWN] undelivered messages, each bounded to
+   * [MAX_MAIL_CHARS]. [renderContext] renders exactly this, and [mailRenderedForRetirement]
+   * derives from it, so what the prompt shows and what the daemon retires cannot disagree.
+   */
+  fun mailShown(undelivered: List<Pair<Long, String>>): List<ShownMail> =
+    undelivered.take(MAX_MAIL_SHOWN).map { (seq, msg) ->
+      ShownMail(seq, msg.take(MAX_MAIL_CHARS), totalChars = msg.length)
+    }
+
+  /**
+   * The seqs of the mail a render shows either whole or cut with the cut stated: what a turn
+   * that was presented the render has seen, and so all the daemon may mark delivered after it. Mail
+   * past [MAX_MAIL_SHOWN] is not shown at all and waits for a later turn, which sees it once the
+   * mail ahead of it is retired.
+   *
+   * A message longer than [MAX_MAIL_CHARS] can never be shown whole. It is shown cut, with a
+   * marker giving the shown and total lengths ([ShownMail.line]), so the turn knows it saw a
+   * prefix of a longer message, and it is retired once such a turn was presented it. Keeping it
+   * undelivered until shown whole would hold one of the [MAX_MAIL_SHOWN] slots forever, and
+   * enough of them at the head of the queue would starve every mail behind them.
+   */
+  fun mailRenderedForRetirement(undelivered: List<Pair<Long, String>>): Set<Long> =
+    mailShown(undelivered).map { it.seq }.toSet()
+
+  /**
    * The wake's state as the model sees it. Every field rendered here is derived from the
    * fold, so two calls against one fold render identical text — which is what makes a
    * within-wake retry a repeat of the same question rather than a new one.
@@ -51,7 +103,7 @@ object CognitionProtocol {
   fun renderContext(context: WakeContext): String {
     val lead = context.lead
     val sb = StringBuilder()
-    sb.appendLine("WAKE: ${context.reason}")
+    sb.appendLine("WAKE: ${renderReason(context.reason)}")
     sb.appendLine("ticket: ${lead.currentTicket ?: "none"}  phase: ${lead.phase}")
     sb.appendLine("planArtifactSha: ${lead.planArtifactSha ?: "none"}")
     sb.appendLine("commitManifestDigest: ${lead.commitManifestDigest ?: "none"}")
@@ -81,15 +133,28 @@ object CognitionProtocol {
     sb.appendLine("undeliveredMail:")
     // Mail is untrusted content rendered into the model prompt: bound
     // both the count and per-message length so a huge or prompt-injected mailbox cannot
-    // amplify cost or dominate the context. Content is data, never executed — the
+    // amplify cost or dominate the context. The per-message bound is on the source text, and
+    // quoting can expand it about sixfold (see [ShownMail]). Content is data, never executed — the
     // execute-time proposal guards are what stop a hostile message causing an effect.
-    for ((seq, msg) in context.undeliveredMail.take(MAX_MAIL_SHOWN))
-      sb.appendLine("  [$seq] ${msg.take(MAX_MAIL_CHARS)}")
+    for (mail in mailShown(context.undeliveredMail)) sb.appendLine(mail.line())
     if (context.undeliveredMail.size > MAX_MAIL_SHOWN)
       sb.appendLine("  … ${context.undeliveredMail.size - MAX_MAIL_SHOWN} more not shown")
     if (context.undeliveredMail.isEmpty()) sb.appendLine("  none")
     return sb.toString()
   }
+
+  /**
+   * The wake reason's header line. A [WakeReason.MailArrived] is rendered WITHOUT its message:
+   * the mail is untrusted, and the `undeliveredMail:` section is the one place it is shown,
+   * under that section's bounds. Printing the data class through `toString` would put the
+   * whole message (up to the accept bound) into the prompt, unfenced.
+   */
+  private fun renderReason(reason: WakeReason): String =
+    when (reason) {
+      is WakeReason.MailArrived ->
+        "MailArrived(${reason.message.length} chars; mail still undelivered is listed under undeliveredMail)"
+      else -> reason.toString()
+    }
 
   /**
    * Lenient extraction (first '{' to last '}'), strict interpretation.
@@ -104,8 +169,12 @@ object CognitionProtocol {
    * taskRef names the CURRENT ticket, and whether a digest matches substrate evidence, are
    * checked against folded state at execute time (LeadDaemon.executeProposals), which is
    * the only place that state is authoritative.
+   *
+   * [presentation] is the caller's account of the turn [text] came from, carried onto a usable
+   * output. A strategy parses only the reply of a turn that sent [renderContext] and
+   * succeeded, so it passes [ContextPresentation.PRESENTED].
    */
-  fun parseOutput(text: String, meta: Map<String, String>): CognitionOutput {
+  fun parseOutput(text: String, meta: Map<String, String>, presentation: ContextPresentation): CognitionOutput {
     val start = text.indexOf('{')
     val end = text.lastIndexOf('}')
     if (start < 0 || end <= start) {
@@ -149,7 +218,7 @@ object CognitionProtocol {
           }
         }
       }
-      CognitionOutput(proposals, obj.optString("reasoning"), meta)
+      CognitionOutput(proposals, obj.optString("reasoning"), meta, presentation = presentation)
     } catch (e: MalformedProposal) {
       CognitionOutput.malformed(e.message!!, meta)
     } catch (e: Exception) {

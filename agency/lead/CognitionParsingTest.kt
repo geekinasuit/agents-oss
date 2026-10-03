@@ -21,7 +21,7 @@ class CognitionParsingTest {
 
   private val meta = mapOf("sessionId" to "s1", "costUsd" to "0.01")
 
-  private fun parse(text: String) = CognitionProtocol.parseOutput(text, meta)
+  private fun parse(text: String) = CognitionProtocol.parseOutput(text, meta, ContextPresentation.PRESENTED)
 
   @Test
   fun wellFormedProposalsParseToTypedValues() {

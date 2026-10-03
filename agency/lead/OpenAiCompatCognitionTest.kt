@@ -62,6 +62,7 @@ class OpenAiCompatCognitionTest {
     assertNull("a well-formed reply is not a malformed turn", out.malformed)
     assertEquals(Proposal.ProposePodSpawn("plan:TEST-7"), out.proposals.single())
     assertTrue(out.reasoning.contains("No plan artifact"))
+    assertEquals("a parsed turn was presented the context", ContextPresentation.PRESENTED, out.presentation)
   }
 
   @Test
@@ -153,6 +154,8 @@ class OpenAiCompatCognitionTest {
     assertNull(out.malformed)
     val escalation = out.proposals.single() as Proposal.ProposeEscalate
     assertTrue(escalation.reason.contains("cognition turn failed"))
+    // No model saw the context, so the wake's mail must stay for a turn that does (#255).
+    assertEquals(ContextPresentation.NOT_PRESENTED, out.presentation)
   }
 
   @Test

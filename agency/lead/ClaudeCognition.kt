@@ -43,10 +43,16 @@ class ClaudeCognition(
 ) : CognitionStrategy {
   override val name = "claude"
 
+  /**
+   * Reports [ContextPresentation.PRESENTED] only on a turn that sent the rendered context and
+   * completed. At the spend cap no turn runs, and a failed turn's reply is not a decision on the
+   * context, so both report [ContextPresentation.NOT_PRESENTED] and leave the wake's mail
+   * undelivered.
+   */
   override fun decide(context: WakeContext): CognitionOutput {
     if (context.lead.cognitionSpendUsd >= maxTotalUsd) {
       val alreadyRaised = context.lead.escalations.any { it.startsWith("cognition budget") }
-      return if (alreadyRaised) CognitionOutput.IDLE
+      return if (alreadyRaised) CognitionOutput.idle(ContextPresentation.NOT_PRESENTED)
       else
         CognitionOutput(
           listOf(
@@ -56,6 +62,7 @@ class ClaudeCognition(
             )
           ),
           reasoning = "cumulative spend cap reached before this wake; no turn was run",
+          presentation = ContextPresentation.NOT_PRESENTED,
         )
     }
     val turn =
@@ -78,8 +85,9 @@ class ClaudeCognition(
         listOf(Proposal.ProposeEscalate("cognition turn failed (exit=${turn.proc.exit}, isError=${turn.isError})")),
         reasoning = "harness turn did not complete cleanly",
         meta = meta,
+        presentation = ContextPresentation.NOT_PRESENTED,
       )
     }
-    return CognitionProtocol.parseOutput(turn.resultText, meta)
+    return CognitionProtocol.parseOutput(turn.resultText, meta, ContextPresentation.PRESENTED)
   }
 }
