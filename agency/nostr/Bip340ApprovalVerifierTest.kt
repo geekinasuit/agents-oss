@@ -1,8 +1,12 @@
 package com.geekinasuit.agency.nostr
 
 import com.geekinasuit.agency.shared.auth.committedPreimage
+import com.geekinasuit.agency.shared.auth.parseCommitted
 import java.security.MessageDigest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -12,7 +16,8 @@ import org.junit.Test
  * this exercises the layer separation directly: the same primitive, a different message than the
  * transport signature. The adversarial cells are the ones that matter — a verifier that accepts
  * a signature over the wrong preimage, or by the wrong key, would pass a round-trip and admit a
- * forged approval.
+ * forged approval. The preimage leads with the approval domain tag; the verifier checks bytes
+ * only, and the tag cells show the parse is where an untagged or foreign-tagged preimage stops.
  */
 class Bip340ApprovalVerifierTest {
   private val secretKey = "0000000000000000000000000000000000000000000000000000000000000003"
@@ -33,6 +38,37 @@ class Bip340ApprovalVerifierTest {
     val pubkey = Bip340.xonlyPubkeyHex(secretKey)
     val preimage = committedPreimage(pubkey, "gate-1", "digest-1", "nonce-1")
     assertTrue(Bip340ApprovalVerifier.verifies("bip340", pubkey, signOver(preimage, secretKey), preimage))
+  }
+
+  @Test
+  fun `the message an approver signs is sha256 of the domain-tagged preimage`() {
+    // Golden: the 32-byte message for a fixed input, computed outside the codec (shasum over the
+    // hand-written tagged literal). A signer that hashed anything else — the untagged form, a
+    // different tag — would produce signatures this pin rejects.
+    assertEquals(
+      "5eab71ebe4cd1b826c537cb91fab0d4eb2dd08e5c2733f5e3236f14ce5ae0db5",
+      sha256Hex(committedPreimage("pk-1", "g1", "d1", "n1")),
+    )
+  }
+
+  @Test
+  fun `a real signature over the untagged or another tag's bytes is refused by the parse, not the curve`() {
+    // The verifier is a byte-level port (it also checks the authorization spec's root signature,
+    // a different shape), so a real signature over ANY bytes verifies over those bytes. The
+    // domain tag is enforced where the fold reads an approval out of them: parseCommitted, which
+    // the fold runs before it trusts a single committed field.
+    val pubkey = Bip340.xonlyPubkeyHex(secretKey)
+    val tagged = committedPreimage(pubkey, "gate-1", "digest-1", "nonce-1")
+    assertTrue(Bip340ApprovalVerifier.verifies("bip340", pubkey, signOver(tagged, secretKey), tagged))
+    assertNotNull("control: the tagged preimage parses", parseCommitted(tagged))
+    for (foreign in
+      listOf(
+        """["$pubkey","gate-1","digest-1","nonce-1"]""",
+        """["agency/gate-approval/v2","$pubkey","gate-1","digest-1","nonce-1"]""",
+      )) {
+      assertTrue(foreign, Bip340ApprovalVerifier.verifies("bip340", pubkey, signOver(foreign, secretKey), foreign))
+      assertNull(foreign, parseCommitted(foreign))
+    }
   }
 
   @Test

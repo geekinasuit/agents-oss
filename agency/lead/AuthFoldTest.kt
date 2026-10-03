@@ -1071,6 +1071,69 @@ class AuthFoldTest {
     assertTrue(st.unverifiedApprovals.any { "does not verify" in it.second })
   }
 
+  // -- the domain tag: a signature binds only as an Agency gate approval, v1 -----------------
+  //
+  // Each cell signs its OWN preimage validly (the sha verifier accepts iff the signature is
+  // sha256 of exactly the bytes handed over), so a refusal can only come from the fold reading
+  // no gate approval out of those bytes — never from a bad signature.
+
+  private fun foldOverValidlySigned(preimage: String): LeadState {
+    val shaVerifier =
+      ApprovalVerifier { _, _, signature, bytes -> signature == "sha256:" + sha256Hex(bytes) }
+    val auth = LeadAuth(allowListOf("operator"), shaVerifier, oneOfOne("operator"))
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    s.approvalWithEvidence(
+      "g1",
+      "operator",
+      "n1",
+      "d1",
+      ApprovalEvidence(
+        "test",
+        pubKeyFor("operator"),
+        "sha256:" + sha256Hex(preimage),
+        "carrier",
+        "g1",
+        "d1",
+        "n1",
+        signedPreimage = preimage,
+      ),
+    )
+    s.release("g1", "d1", nonce = "n1")
+    return s.leadWith(auth)
+  }
+
+  @Test
+  fun aSignatureOverTheTaggedPreimageVerifies() {
+    // Positive control for the two refusals below: the one builder's bytes, validly signed,
+    // verify and release.
+    val st = foldOverValidlySigned(committedPreimage(pubKeyFor("operator"), "g1", "d1", "n1"))
+    assertTrue(st.unverifiedApprovals.toString(), st.unverifiedApprovals.isEmpty())
+    assertTrue("g1" in st.releasedGates)
+  }
+
+  @Test
+  fun aSignatureOverTheUntaggedPreimageDoesNotVerify() {
+    // The pre-tag form: the same four committed fields, no domain tag. Hand-written, since the
+    // builder no longer produces it. A valid signature over it binds nothing here.
+    val st = foldOverValidlySigned("""["pk-operator","g1","d1","n1"]""")
+    assertTrue(st.verifiedApprovals.isEmpty())
+    assertTrue(st.unverifiedApprovals.any { "not a canonical committed approval" in it.second })
+    assertFalse("g1" in st.releasedGates)
+  }
+
+  @Test
+  fun aSignatureUnderAnotherDomainTagDoesNotVerify() {
+    // Same fields, a different purpose or version in the tag slot: not a v1 gate approval.
+    for (tag in listOf("agency/gate-approval/v2", "agency/authorization-spec/v1")) {
+      val st = foldOverValidlySigned("""["$tag","pk-operator","g1","d1","n1"]""")
+      assertTrue(tag, st.verifiedApprovals.isEmpty())
+      assertTrue(tag, st.unverifiedApprovals.any { "not a canonical committed approval" in it.second })
+      assertFalse(tag, "g1" in st.releasedGates)
+    }
+  }
+
   // -- diagnostic texts quote only what the lead vouches for -------------------------------
 
   /** One anomaly branch: [build] appends the entries that reach it and returns the seq of the

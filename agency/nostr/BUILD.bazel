@@ -87,8 +87,9 @@ kt_jvm_test(
     runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
     deps = [
         ":nostr",
-        # committedPreimage: the authorization layer's own canonical serialization, the message
-        # this verifier re-checks a signature over.
+        # committedPreimage: the authorization layer's own canonical (domain-tagged) serialization,
+        # the message this verifier re-checks a signature over, and parseCommitted, which
+        # enforces the tag.
         "//agency/shared/auth",
         "@maven//:junit_junit",
     ],
