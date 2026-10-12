@@ -141,8 +141,8 @@ class LeadScenarioTest {
     // "after-spawn-intended" is in the stage-one matrix too, on purpose: the shared spawn
     // boundary fires on the FIRST spawn it reaches, so here — plan pod already done and its
     // gate released — it kills the EXECUTE pod's spawn intent. That orphan recovers through a
-    // different predicate than the plan orphan (Cognition.kt's planApproved-and-no-active-
-    // execute-pod arm), which needs the released plan gate to survive the re-fold: the one
+    // different predicate than the plan orphan (ScriptedCognition's planApproved-and-no-
+    // active-execute-pod arm), which needs the released plan gate to survive the re-fold: the one
     // place intent-before-side-effect and clear-ticket-state-on-done actually meet.
     for (b in listOf("after-spawn-intended", "after-commit-proposed",
                      "after-gate-opened-commit-approval", "after-commit-intent",
