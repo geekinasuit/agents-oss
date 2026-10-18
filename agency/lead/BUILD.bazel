@@ -34,10 +34,12 @@ kt_jvm_library(
         "DeadlinedReads.kt",
         "EnginePodRunner.kt",
         "GateOpenSink.kt",
+        "HostSeams.kt",
         "LeadDaemon.kt",
         "LeadState.kt",
         "OpenAiCompatCognition.kt",
         "PodSeam.kt",
+        "TicketWorkflow.kt",
     ],
     visibility = ["//visibility:public"],
     deps = [

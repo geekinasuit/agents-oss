@@ -162,31 +162,6 @@ object LeadKinds {
   const val APPROVAL_RECORDED = "approval-recorded"
 }
 
-/** Gate kinds the ticket pipeline opens. */
-object GateKinds {
-  const val PLAN_APPROVAL = "plan-approval"
-  const val COMMIT_APPROVAL = "commit-approval"
-
-  /** Every kind above: a gate of any other kind is never opened. */
-  val ALL: Set<String> = setOf(PLAN_APPROVAL, COMMIT_APPROVAL)
-}
-
-/** Where the current ticket stands — derived progressively by the fold, one hop per entry. */
-enum class TicketPhase {
-  IDLE,
-  CLAIMED,
-  PLAN_REQUESTED,
-  PLANNING, // planner pod spawned
-  PLAN_RECORDED,
-  PLAN_GATED,
-  PLAN_APPROVED,
-  EXECUTING, // execute pod spawned
-  EXECUTED,
-  COMMIT_PROPOSED,
-  COMMIT_GATED,
-  COMMIT_APPROVED,
-}
-
 data class OpenGate(
   val gateId: String,
   val gateKind: String,
