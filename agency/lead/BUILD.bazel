@@ -34,6 +34,7 @@ kt_jvm_library(
         "DeadlinedReads.kt",
         "EnginePodRunner.kt",
         "GateOpenSink.kt",
+        "HostFold.kt",
         "HostSeams.kt",
         "LeadDaemon.kt",
         "LeadState.kt",
@@ -187,6 +188,27 @@ kt_jvm_library(
         ":lead",
         "//agency/shared/auth",
         "//agency/shared/journal",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# Folds a seeded corpus of journals with the pre-split fold (LegacyLeadFold.kt, frozen verbatim)
+# and with the host/workflow split fold, and asserts they agree on every one, failures included.
+kt_jvm_test(
+    name = "fold_split_differential_test",
+    size = "small",
+    srcs = [
+        "FoldSplitDifferentialTest.kt",
+        "LegacyLeadFold.kt",
+    ],
+    test_class = "com.geekinasuit.agency.lead.FoldSplitDifferentialTest",
+    deps = [
+        ":ceremony_test_support",
+        ":lead",
+        "//agency/shared/auth",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],

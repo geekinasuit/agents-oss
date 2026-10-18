@@ -1,9 +1,13 @@
 package com.geekinasuit.agency.lead
 
+import com.geekinasuit.agency.shared.journal.JournalEntry
+import com.geekinasuit.agency.shared.journal.payloadObject
+import com.geekinasuit.agency.shared.journal.requireContract
 import java.io.File
+import kotlinx.serialization.json.JsonPrimitive
 
-// The ticket workflow's own declarations: the gate kinds and phases of the ticket pipeline, the
-// ticket source, and the scripted playbook that drives it.
+// The ticket workflow's own declarations: the gate kinds and phases of the ticket pipeline, its
+// half of the lead fold, the ticket source, and the scripted playbook that drives it.
 
 /** Gate kinds the ticket pipeline opens. */
 object GateKinds {
@@ -28,6 +32,149 @@ enum class TicketPhase {
   COMMIT_PROPOSED,
   COMMIT_GATED,
   COMMIT_APPROVED,
+}
+
+/**
+ * The ticket workflow's half of the lead fold: the current ticket, its phase, the evidence the
+ * pipeline recorded, and the tickets done. Each field means what the [LeadState] field of the same
+ * name means; [leadFold] assembles a [LeadState] from this and a [HostState].
+ */
+internal data class TicketWorkflowState(
+  val currentTicket: String? = null,
+  val phase: TicketPhase = TicketPhase.IDLE,
+  val planArtifactPath: String? = null,
+  val planArtifactSha: String? = null,
+  val commitManifestPath: String? = null,
+  val commitManifestDigest: String? = null,
+  val doneTickets: List<String> = emptyList(),
+) {
+  /** The pod task refs the workflow intends while this ticket is current: its plan and execute
+   * pods. The host reads it to describe an orphaned spawn intent. */
+  fun expectedTaskRefs(): Set<String> =
+    currentTicket?.let { setOf("plan:$it", "execute:$it") } ?: emptySet()
+}
+
+/** The ticket workflow's substrate-only kinds, policed by the host's provenance gate. */
+internal val TICKET_WORKFLOW_SUBSTRATE_KINDS =
+  setOf(
+    LeadKinds.TICKET_CLAIMED,
+    LeadKinds.PLAN_REQUESTED,
+    LeadKinds.PLAN_ARTIFACT_RECORDED,
+    LeadKinds.COMMIT_PROPOSED,
+    LeadKinds.TICKET_DONE,
+  )
+
+/** Whether [e] ends the ticket workflow's scope: a ticket is done. The host clears its scoped
+ * records on it. */
+internal fun isTicketScopeEnd(e: JournalEntry): Boolean = e.kind == LeadKinds.TICKET_DONE
+
+/** Well-formed ticket refs: a ticket ref is untrusted input (a fixture line today, a real
+ * ticket-index row later) that flows into task refs, gate ids, and effect keys. A conservative
+ * charset — ':' and '/' excluded, so it can forge neither a task namespace nor a path — plus a
+ * length bound keeps a malformed ref from wedging the pipeline or polluting a namespace. */
+private val TICKET_REF_RE = Regex("[A-Za-z0-9._-]+")
+private const val MAX_TICKET_REF_LEN = 128
+
+/** Whether the claim accepts [ref]: in [TICKET_REF_RE]'s charset and at most [MAX_TICKET_REF_LEN]
+ * chars. The claim journals only a ref that passes, as a JSON string. The fold refuses a
+ * substrate-origin claim of any other ref, and records a claim of any other origin in
+ * [LeadState.misOriginedEntries] before it reads the ref. The claim and the fold check this one
+ * predicate, since a fold stricter than the claim would refuse a journal the lead wrote itself.
+ * Widening the predicate keeps every journal already written foldable. Tightening it makes the
+ * fold refuse claims already journaled, so it needs a migration of those journals. */
+internal fun isClaimableTicketRef(ref: String): Boolean =
+  TICKET_REF_RE.matches(ref) && ref.length <= MAX_TICKET_REF_LEN
+
+/**
+ * Folds one entry into the ticket workflow's state, after the host step has folded it. [outcome]
+ * is what the host did with the entry: a rejected entry changes nothing here, and host events
+ * (a gate opened or released, a pod spawned or its result recorded) move the phase.
+ */
+internal fun ticketWorkflowStep(w: TicketWorkflowState, e: JournalEntry, outcome: HostOutcome): TicketWorkflowState =
+  when (outcome) {
+    HostOutcome.Rejected -> w
+    is HostOutcome.GateOpened ->
+      w.copy(
+        phase =
+          when (outcome.gate.gateKind) {
+            GateKinds.PLAN_APPROVAL -> TicketPhase.PLAN_GATED
+            GateKinds.COMMIT_APPROVAL -> TicketPhase.COMMIT_GATED
+            else -> w.phase
+          }
+      )
+    is HostOutcome.GateReleased ->
+      w.copy(
+        phase =
+          when (outcome.gate.gateKind) {
+            GateKinds.PLAN_APPROVAL -> TicketPhase.PLAN_APPROVED
+            GateKinds.COMMIT_APPROVAL -> TicketPhase.COMMIT_APPROVED
+            else -> w.phase
+          }
+      )
+    is HostOutcome.PodSpawned ->
+      w.copy(
+        phase =
+          when {
+            outcome.pod.taskRef.startsWith("plan:") && w.phase == TicketPhase.PLAN_REQUESTED ->
+              TicketPhase.PLANNING
+            outcome.pod.taskRef.startsWith("execute:") && w.phase == TicketPhase.PLAN_APPROVED ->
+              TicketPhase.EXECUTING
+            else -> w.phase
+          }
+      )
+    is HostOutcome.PodResultRecorded ->
+      w.copy(
+        phase =
+          if (outcome.pod.taskRef.startsWith("execute:") && w.phase == TicketPhase.EXECUTING)
+            TicketPhase.EXECUTED
+          else w.phase
+      )
+    HostOutcome.Folded -> ticketKindStep(w, e)
+  }
+
+private fun ticketKindStep(w: TicketWorkflowState, e: JournalEntry): TicketWorkflowState {
+  if (e.kind !in TICKET_WORKFLOW_SUBSTRATE_KINDS) return w
+  val p = payloadObject(e.payloadJson)
+  return when (e.kind) {
+    LeadKinds.TICKET_CLAIMED -> {
+      // The claim journals only a ref it accepts, as a JSON string, so a claim of any other came
+      // from a writer other than the lead. Gate ids, task refs and effect keys are derived from
+      // the claimed ref, so such a claim is refused, not held. One check covers the field's type,
+      // charset and length, and like every refusal here its message leaves the ref out.
+      val ref = p["ticketRef"]
+      requireContract(ref is JsonPrimitive && ref.isString && isClaimableTicketRef(ref.content)) {
+        "claimed ticket ref is not a JSON string in the claim's charset of at most " +
+          "$MAX_TICKET_REF_LEN chars"
+      }
+      w.copy(currentTicket = ref.content, phase = TicketPhase.CLAIMED)
+    }
+    LeadKinds.PLAN_REQUESTED -> w.copy(phase = TicketPhase.PLAN_REQUESTED)
+    LeadKinds.PLAN_ARTIFACT_RECORDED ->
+      w.copy(
+        planArtifactPath = p.str("path"),
+        planArtifactSha = p.str("sha256"),
+        phase = TicketPhase.PLAN_RECORDED,
+      )
+    LeadKinds.COMMIT_PROPOSED ->
+      w.copy(
+        commitManifestPath = p.str("manifestPath"),
+        commitManifestDigest = p.str("manifestDigest"),
+        phase = TicketPhase.COMMIT_PROPOSED,
+      )
+    // The host has cleared its scoped records; the workflow's own are the ticket's evidence.
+    // doneTickets (small refs) persists as the running record.
+    LeadKinds.TICKET_DONE ->
+      w.copy(
+        doneTickets = w.doneTickets + p.str("ticketRef"),
+        currentTicket = null,
+        phase = TicketPhase.IDLE,
+        planArtifactPath = null,
+        planArtifactSha = null,
+        commitManifestPath = null,
+        commitManifestDigest = null,
+      )
+    else -> w
+  }
 }
 
 /** The reason [ScriptedCognition] escalates a stale release with. */
