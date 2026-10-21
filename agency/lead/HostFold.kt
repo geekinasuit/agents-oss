@@ -96,6 +96,13 @@ internal val HOST_SUBSTRATE_KINDS =
     LeadKinds.NONCE_CONSUMED,
   )
 
+/** Every kind the host folds: its substrate-only kinds, plus approvals (authored by the
+ * authorization layer), cognition turns (authored by cognition), and the shared journal's gate
+ * releases, which the host's release fold reads. A workflow's kinds must be disjoint from these
+ * ([requireKindPartition]). */
+internal val HOST_KINDS: Set<String> =
+  HOST_SUBSTRATE_KINDS + setOf(LeadKinds.APPROVAL_RECORDED, LeadKinds.COGNITION_PROPOSED, KIND_GATE_RELEASED)
+
 /**
  * Folds one entry into the host's records.
  *

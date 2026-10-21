@@ -69,7 +69,7 @@ class LeadDaemon(
    * daemon launches is a deliberate configuration act, and a silently-defaulted profile
    * would be a footgun in either direction. Fence-checked at the spawn site. */
   private val podSpec: PodSpec,
-  private val ticketSource: TicketSource,
+  ticketSource: TicketSource,
   private val workdir: File,
   private val effects: EffectReceiver,
   /** The authorization context every fold verifies against — allow-list, signature verifier,
@@ -130,7 +130,31 @@ class LeadDaemon(
   private val maxParkedBoundReads: Int = DEFAULT_MAX_PARKED_BOUND_READS,
 ) {
 
+  /** The workflow this lead runs: the ticket workflow, on tickets from the ticket source. */
+  private val workflow = TicketWorkflow(ticketSource)
+
+  /** What the host does for [workflow]. */
+  private val hostServices =
+    object : HostServices {
+      override fun append(kind: String, payload: JsonObject, idempotencyKey: String?) {
+        store.append(kind, payload, origin = ORIGIN_SUBSTRATE, idempotencyKey = idempotencyKey)
+      }
+
+      override fun faultAt(point: String) = faults.at(point)
+
+      override fun escalate(reason: String) = this@LeadDaemon.escalate(reason)
+
+      override fun fireEffect(key: String, message: String, attempt: Int) =
+        this@LeadDaemon.fireEffect(key, message, attempt)
+
+      override fun effectSeen(key: String): Boolean = key in effects.seenKeys()
+
+      override fun verifiedBoundArtifact(pod: PodRecord): VerifiedArtifact? =
+        this@LeadDaemon.verifiedBoundArtifact(pod)
+    }
+
   init {
+    requireKindPartition(HOST_KINDS, workflow)
     // A cap below 1 would skip cognition entirely and then escalate claiming it had asked,
     // which is a silently model-free daemon reporting a model failure. The ceiling is the
     // same guard from the other side: every attempt blocks the single loop thread for a
@@ -495,8 +519,8 @@ class LeadDaemon(
   private fun redrivePendingEffects(shared: JournalState, lead: LeadState) {
     val ticket = lead.currentTicket
     for (key in shared.pendingEffectKeys) {
-      if (ticket != null && key == commitEffectKey(ticket) && lead.approvedToCommit(ticket)) {
-        fireCommitEffect(ticket, lead, attempt = 2)
+      if (ticket != null && key == workflow.commitEffectKey(ticket) && lead.approvedToCommit(ticket)) {
+        fireEffect(key, workflow.commitEffectMessage(ticket, lead), attempt = 2)
         continue
       }
       val digest = sha256HexBytes(key.toByteArray(Charsets.UTF_8))
@@ -520,14 +544,6 @@ class LeadDaemon(
       )
     }
   }
-
-  /** The idempotency key of [ticket]'s commit effect: the one intent the lead journals. */
-  private fun commitEffectKey(ticket: String) = COMMIT_EFFECT_PREFIX + ticket
-
-  /** The message of [ticket]'s commit effect, built from the lead's own state: the intent row's
-   * message is not read back, since a journal the lead did not write can hold any message there. */
-  private fun commitEffectMessage(ticket: String, lead: LeadState) =
-    "apply-commit ticket=$ticket manifest=${lead.commitManifestDigest}"
 
   /** Fake pods re-spawn, not resume — abandon the in-flight record visibly; the
    * playbook re-proposes from the missing evidence. Real re-attach (--resume) is later work. */
@@ -854,10 +870,10 @@ class LeadDaemon(
     // and a ticket ref the claim accepts, and the digest is in the hex form the substrate records.
     // A gate under any other id or digest came from a journal the lead did not write, or was
     // opened for a claim that came from one, and the mint does not act on it.
-    val wellFormedTicket = lead.currentTicket?.takeIf { isClaimableTicketRef(it) }
-    if (leadAuth.hasApprovers && wellFormedTicket != null) {
+    val scopeKey = workflow.scopeKey(lead)
+    if (leadAuth.hasApprovers && scopeKey != null) {
       for (gate in lead.openGates.values) {
-        if (gate.gateId != gateIdFor(gate.gateKind, wellFormedTicket)) continue
+        if (gate.gateId != workflow.gateId(gate.gateKind, scopeKey)) continue
         if (mintRefusal(gate, lead) != null) continue
         mintNonce(gate.gateId, gate.payloadDigest)
         return true
@@ -873,8 +889,8 @@ class LeadDaemon(
       // escalated once per gate and digest: the escalation names both, and the fold keeps them
       // ([LeadState.escalatedStalls]), so no later pass or restart escalates it again. The one
       // append is the escalation and its record, so no crash can fall between them.
-      for (kind in GateKinds.ALL) {
-        val gate = lead.openGates[gateIdFor(kind, wellFormedTicket)] ?: continue
+      for (kind in workflow.gateKinds) {
+        val gate = lead.openGates[workflow.gateId(kind, scopeKey)] ?: continue
         if (lead.openNonceFor(gate) != null || lead.approvedOnCurrentDigest(gate.gateId)) continue
         if (gate.payloadDigest in lead.escalatedStalls[gate.gateId].orEmpty()) continue
         val refusal =
@@ -898,9 +914,9 @@ class LeadDaemon(
     // stall escalation above keeps ([LeadState.escalatedStalls]), whatever the timer service. Only a
     // gate under an id the gate-open derives for the current ticket is escalated, so the id the
     // reason quotes is one the lead derives.
-    if (!leadAuth.hasApprovers && wellFormedTicket != null) {
-      for (kind in GateKinds.ALL) {
-        val gate = lead.openGates[gateIdFor(kind, wellFormedTicket)] ?: continue
+    if (!leadAuth.hasApprovers && scopeKey != null) {
+      for (kind in workflow.gateKinds) {
+        val gate = lead.openGates[workflow.gateId(kind, scopeKey)] ?: continue
         if (lead.approvedOnCurrentDigest(gate.gateId)) continue
         if (gate.payloadDigest in lead.escalatedStalls[gate.gateId].orEmpty()) continue
         if (lead.issuedNonces.values.none { it.gateId == gate.gateId }) continue
@@ -928,9 +944,9 @@ class LeadDaemon(
     // gate such a journal re-opens on a digest it was escalated on before is not escalated again.
     // Nor is it when such a journal moves the recorded evidence, and the earlier reason then quotes
     // evidence that no longer holds.
-    if (wellFormedTicket != null) {
-      for (kind in GateKinds.ALL) {
-        val gate = lead.openGates[gateIdFor(kind, wellFormedTicket)] ?: continue
+    if (scopeKey != null) {
+      for (kind in workflow.gateKinds) {
+        val gate = lead.openGates[workflow.gateId(kind, scopeKey)] ?: continue
         if (!lead.approvedOnCurrentDigest(gate.gateId)) continue
         if (gate.payloadDigest in lead.escalatedStalls[gate.gateId].orEmpty()) continue
         if (lead.recordedEvidence(kind) == null) continue
@@ -968,141 +984,14 @@ class LeadDaemon(
       return true
     }
 
-    // Claim an offered ticket when idle. The done-filter repeats here even though the
-    // source receives the same set: the source is a seam an adopter implements, and a
-    // completed ticket must stay completed regardless of what any implementation re-offers.
-    if (lead.currentTicket == null) {
-      val offered = ticketSource.next(lead.doneTickets.toSet())
-      if (offered != null && offered !in lead.doneTickets) {
-        // The ticket ref is UNTRUSTED input: a fixture
-        // line today, a real ticket-index row later. It flows into this ticket's plan:/execute:
-        // task refs, gate ids, and effect keys. Validate charset + length at the claim boundary
-        // — ':' and '/' excluded so a ref can neither forge a task namespace (`plan:` prefix)
-        // nor traverse a path — so a malformed ref is escalated visibly and NOT claimed, rather
-        // than silently wedging every later plan/execute spawn against TASK_REF_RE. Returns
-        // false (not true): the pass makes no progress on a bad ref instead of re-looping on it.
-        if (!isClaimableTicketRef(offered)) {
-          escalate("ticket claim rejected: an offered ref of ${offered.length} chars is malformed (charset/length)")
-          return false
-        }
-        store.append(
-          LeadKinds.TICKET_CLAIMED,
-          buildJsonObject { put("ticketRef", offered) },
-          origin = ORIGIN_SUBSTRATE,
-        )
-        faults.at("after-claim")
-        store.append(LeadKinds.PLAN_REQUESTED, buildJsonObject {}, origin = ORIGIN_SUBSTRATE)
-        faults.at("after-plan-requested")
-        return true
-      }
-      return false
-    }
-    val ticket = lead.currentTicket
-
-    // Kill-recovery for the claim window: death between ticket-claimed and plan-requested
-    // leaves the phase at CLAIMED; finish the hop so the phase record stays honest.
-    if (lead.phase == TicketPhase.CLAIMED) {
-      store.append(LeadKinds.PLAN_REQUESTED, buildJsonObject {}, origin = ORIGIN_SUBSTRATE)
-      faults.at("after-plan-requested")
-      return true
-    }
-
-    // Record a finished planner pod's artifact as THE plan. Bind-once: the evidence
-    // is the pod's BOUND copy — the lead-owned immutable object written from the engine's
-    // single disciplined read — verified against the journaled digest before any gate
-    // binds to it. The pod's own artifactPath is provenance only and is never read here.
-    // A missing or integrity-failed bound copy abandons the pod, and the evidence-based
-    // playbook re-proposes the work.
-    if (lead.planArtifactSha == null) {
-      val planner = lead.podFor("plan:$ticket")
-      if (planner?.resultDigest != null) {
-        val verified = verifiedBoundArtifact(planner) ?: return true // pod abandoned
-        store.append(
-          LeadKinds.PLAN_ARTIFACT_RECORDED,
-          buildJsonObject {
-            put("path", verified.boundPath)
-            put("sha256", verified.digest)
-          },
-          origin = ORIGIN_SUBSTRATE,
-        )
-        faults.at("after-plan-recorded")
-        return true
-      }
-    }
-
-    // Propose the commit from a finished execute pod's manifest — same bound-copy rule.
-    val planApproved = lead.approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)
-    if (planApproved && lead.commitManifestDigest == null) {
-      val executor = lead.podFor("execute:$ticket")
-      if (executor?.resultDigest != null) {
-        val verified = verifiedBoundArtifact(executor) ?: return true // pod abandoned
-        store.append(
-          LeadKinds.COMMIT_PROPOSED,
-          buildJsonObject {
-            put("manifestPath", verified.boundPath)
-            put("manifestDigest", verified.digest)
-          },
-          origin = ORIGIN_SUBSTRATE,
-        )
-        faults.at("after-commit-proposed")
-        return true
-      }
-    }
-
-    // Commit approved → drive the apply-commit effect exactly-once, then finish the
-    // ticket. Gate membership alone is NOT the precondition: each gate must be approved on
-    // its evidence — the plan gate on the recorded plan, the commit gate on the recorded
-    // manifest ([LeadState.approvedToCommit]) — so a release for a gate that opened out of
-    // order, or on a digest the substrate never recorded, can never fire an effect on
-    // evidence nobody approved.
-    if (lead.approvedToCommit(ticket)) {
-      val effectKey = commitEffectKey(ticket)
-      if (effectKey !in shared.intents) {
-        store.append(
-          "effect-intent",
-          buildJsonObject { put("message", commitEffectMessage(ticket, lead)) },
-          origin = ORIGIN_SUBSTRATE,
-          idempotencyKey = effectKey,
-        )
-        faults.at("after-commit-intent")
-        fireCommitEffect(ticket, lead, attempt = 1)
-        return true
-      }
-      if (effectKey !in shared.doneKeys) {
-        // An intent the lead did not journal in this run, e.g. one adopt declined while a gate
-        // was not yet approved on its evidence. It is fired now rather than at the next adopt.
-        fireCommitEffect(ticket, lead, attempt = 2)
-        return true
-      }
-      if (effectKey !in effects.seenKeys()) {
-        // The journal's done entry is not evidence the effect happened: the shared fold accepts
-        // one of any origin. The receiver's own record is, so the ticket is recorded done only
-        // once the receiver has seen the key. A receiver that lost its record fires it again.
-        // The escalation is at least once: a crash before the fire escalates again on restart.
-        escalate(
-          "effect done entry for $effectKey has no matching effect in the receiver's record — " +
-            "the effect is fired before the ticket is recorded done"
-        )
-        faults.at("after-unconfirmed-done-escalated")
-        fireCommitEffect(ticket, lead, attempt = 2)
-        return true
-      }
-      store.append(
-        LeadKinds.TICKET_DONE,
-        buildJsonObject { put("ticketRef", ticket) },
-        origin = ORIGIN_SUBSTRATE,
-      )
-      faults.at("after-ticket-done")
-      return true
-    }
-    return false
+    return workflow.mechanicalStep(lead, shared, hostServices)
   }
 
-  /** Fire [ticket]'s commit effect with the message built from the lead's own state, and journal
-   * its done entry. With [dedupEffects] set, the receiver fires a key at most once. */
-  private fun fireCommitEffect(ticket: String, lead: LeadState, attempt: Int) {
-    val key = commitEffectKey(ticket)
-    val result = effects.fire(key, commitEffectMessage(ticket, lead), dedupEffects)
+  /** Fire the effect keyed [key] with [message], and journal its done entry. With [dedupEffects]
+   * set, the receiver fires a key at most once. The fault point is named for the commit effect, the
+   * one effect the lead fires. */
+  private fun fireEffect(key: String, message: String, attempt: Int) {
+    val result = effects.fire(key, message, dedupEffects)
     faults.at("after-commit-effect")
     store.append(
       "effect-done",
@@ -1509,10 +1398,6 @@ class LeadDaemon(
     if (!hasReadableText(content)) return ArtifactResolution.Unresolved("unreadable-artifact")
     return ArtifactResolution.Resolved(content)
   }
-
-  /** A bound artifact that passed verification: the lead-owned path consumers use and the
-   * digest gates bind to. */
-  private data class VerifiedArtifact(val boundPath: String, val digest: String)
 
   /**
    * Verify a finished pod's BOUND artifact — the lead-owned immutable copy written at
@@ -2144,8 +2029,6 @@ private val TASK_REF_RE = Regex("[A-Za-z0-9:._-]+")
  * proposal cardinality nor string size can bloat the journal or grow re-fold memory. */
 private const val MAX_PROPOSALS_PER_WAKE = 16
 private const val MAX_JOURNALED_STRING = 4000
-
-private const val COMMIT_EFFECT_PREFIX = "apply-commit:"
 
 /** The waits before each retry of a gate-open announce the sink reported failed: the first retry
  * comes 30 s after the first failure, the last 30 min after the fourth. With the first attempt that
