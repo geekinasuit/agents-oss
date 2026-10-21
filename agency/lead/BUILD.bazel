@@ -41,6 +41,7 @@ kt_jvm_library(
         "OpenAiCompatCognition.kt",
         "PodSeam.kt",
         "TicketWorkflow.kt",
+        "Workflow.kt",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -163,6 +164,21 @@ kt_jvm_test(
     associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.DeadlinedReadsTest",
     deps = ["@maven//:junit_junit"],
+)
+
+# Each lead kind is folded by exactly one of the host and the ticket workflow, and a workflow whose
+# kinds would overlap the host's is refused. associates (not deps) on :lead, since the kind sets and
+# the Workflow interface are internal to it.
+kt_jvm_test(
+    name = "kind_partition_test",
+    size = "small",
+    srcs = ["KindPartitionTest.kt"],
+    associates = [":lead"],
+    test_class = "com.geekinasuit.agency.lead.KindPartitionTest",
+    deps = [
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+    ],
 )
 
 kt_jvm_test(

@@ -1,13 +1,17 @@
 package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.shared.journal.JournalEntry
+import com.geekinasuit.agency.shared.journal.JournalState
 import com.geekinasuit.agency.shared.journal.payloadObject
 import com.geekinasuit.agency.shared.journal.requireContract
 import java.io.File
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 // The ticket workflow's own declarations: the gate kinds and phases of the ticket pipeline, its
-// half of the lead fold, the ticket source, and the scripted playbook that drives it.
+// half of the lead fold, its mechanical steps, the ticket source, and the scripted playbook that
+// drives it.
 
 /** Gate kinds the ticket pipeline opens. */
 object GateKinds {
@@ -64,9 +68,11 @@ internal val TICKET_WORKFLOW_SUBSTRATE_KINDS =
     LeadKinds.TICKET_DONE,
   )
 
-/** Whether [e] ends the ticket workflow's scope: a ticket is done. The host clears its scoped
- * records on it. */
-internal fun isTicketScopeEnd(e: JournalEntry): Boolean = e.kind == LeadKinds.TICKET_DONE
+/** The ticket workflow's scope-end kinds: a ticket is done. */
+internal val TICKET_WORKFLOW_SCOPE_END_KINDS = setOf(LeadKinds.TICKET_DONE)
+
+/** Whether [e] ends the ticket workflow's scope. The host clears its scoped records on it. */
+internal fun isTicketScopeEnd(e: JournalEntry): Boolean = e.kind in TICKET_WORKFLOW_SCOPE_END_KINDS
 
 /** Well-formed ticket refs: a ticket ref is untrusted input (a fixture line today, a real
  * ticket-index row later) that flows into task refs, gate ids, and effect keys. A conservative
@@ -174,6 +180,149 @@ private fun ticketKindStep(w: TicketWorkflowState, e: JournalEntry): TicketWorkf
         commitManifestDigest = null,
       )
     else -> w
+  }
+}
+
+/** The idempotency-key prefix of a ticket's commit effect. */
+internal const val COMMIT_EFFECT_PREFIX = "apply-commit:"
+
+/**
+ * The ticket workflow: claim an offered ticket, record its plan, propose its commit, and apply the
+ * commit once both gates are approved on their evidence. Tickets come from [ticketSource].
+ */
+internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow {
+  override val substrateKinds: Set<String> = TICKET_WORKFLOW_SUBSTRATE_KINDS
+  override val scopeEndKinds: Set<String> = TICKET_WORKFLOW_SCOPE_END_KINDS
+  override val gateKinds: Set<String> = GateKinds.ALL
+
+  /** The current ticket, when it is a ref the claim accepts. */
+  override fun scopeKey(lead: LeadState): String? = lead.currentTicket?.takeIf { isClaimableTicketRef(it) }
+
+  override fun gateId(gateKind: String, scopeKey: String): String = gateIdFor(gateKind, scopeKey)
+
+  /** The idempotency key of [ticket]'s commit effect: the one intent the lead journals. */
+  fun commitEffectKey(ticket: String) = COMMIT_EFFECT_PREFIX + ticket
+
+  /** The message of [ticket]'s commit effect, built from the lead's own state: the intent row's
+   * message is not read back, since a journal the lead did not write can hold any message there. */
+  fun commitEffectMessage(ticket: String, lead: LeadState) =
+    "apply-commit ticket=$ticket manifest=${lead.commitManifestDigest}"
+
+  override fun mechanicalStep(lead: LeadState, shared: JournalState, host: HostServices): Boolean {
+    // Claim an offered ticket when idle. The done-filter repeats here even though the
+    // source receives the same set: the source is a seam an adopter implements, and a
+    // completed ticket must stay completed regardless of what any implementation re-offers.
+    if (lead.currentTicket == null) {
+      val offered = ticketSource.next(lead.doneTickets.toSet())
+      if (offered != null && offered !in lead.doneTickets) {
+        // The ticket ref is UNTRUSTED input: a fixture
+        // line today, a real ticket-index row later. It flows into this ticket's plan:/execute:
+        // task refs, gate ids, and effect keys. Validate charset + length at the claim boundary
+        // — ':' and '/' excluded so a ref can neither forge a task namespace (`plan:` prefix)
+        // nor traverse a path — so a malformed ref is escalated visibly and NOT claimed, rather
+        // than silently wedging every later plan/execute spawn against TASK_REF_RE. Returns
+        // false (not true): the pass makes no progress on a bad ref instead of re-looping on it.
+        if (!isClaimableTicketRef(offered)) {
+          host.escalate("ticket claim rejected: an offered ref of ${offered.length} chars is malformed (charset/length)")
+          return false
+        }
+        host.append(LeadKinds.TICKET_CLAIMED, buildJsonObject { put("ticketRef", offered) })
+        host.faultAt("after-claim")
+        host.append(LeadKinds.PLAN_REQUESTED, buildJsonObject {})
+        host.faultAt("after-plan-requested")
+        return true
+      }
+      return false
+    }
+    val ticket = lead.currentTicket
+
+    // Kill-recovery for the claim window: death between ticket-claimed and plan-requested
+    // leaves the phase at CLAIMED; finish the hop so the phase record stays honest.
+    if (lead.phase == TicketPhase.CLAIMED) {
+      host.append(LeadKinds.PLAN_REQUESTED, buildJsonObject {})
+      host.faultAt("after-plan-requested")
+      return true
+    }
+
+    // Record a finished planner pod's artifact as THE plan. Bind-once: the evidence
+    // is the pod's BOUND copy — the lead-owned immutable object written from the engine's
+    // single disciplined read — verified against the journaled digest before any gate
+    // binds to it. The pod's own artifactPath is provenance only and is never read here.
+    // A missing or integrity-failed bound copy abandons the pod, and the evidence-based
+    // playbook re-proposes the work.
+    if (lead.planArtifactSha == null) {
+      val planner = lead.podFor("plan:$ticket")
+      if (planner?.resultDigest != null) {
+        val verified = host.verifiedBoundArtifact(planner) ?: return true // pod abandoned
+        host.append(
+          LeadKinds.PLAN_ARTIFACT_RECORDED,
+          buildJsonObject {
+            put("path", verified.boundPath)
+            put("sha256", verified.digest)
+          },
+        )
+        host.faultAt("after-plan-recorded")
+        return true
+      }
+    }
+
+    // Propose the commit from a finished execute pod's manifest — same bound-copy rule.
+    val planApproved = lead.approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)
+    if (planApproved && lead.commitManifestDigest == null) {
+      val executor = lead.podFor("execute:$ticket")
+      if (executor?.resultDigest != null) {
+        val verified = host.verifiedBoundArtifact(executor) ?: return true // pod abandoned
+        host.append(
+          LeadKinds.COMMIT_PROPOSED,
+          buildJsonObject {
+            put("manifestPath", verified.boundPath)
+            put("manifestDigest", verified.digest)
+          },
+        )
+        host.faultAt("after-commit-proposed")
+        return true
+      }
+    }
+
+    // Commit approved → drive the apply-commit effect exactly-once, then finish the
+    // ticket. Gate membership alone is NOT the precondition: each gate must be approved on
+    // its evidence — the plan gate on the recorded plan, the commit gate on the recorded
+    // manifest ([LeadState.approvedToCommit]) — so a release for a gate that opened out of
+    // order, or on a digest the substrate never recorded, can never fire an effect on
+    // evidence nobody approved.
+    if (lead.approvedToCommit(ticket)) {
+      val effectKey = commitEffectKey(ticket)
+      val message = commitEffectMessage(ticket, lead)
+      if (effectKey !in shared.intents) {
+        host.append("effect-intent", buildJsonObject { put("message", message) }, idempotencyKey = effectKey)
+        host.faultAt("after-commit-intent")
+        host.fireEffect(effectKey, message, attempt = 1)
+        return true
+      }
+      if (effectKey !in shared.doneKeys) {
+        // An intent the lead did not journal in this run, e.g. one adopt declined while a gate
+        // was not yet approved on its evidence. It is fired now rather than at the next adopt.
+        host.fireEffect(effectKey, message, attempt = 2)
+        return true
+      }
+      if (!host.effectSeen(effectKey)) {
+        // The journal's done entry is not evidence the effect happened: the shared fold accepts
+        // one of any origin. The receiver's own record is, so the ticket is recorded done only
+        // once the receiver has seen the key. A receiver that lost its record fires it again.
+        // The escalation is at least once: a crash before the fire escalates again on restart.
+        host.escalate(
+          "effect done entry for $effectKey has no matching effect in the receiver's record — " +
+            "the effect is fired before the ticket is recorded done"
+        )
+        host.faultAt("after-unconfirmed-done-escalated")
+        host.fireEffect(effectKey, message, attempt = 2)
+        return true
+      }
+      host.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", ticket) })
+      host.faultAt("after-ticket-done")
+      return true
+    }
+    return false
   }
 }
 
