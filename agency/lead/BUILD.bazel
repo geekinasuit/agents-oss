@@ -193,6 +193,37 @@ kt_jvm_library(
     ],
 )
 
+# Pins the exact journal the lead writes across the scripted walk and every kill point, under both
+# auths, against golden files generated before the host/workflow split. The goldens arrive as
+# runfiles located through `env`, and so a native java_test, for the reason lead_scenario_test
+# gives below.
+kt_jvm_library(
+    name = "golden_journal_test_lib",
+    testonly = True,
+    srcs = ["GoldenJournalTest.kt"],
+    deps = [
+        ":ceremony_test_support",
+        ":lead",
+        "//agency/pod",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+java_test(
+    name = "golden_journal_test",
+    size = "medium",
+    data = glob(["testdata/golden-journals/*.txt"]),
+    env = {"GOLDEN_INDEX": "$(rlocationpath testdata/golden-journals/INDEX.txt)"},
+    test_class = "com.geekinasuit.agency.lead.GoldenJournalTest",
+    runtime_deps = [
+        ":golden_journal_test_lib",
+        "@maven//:org_xerial_sqlite_jdbc",
+    ],
+)
+
 # Folds a seeded corpus of journals with the pre-split fold (LegacyLeadFold.kt, frozen verbatim)
 # and with the host/workflow split fold, and asserts they agree on every one, failures included.
 kt_jvm_test(

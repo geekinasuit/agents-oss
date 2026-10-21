@@ -1,0 +1,37 @@
+volatile session fake-session-[0-9a-f-]{36}
+volatile pod pod-[0-9a-f]{8}
+volatile nonce "nonce":"([^"]+)"
+scenario deny-all-happy
+scenario ceremony-happy
+scenario deny-all-kill-mid-adopt
+scenario deny-all-kill-after-redrive
+scenario deny-all-kill-after-claim
+scenario deny-all-kill-after-plan-requested
+scenario deny-all-kill-after-spawn-intended
+scenario deny-all-kill-between-spawn-and-journal
+scenario deny-all-kill-after-pod-spawned
+scenario deny-all-kill-after-pod-result
+scenario deny-all-kill-after-plan-recorded
+scenario deny-all-kill-after-gate-opened-plan-approval
+scenario deny-all-kill-after-gate-announced
+scenario deny-all-kill-after-commit-proposed
+scenario deny-all-kill-after-gate-opened-commit-approval
+scenario deny-all-kill-after-commit-intent
+scenario deny-all-kill-after-commit-effect
+scenario deny-all-kill-after-ticket-done
+scenario ceremony-kill-mid-adopt
+scenario ceremony-kill-after-redrive
+scenario ceremony-kill-after-claim
+scenario ceremony-kill-after-plan-requested
+scenario ceremony-kill-after-spawn-intended
+scenario ceremony-kill-between-spawn-and-journal
+scenario ceremony-kill-after-pod-spawned
+scenario ceremony-kill-after-pod-result
+scenario ceremony-kill-after-plan-recorded
+scenario ceremony-kill-after-gate-opened-plan-approval
+scenario ceremony-kill-after-gate-announced
+scenario ceremony-kill-after-commit-proposed
+scenario ceremony-kill-after-gate-opened-commit-approval
+scenario ceremony-kill-after-commit-intent
+scenario ceremony-kill-after-commit-effect
+scenario ceremony-kill-after-ticket-done
