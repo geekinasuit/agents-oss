@@ -286,6 +286,25 @@ kt_jvm_test(
     ],
 )
 
+# A cognition turn's gate-open proposals that repeat a gate: each gate id is acted on at most
+# once per turn, refused or opened, and an open gate is never opened again or escalated.
+kt_jvm_test(
+    name = "gate_open_batch_test",
+    size = "small",
+    srcs = ["GateOpenBatchTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.GateOpenBatchTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":ceremony_test_support",
+        ":lead",
+        "//agency/pod",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
 kt_jvm_test(
     name = "nonce_mint_test",
     size = "small",
