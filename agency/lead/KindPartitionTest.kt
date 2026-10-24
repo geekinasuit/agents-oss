@@ -76,7 +76,18 @@ class KindPartitionTest {
 
     override fun scopeKey(lead: LeadState): String? = null
 
+    override fun currentScopeKey(lead: LeadState): String? = null
+
     override fun gateId(gateKind: String, scopeKey: String) = "$gateKind:$scopeKey"
+
+    override fun admitGateOpen(gateKind: String, payloadDigest: String, gateId: String, lead: LeadState) =
+      GateOpenDecision.Refuse("fake")
+
+    override fun gateArtifactPath(gateKind: String, lead: LeadState): String? = null
+
+    override fun redriveMessage(key: String, lead: LeadState): String? = null
+
+    override fun redriveDeclineReason(key: String): String? = null
 
     override fun mechanicalStep(lead: LeadState, shared: JournalState, host: HostServices) = false
   }

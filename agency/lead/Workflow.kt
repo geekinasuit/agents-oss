@@ -28,8 +28,32 @@ internal interface Workflow {
    * gates under ids derived from this key. */
   fun scopeKey(lead: LeadState): String?
 
+  /** The current scope's key as the fold holds it, whether or not it is well-formed, or null when
+   * no scope is current. A proposal is executed only within a current scope. Unlike [scopeKey] it
+   * does not check the key's form. For a workflow whose fold refuses a malformed key, as the ticket
+   * workflow's claim does, the two agree on every state the fold produces; they differ only on a
+   * state built some other way. */
+  fun currentScopeKey(lead: LeadState): String?
+
   /** The id of the gate of [gateKind] in the scope keyed [scopeKey]. */
   fun gateId(gateKind: String, scopeKey: String): String
+
+  /** Whether the host may open [gateId], of [gateKind], on [payloadDigest], as cognition proposed:
+   * the digest it opens on, or the reason it refuses. The host has already skipped a gate that is
+   * open, or that this turn has handled. */
+  fun admitGateOpen(gateKind: String, payloadDigest: String, gateId: String, lead: LeadState): GateOpenDecision
+
+  /** The bound copy an operator reads to decide a gate of [gateKind]: the evidence the gate opened
+   * on, or null when the workflow recorded none for that kind. */
+  fun gateArtifactPath(gateKind: String, lead: LeadState): String?
+
+  /** The message to fire a pending effect keyed [key] with again, or null when the workflow would
+   * not journal that effect now. The message comes from [lead], never from the intent row. */
+  fun redriveMessage(key: String, lead: LeadState): String?
+
+  /** Why the workflow declines to fire a pending effect keyed [key] again, when [key] is one of the
+   * workflow's own effect keys, or null when it is not, and the host says so in its own words. */
+  fun redriveDeclineReason(key: String): String?
 
   /** Advance the workflow's own pipeline by one mechanical step, one that needs no judgment, after
    * the host's own recovery found nothing to do. Returns true if the step made progress, so the
@@ -59,6 +83,15 @@ internal interface HostServices {
   /** [pod]'s bound artifact, verified against its journaled digest, or null when the copy is
    * missing or disturbed, in which case the pod has been abandoned. */
   fun verifiedBoundArtifact(pod: PodRecord): VerifiedArtifact?
+}
+
+/** The workflow's answer to a proposed gate-open ([Workflow.admitGateOpen]). */
+internal sealed interface GateOpenDecision {
+  /** Open the gate on [digest], the substrate's evidence for its kind. */
+  data class Open(val digest: String) : GateOpenDecision
+
+  /** Do not open it; escalate [reason]. */
+  data class Refuse(val reason: String) : GateOpenDecision
 }
 
 /** A bound artifact that passed verification: the lead-owned path consumers use and the

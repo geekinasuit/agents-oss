@@ -184,7 +184,7 @@ private fun ticketKindStep(w: TicketWorkflowState, e: JournalEntry): TicketWorkf
 }
 
 /** The idempotency-key prefix of a ticket's commit effect. */
-internal const val COMMIT_EFFECT_PREFIX = "apply-commit:"
+private const val COMMIT_EFFECT_PREFIX = "apply-commit:"
 
 /**
  * The ticket workflow: claim an offered ticket, record its plan, propose its commit, and apply the
@@ -198,14 +198,61 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
   /** The current ticket, when it is a ref the claim accepts. */
   override fun scopeKey(lead: LeadState): String? = lead.currentTicket?.takeIf { isClaimableTicketRef(it) }
 
+  override fun currentScopeKey(lead: LeadState): String? = lead.currentTicket
+
   override fun gateId(gateKind: String, scopeKey: String): String = gateIdFor(gateKind, scopeKey)
 
+  /** A gate opens only on the digest the substrate recorded for its kind: cognition cannot re-bind
+   * approval to evidence that does not exist. A refused kind or digest is the proposal's own text,
+   * so the reason gives its length, never its content. */
+  override fun admitGateOpen(
+    gateKind: String,
+    payloadDigest: String,
+    gateId: String,
+    lead: LeadState,
+  ): GateOpenDecision {
+    val expected = lead.evidenceDigest(gateKind)
+    if (expected != null && payloadDigest == expected) return GateOpenDecision.Open(expected)
+    return GateOpenDecision.Refuse(
+      if (gateKind !in GateKinds.ALL)
+        "gate-open rejected: a proposed gate kind of ${gateKind.length} chars is not one the lead opens"
+      else
+        "gate-open rejected for $gateId: a proposed digest of ${payloadDigest.length} chars " +
+          "does not match substrate evidence ${expected?.take(16) ?: "(none recorded)"}"
+    )
+  }
+
+  /** The recorded plan for the plan gate, the recorded manifest for the commit gate. */
+  override fun gateArtifactPath(gateKind: String, lead: LeadState): String? =
+    when (gateKind) {
+      GateKinds.PLAN_APPROVAL -> lead.planArtifactPath
+      GateKinds.COMMIT_APPROVAL -> lead.commitManifestPath
+      else -> null
+    }
+
+  /** The current ticket's commit effect, once both its gates are approved on their evidence
+   * ([LeadState.approvedToCommit]): the one intent the lead journals, and only then. */
+  override fun redriveMessage(key: String, lead: LeadState): String? {
+    val ticket = lead.currentTicket ?: return null
+    return if (key == commitEffectKey(ticket) && lead.approvedToCommit(ticket)) commitEffectMessage(ticket, lead)
+    else null
+  }
+
+  override fun redriveDeclineReason(key: String): String? {
+    val keyTicket = key.removePrefix(COMMIT_EFFECT_PREFIX)
+    return if (key.startsWith(COMMIT_EFFECT_PREFIX) && isClaimableTicketRef(keyTicket))
+      "effect re-drive declined for $key: the lead journals a ticket's commit effect only " +
+        "while it is the current ticket, with its commit and plan gates approved on their " +
+        "recorded evidence, and that does not hold — the effect is not fired"
+    else null
+  }
+
   /** The idempotency key of [ticket]'s commit effect: the one intent the lead journals. */
-  fun commitEffectKey(ticket: String) = COMMIT_EFFECT_PREFIX + ticket
+  private fun commitEffectKey(ticket: String) = COMMIT_EFFECT_PREFIX + ticket
 
   /** The message of [ticket]'s commit effect, built from the lead's own state: the intent row's
    * message is not read back, since a journal the lead did not write can hold any message there. */
-  fun commitEffectMessage(ticket: String, lead: LeadState) =
+  private fun commitEffectMessage(ticket: String, lead: LeadState) =
     "apply-commit ticket=$ticket manifest=${lead.commitManifestDigest}"
 
   override fun mechanicalStep(lead: LeadState, shared: JournalState, host: HostServices): Boolean {

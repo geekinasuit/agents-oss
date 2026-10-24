@@ -517,23 +517,18 @@ class LeadDaemon(
    * commit arm fires it.
    */
   private fun redrivePendingEffects(shared: JournalState, lead: LeadState) {
-    val ticket = lead.currentTicket
     for (key in shared.pendingEffectKeys) {
-      if (ticket != null && key == workflow.commitEffectKey(ticket) && lead.approvedToCommit(ticket)) {
-        fireEffect(key, workflow.commitEffectMessage(ticket, lead), attempt = 2)
+      val message = workflow.redriveMessage(key, lead)
+      if (message != null) {
+        fireEffect(key, message, attempt = 2)
         continue
       }
       val digest = sha256HexBytes(key.toByteArray(Charsets.UTF_8))
       if (digest in lead.declinedEffects) continue
-      val keyTicket = key.removePrefix(COMMIT_EFFECT_PREFIX)
       val reason =
-        if (key.startsWith(COMMIT_EFFECT_PREFIX) && isClaimableTicketRef(keyTicket))
-          "effect re-drive declined for $key: the lead journals a ticket's commit effect only " +
-            "while it is the current ticket, with its commit and plan gates approved on their " +
-            "recorded evidence, and that does not hold — the effect is not fired"
-        else
-          "effect re-drive declined for a key of ${key.length} chars: it is not a key the lead " +
-            "journals — the effect is not fired"
+        workflow.redriveDeclineReason(key)
+          ?: ("effect re-drive declined for a key of ${key.length} chars: it is not a key the lead " +
+            "journals — the effect is not fired")
       store.append(
         LeadKinds.ESCALATED,
         buildJsonObject {
@@ -1356,12 +1351,7 @@ class LeadDaemon(
     payloadDigest: String,
     lead: LeadState,
   ): ArtifactResolution {
-    val path =
-      when (gateKind) {
-        GateKinds.PLAN_APPROVAL -> lead.planArtifactPath
-        GateKinds.COMMIT_APPROVAL -> lead.commitManifestPath
-        else -> null
-      } ?: return ArtifactResolution.Unresolved("no-bound-path")
+    val path = workflow.gateArtifactPath(gateKind, lead) ?: return ArtifactResolution.Unresolved("no-bound-path")
     val bytes =
       when (val read = readBoundCopy(path, artifactReadCap, "before-gate-artifact-read")) {
         is BoundRead.Bytes -> read.bytes
@@ -1597,9 +1587,11 @@ class LeadDaemon(
    * Execute cognition's proposals — treating them as UNTRUSTED input, not commands.
    * Cognition supplies judgment (when to gate, what task to run); the substrate holds the
    * evidence and enforces it here:
-   *  - a gate opens only on the digest the SUBSTRATE recorded for that gate kind
-   *    (cognition cannot re-bind approval to evidence that does not exist — a mismatch is
-   *    escalated visibly, never opened);
+   *  - a gate opens only on the digest the workflow admits for it ([Workflow.admitGateOpen]):
+   *    for the ticket workflow, the digest the substrate recorded for that gate kind, so
+   *    cognition cannot re-bind approval to evidence that does not exist — a mismatch is
+   *    escalated visibly, never opened. The host opens, mints and announces on what the
+   *    workflow admits, and checks no evidence itself;
    *  - a task ref must be well-formed and its artifact path must resolve inside the
    *    lead's artifacts directory (no traversal via model-controlled names);
    *  - a task whose evidence is already recorded is refused a fresh pod (re-proposing
@@ -1627,20 +1619,17 @@ class LeadDaemon(
     for (p in out.proposals.take(MAX_PROPOSALS_PER_WAKE)) {
       when (p) {
         is Proposal.ProposeGateOpen -> {
-          if (ticket == null) continue
-          val gateId = gateIdFor(p.gateKind, ticket)
+          val scope = workflow.currentScopeKey(leadAtDecision) ?: continue
+          val gateId = workflow.gateId(p.gateKind, scope)
           if (gateId in leadAtDecision.openGates || !seenGateIds.add(gateId)) continue
-          val expected = leadAtDecision.evidenceDigest(p.gateKind)
-          if (expected == null || p.payloadDigest != expected) {
-            escalate(
-              if (p.gateKind !in GateKinds.ALL)
-                "gate-open rejected: a proposed gate kind of ${p.gateKind.length} chars is not one the lead opens"
-              else
-                "gate-open rejected for $gateId: a proposed digest of ${p.payloadDigest.length} chars " +
-                  "does not match substrate evidence ${expected?.take(16) ?: "(none recorded)"}"
-            )
-            continue
-          }
+          val expected =
+            when (val decision = workflow.admitGateOpen(p.gateKind, p.payloadDigest, gateId, leadAtDecision)) {
+              is GateOpenDecision.Refuse -> {
+                escalate(decision.reason)
+                continue
+              }
+              is GateOpenDecision.Open -> decision.digest
+            }
           store.append(
             LeadKinds.GATE_OPENED,
             buildJsonObject {
