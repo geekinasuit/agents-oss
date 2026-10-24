@@ -418,6 +418,21 @@ data class LeadState(
   fun evidenceDigest(gateKind: String): String? =
     recordedEvidence(gateKind)?.takeIf { SHA256_HEX_RE.matches(it) }
 
+  /** Why a gate of [gateKind] open on [digest] is not open on the substrate's evidence for that kind,
+   * or null when it is. Evidence must be recorded for the kind in the form the substrate records it
+   * ([evidenceDigest]), and [digest] must be that evidence. A digest that fails the check came from
+   * a journal the lead did not write, so the reason gives its length, never its text. */
+  internal fun evidenceMismatch(gateKind: String, digest: String): String? {
+    val evidence = evidenceDigest(gateKind)
+    return when {
+      recordedEvidence(gateKind) == null -> "no evidence is recorded for its kind"
+      evidence == null -> "the evidence recorded for its kind is not in the form the substrate records"
+      digest != evidence ->
+        "its digest of ${digest.length} chars is not the recorded evidence ${evidence.take(16)}"
+      else -> null
+    }
+  }
+
   /** Whether the [gateKind] gate of [ticket] is approved on the digest it is open on now, and that
    * digest is the substrate's evidence for its kind ([evidenceDigest]). Everything that decides on
    * an approval asks this, not [approvedOnCurrentDigest] alone: the daemon before it acts, and

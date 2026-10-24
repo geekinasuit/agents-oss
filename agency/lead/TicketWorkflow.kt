@@ -222,6 +222,105 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
     )
   }
 
+  /** taskRefs whose redundant-respawn refusal has already been escalated, process-scoped like the
+   * host's attempt cap: the refusal itself replays on every proposing wake, deterministically from
+   * folded evidence alone; the row announcing that the strategy keeps re-proposing completed work
+   * is appended once per taskRef. Loop-thread only. */
+  private val redundantSpawnEscalated = mutableSetOf<String>()
+
+  override fun admitPodSpawn(taskRef: String, lead: LeadState, turn: ProposalTurn, host: HostServices): Boolean {
+    val ticket = lead.currentTicket ?: return false
+    // Bind the spawn to the CURRENT ticket and a known kind:
+    // cognition decides WHEN to run a pod, never an arbitrary task namespace. The only
+    // legal refs are this ticket's plan/execute; a foreign ticket, an unknown kind, or
+    // a traversal attempt is escalated, never spawned — so untrusted judgment cannot
+    // amplify into unbounded distinct spawns.
+    if (taskRef != "plan:$ticket" && taskRef != "execute:$ticket") {
+      host.escalate(
+        "pod-spawn rejected: a proposed taskRef of ${taskRef.length} chars is not plan:/execute: " +
+          "for the current ticket '$ticket'"
+      )
+      return false
+    }
+    // Pipeline ordering has teeth: an execute pod
+    // is real work ON the plan, so it may launch only AFTER the plan-approval gate is
+    // approved on the digest it is CURRENTLY open on, and that digest is the recorded
+    // plan's. The mechanical pass already refuses to PROPOSE a commit before plan
+    // approval; without this, cognition — by bug or prompt injection — could still get the
+    // substrate to LAUNCH the execute session on an unapproved (or unrecorded) plan, and
+    // the human's plan gate would gate nothing. Epoch-precise, not a bare `in
+    // releasedGates`: a plan re-opened on a new digest is a fresh, unapproved surface, and a
+    // release on a digest that is not the recorded plan approves no plan the executor would
+    // run. Escalated, never spawned.
+    //
+    // A plan gate open on a digest that is not the recorded plan gets its own refusal, which
+    // names the gate: the plan may already have been approved on its recorded digest before
+    // the gate was re-opened, so asking for its approval would point the operator at the wrong
+    // fault. That refusal is escalated once per gate and digest, under the record the
+    // mechanical pass keeps ([LeadState.escalatedStalls]), so a strategy that proposes the
+    // executor on every wake does not escalate on every wake. The mechanical pass has already
+    // escalated such a gate once it is released on that digest. Until a plan is recorded, the
+    // gate's digest may yet be the plan's, and the refusal asks for the plan's approval.
+    if (taskRef == "execute:$ticket" && !lead.approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)) {
+      val planGate = lead.openGates[gateIdFor(GateKinds.PLAN_APPROVAL, ticket)]
+      val planRecorded = lead.recordedEvidence(GateKinds.PLAN_APPROVAL) != null
+      val offEvidence =
+        if (planGate == null || !planRecorded) null
+        else lead.evidenceMismatch(GateKinds.PLAN_APPROVAL, planGate.payloadDigest)
+      if (planGate == null || offEvidence == null) {
+        host.escalate(
+          "pod-spawn rejected: execute pod for '$ticket' proposed before the plan-approval " +
+            "gate is approved on the recorded plan — the plan must be approved before " +
+            "execution runs"
+        )
+      } else if (
+        planGate.payloadDigest !in lead.escalatedStalls[planGate.gateId].orEmpty() &&
+          turn.escalatedOffEvidence.add(planGate.gateId)
+      ) {
+        host.escalateGate(
+          planGate,
+          "pod-spawn rejected: execute pod for '$ticket' proposed while ${planGate.gateId} is " +
+            "open off its evidence: $offEvidence — no approval on that digest lets the " +
+            "executor run",
+        )
+      }
+      return false
+    }
+    if (lead.activePods.any { it.taskRef == taskRef }) return false
+    if (!turn.seenTaskRefs.add(taskRef)) return false
+    // Success-side twin of the host's failure cap: a task whose EVIDENCE is already
+    // recorded gets no fresh pod. Successful completions never count toward that cap
+    // and clear the active-pod guard, and a completion is itself
+    // the next wake — so without this check a strategy re-proposing the same legal
+    // ref would buy one real pod (and its real model spend) per wake,
+    // self-sustaining through the wait-on-human gate phases, with nothing
+    // escalated. Refused on every wake, escalated once per taskRef per process
+    // (see [redundantSpawnEscalated]). No legitimate replan is refused here: no
+    // fold transition clears plan/manifest evidence within a ticket cycle
+    // (TICKET_DONE resets the whole cycle), so a replan mechanism, if one ever
+    // exists, must introduce a cleared-evidence transition — which re-legalizes
+    // the spawn here by itself.
+    // The namespace guard above admits exactly plan:/execute:, so the else branch
+    // IS execute:. Deliberately not an exhaustive `when` with `else -> null`: if
+    // the legal namespace is ever widened without this selector keeping pace, a
+    // new kind inherits the manifest-evidence refusal (escalated, visible) rather
+    // than skipping a spend guard silently — over-refusal is the recoverable
+    // failure direction here.
+    val recorded = if (taskRef == "plan:$ticket") lead.planArtifactSha else lead.commitManifestDigest
+    if (recorded != null) {
+      if (redundantSpawnEscalated.add(taskRef)) {
+        host.escalate(
+          "pod-spawn refused for taskRef '${taskRef.take(80)}': the evidence it " +
+            "exists to produce is already recorded (${recorded.take(16)}) — completed " +
+            "work is not re-run, and further redundant proposals are refused without " +
+            "a repeat escalation"
+        )
+      }
+      return false
+    }
+    return true
+  }
+
   /** The recorded plan for the plan gate, the recorded manifest for the commit gate. */
   override fun gateArtifactPath(gateKind: String, lead: LeadState): String? =
     when (gateKind) {
