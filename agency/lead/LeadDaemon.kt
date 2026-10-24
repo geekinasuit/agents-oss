@@ -144,6 +144,8 @@ class LeadDaemon(
 
       override fun escalate(reason: String) = this@LeadDaemon.escalate(reason)
 
+      override fun escalateGate(gate: OpenGate, reason: String) = this@LeadDaemon.escalateGate(gate, reason)
+
       override fun fireEffect(key: String, message: String, attempt: Int) =
         this@LeadDaemon.fireEffect(key, message, attempt)
 
@@ -246,13 +248,6 @@ class LeadDaemon(
    * identical row per wake would accrete journal (and every future re-fold's memory)
    * without adding information. */
   private val capRefusalsEscalated = mutableSetOf<String>()
-
-  /** taskRefs whose redundant-respawn refusal has already been escalated — the
-   * success-side sibling of [capRefusalsEscalated], same scope and same reasoning: the
-   * refusal itself replays on every proposing wake, deterministically from folded
-   * evidence alone; the row announcing that the strategy keeps re-proposing completed
-   * work is appended once per taskRef. Loop-thread only. */
-  private val redundantSpawnEscalated = mutableSetOf<String>()
 
   // ---- external input surface (safe from any thread) ----
 
@@ -945,7 +940,7 @@ class LeadDaemon(
         if (!lead.approvedOnCurrentDigest(gate.gateId)) continue
         if (gate.payloadDigest in lead.escalatedStalls[gate.gateId].orEmpty()) continue
         if (lead.recordedEvidence(kind) == null) continue
-        val mismatch = evidenceMismatch(kind, gate.payloadDigest, lead) ?: continue
+        val mismatch = lead.evidenceMismatch(kind, gate.payloadDigest) ?: continue
         escalateGate(
           gate,
           "gate released off its evidence for ${gate.gateId}: $mismatch — the lead does not act on " +
@@ -1015,27 +1010,12 @@ class LeadDaemon(
     return nonce
   }
 
-  /** Why a gate of [gateKind] open on [digest] is not open on the substrate's evidence for that kind,
-   * or null when it is. Evidence must be recorded for the kind in the form the substrate records it
-   * ([LeadState.evidenceDigest]), and [digest] must be that evidence. A digest that fails the check
-   * came from a journal the lead did not write, so the reason gives its length, never its text. */
-  private fun evidenceMismatch(gateKind: String, digest: String, lead: LeadState): String? {
-    val evidence = lead.evidenceDigest(gateKind)
-    return when {
-      lead.recordedEvidence(gateKind) == null -> "no evidence is recorded for its kind"
-      evidence == null -> "the evidence recorded for its kind is not in the form the substrate records"
-      digest != evidence ->
-        "its digest of ${digest.length} chars is not the recorded evidence ${evidence.take(16)}"
-      else -> null
-    }
-  }
-
   /** Why the mechanical pass's mint issues [gate] no nonce, or null when it issues one. The gate must
-   * be open on the evidence for its kind ([evidenceMismatch]), and no nonce may have been issued on
+   * be open on the evidence for its kind ([LeadState.evidenceMismatch]), and no nonce may have been issued on
    * that digest before: a voided one stays withdrawn, and a spent one's release already decided the
    * gate on that digest. */
   private fun mintRefusal(gate: OpenGate, lead: LeadState): String? {
-    val mismatch = evidenceMismatch(gate.gateKind, gate.payloadDigest, lead)
+    val mismatch = lead.evidenceMismatch(gate.gateKind, gate.payloadDigest)
     return when {
       mismatch != null -> mismatch
       lead.issuedNonces.values.any { it.gateId == gate.gateId && it.payloadDigest == gate.payloadDigest } ->
@@ -1601,12 +1581,8 @@ class LeadDaemon(
    *    see intra-batch repeats).
    */
   private fun executeProposals(out: CognitionOutput, leadAtDecision: LeadState) {
-    val ticket = leadAtDecision.currentTicket
     val seenGateIds = mutableSetOf<String>()
-    val seenTaskRefs = mutableSetOf<String>()
-    // Gates this batch escalated as open off their evidence: the record of such an escalation is in
-    // the journal, which [leadAtDecision] was folded from before the batch ran.
-    val escalatedOffEvidence = mutableSetOf<String>()
+    val turn = ProposalTurn()
     // Cardinality guard: a wake executes a bounded number of proposals,
     // so a prompt-injected / buggy strategy cannot amplify one output into unbounded journal
     // writes. The drop is escalated, never silent.
@@ -1661,173 +1637,8 @@ class LeadDaemon(
           }
         }
         is Proposal.ProposePodSpawn -> {
-          if (ticket == null) continue
-          // Bind the spawn to the CURRENT ticket and a known kind:
-          // cognition decides WHEN to run a pod, never an arbitrary task namespace. The only
-          // legal refs are this ticket's plan/execute; a foreign ticket, an unknown kind, or
-          // a traversal attempt is escalated, never spawned — so untrusted judgment cannot
-          // amplify into unbounded distinct spawns.
-          if (p.taskRef != "plan:$ticket" && p.taskRef != "execute:$ticket") {
-            escalate(
-              "pod-spawn rejected: a proposed taskRef of ${p.taskRef.length} chars is not plan:/execute: " +
-                "for the current ticket '$ticket'"
-            )
-            continue
-          }
-          // Pipeline ordering has teeth: an execute pod
-          // is real work ON the plan, so it may launch only AFTER the plan-approval gate is
-          // approved on the digest it is CURRENTLY open on, and that digest is the recorded
-          // plan's. The mechanical pass already refuses to PROPOSE a commit before plan
-          // approval; without this, cognition — by bug or prompt injection — could still get the
-          // substrate to LAUNCH the execute session on an unapproved (or unrecorded) plan, and
-          // the human's plan gate would gate nothing. Epoch-precise, not a bare `in
-          // releasedGates`: a plan re-opened on a new digest is a fresh, unapproved surface, and a
-          // release on a digest that is not the recorded plan approves no plan the executor would
-          // run. Escalated, never spawned.
-          //
-          // A plan gate open on a digest that is not the recorded plan gets its own refusal, which
-          // names the gate: the plan may already have been approved on its recorded digest before
-          // the gate was re-opened, so asking for its approval would point the operator at the wrong
-          // fault. That refusal is escalated once per gate and digest, under the record the
-          // mechanical pass keeps ([LeadState.escalatedStalls]), so a strategy that proposes the
-          // executor on every wake does not escalate on every wake. The mechanical pass has already
-          // escalated such a gate once it is released on that digest. Until a plan is recorded, the
-          // gate's digest may yet be the plan's, and the refusal asks for the plan's approval.
-          if (
-            p.taskRef == "execute:$ticket" &&
-              !leadAtDecision.approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)
-          ) {
-            val planGate = leadAtDecision.openGates[gateIdFor(GateKinds.PLAN_APPROVAL, ticket)]
-            val planRecorded = leadAtDecision.recordedEvidence(GateKinds.PLAN_APPROVAL) != null
-            val offEvidence =
-              if (planGate == null || !planRecorded) null
-              else evidenceMismatch(GateKinds.PLAN_APPROVAL, planGate.payloadDigest, leadAtDecision)
-            if (planGate == null || offEvidence == null) {
-              escalate(
-                "pod-spawn rejected: execute pod for '$ticket' proposed before the plan-approval " +
-                  "gate is approved on the recorded plan — the plan must be approved before " +
-                  "execution runs"
-              )
-            } else if (
-              planGate.payloadDigest !in leadAtDecision.escalatedStalls[planGate.gateId].orEmpty() &&
-                escalatedOffEvidence.add(planGate.gateId)
-            ) {
-              escalateGate(
-                planGate,
-                "pod-spawn rejected: execute pod for '$ticket' proposed while ${planGate.gateId} is " +
-                  "open off its evidence: $offEvidence — no approval on that digest lets the " +
-                  "executor run",
-              )
-            }
-            continue
-          }
-          if (leadAtDecision.activePods.any { it.taskRef == p.taskRef }) continue
-          if (!seenTaskRefs.add(p.taskRef)) continue
-          // Success-side twin of the failure cap below: a task whose EVIDENCE is already
-          // recorded gets no fresh pod. Successful completions never touch
-          // [failureAbandons] and clear the active-pod guard, and a completion is itself
-          // the next wake — so without this check a strategy re-proposing the same legal
-          // ref would buy one real pod (and its real model spend) per wake,
-          // self-sustaining through the wait-on-human gate phases, with nothing
-          // escalated. Refused on every wake, escalated once per taskRef per process
-          // (see [redundantSpawnEscalated]). No legitimate replan is refused here: no
-          // fold transition clears plan/manifest evidence within a ticket cycle
-          // (TICKET_DONE resets the whole cycle), so a replan mechanism, if one ever
-          // exists, must introduce a cleared-evidence transition — which re-legalizes
-          // the spawn here by itself.
-          // The namespace guard above admits exactly plan:/execute:, so the else branch
-          // IS execute:. Deliberately not an exhaustive `when` with `else -> null`: if
-          // the legal namespace is ever widened without this selector keeping pace, a
-          // new kind inherits the manifest-evidence refusal (escalated, visible) rather
-          // than skipping a spend guard silently — over-refusal is the recoverable
-          // failure direction here.
-          val recorded =
-            if (p.taskRef == "plan:$ticket") leadAtDecision.planArtifactSha
-            else leadAtDecision.commitManifestDigest
-          if (recorded != null) {
-            if (redundantSpawnEscalated.add(p.taskRef)) {
-              escalate(
-                "pod-spawn refused for taskRef '${p.taskRef.take(80)}': the evidence it " +
-                  "exists to produce is already recorded (${recorded.take(16)}) — completed " +
-                  "work is not re-run, and further redundant proposals are refused without " +
-                  "a repeat escalation"
-              )
-            }
-            continue
-          }
-          // Lead-tier attempt cap (see [failureAbandons]): a taskRef that keeps producing
-          // failure-abandons stops getting fresh pods — refused on every wake, escalated
-          // once per taskRef (see [capRefusalsEscalated]) — so the pipeline wedges VISIBLY
-          // instead of burning spawns (and real model spend) in a re-propose livelock
-          // against a persistent fault.
-          val attempts = failureAbandons[p.taskRef] ?: 0
-          if (attempts >= MAX_TASK_ATTEMPTS_PER_PROCESS) {
-            if (capRefusalsEscalated.add(p.taskRef)) {
-              escalate(
-                "pod-spawn refused for taskRef '${p.taskRef.take(80)}': $attempts failed " +
-                  "attempts this process (cap $MAX_TASK_ATTEMPTS_PER_PROCESS) — not " +
-                  "re-proposing; fix the fault and restart the lead"
-              )
-            }
-            continue
-          }
-          // Defense-in-depth backstops the now-ticket-bound ref: a ticket that itself carried
-          // odd characters would still be caught by the charset + canonical-containment checks.
-          if (!TASK_REF_RE.matches(p.taskRef)) {
-            escalate("pod-spawn rejected: malformed taskRef '${p.taskRef.take(80)}'")
-            continue
-          }
-          val artifactsDir = File(workdir, "artifacts").canonicalFile
-          val artifactFile = File(artifactsDir, p.taskRef.replace(':', '-')).canonicalFile
-          if (!artifactFile.path.startsWith(artifactsDir.path + File.separator)) {
-            escalate("pod-spawn rejected: artifact path escapes the artifacts dir for taskRef '${p.taskRef.take(80)}'")
-            continue
-          }
-          // The fail-closed fence, LAST before the substrate commits to the
-          // launch: a fenced profile (transport=acp, provider≠claude, no egress-enforcement
-          // capability — and none is constructible today) THROWS here, before the intent is
-          // journaled and before any side effect. A throw is deliberate, not an escalation:
-          // a fenced profile is a configuration fault, and the daemon must stop (the loop's
-          // wake-fault path journals it and halts for a supervisor), never proceed.
-          podSpec.requireSpawnable()
-          // Intent BEFORE the side-effect: a pod launch is a side-effect
-          // on the world, so it obeys the same intent-before-effect discipline as an effect
-          // fire. Journaling POD_SPAWN_INTENDED first means a kill before POD_SPAWNED leaves a
-          // RECORDED orphan (adopt abandons it and re-proposes), never an invisible one that a
-          // fresh re-fold would wrongly report as "nothing happened".
-          store.append(
-            LeadKinds.POD_SPAWN_INTENDED,
-            buildJsonObject {
-              put("taskRef", p.taskRef)
-              put("artifactPath", artifactFile.path)
-            },
-            origin = ORIGIN_SUBSTRATE,
-          )
-          faults.at("after-spawn-intended")
-          val spawned =
-            podRunner.spawn(podSpec, p.taskRef, workdir, artifactFile.path) { completion ->
-              queue.put(WakeEvent.PodDone(completion))
-            }
-          faults.at("between-spawn-and-journal")
-          store.append(
-            LeadKinds.POD_SPAWNED,
-            buildJsonObject {
-              put("podId", spawned.podId.take(MAX_JOURNALED_STRING))
-              put("sessionId", spawned.sessionId.take(MAX_JOURNALED_STRING))
-              put("taskRef", p.taskRef)
-              put("artifactPath", artifactFile.path)
-              // Profile provenance: the chain records WHAT launched —
-              // provider/transport/model/pin — because append-only means this cannot be
-              // backfilled once profile switching exists. Fold-invisible today (extra keys
-              // are ignored); the audit value is the record itself.
-              put("provider", podSpec.provider.name)
-              put("transport", podSpec.transport.name)
-              put("model", podSpec.model)
-              put("pinnedVersion", podSpec.pinnedVersion)
-            },
-            origin = ORIGIN_SUBSTRATE,
-          )
-          faults.at("after-pod-spawned")
+          if (!workflow.admitPodSpawn(p.taskRef, leadAtDecision, turn, hostServices)) continue
+          spawnPod(p.taskRef, podSpec)
         }
         is Proposal.ProposeStatus ->
           store.append(
@@ -1838,6 +1649,87 @@ class LeadDaemon(
         is Proposal.ProposeEscalate -> escalate(p.reason)
       }
     }
+  }
+
+  /**
+   * Launch a pod for [taskRef], which the workflow has admitted, under the capability profile
+   * [profile], unless the host's own guards refuse it. The profile is everything about how the pod
+   * runs: environment, permission routing, the fail-closed defaults.
+   */
+  private fun spawnPod(taskRef: String, profile: PodSpec) {
+    // Lead-tier attempt cap (see [failureAbandons]): a taskRef that keeps producing
+    // failure-abandons stops getting fresh pods — refused on every wake, escalated
+    // once per taskRef (see [capRefusalsEscalated]) — so the pipeline wedges VISIBLY
+    // instead of burning spawns (and real model spend) in a re-propose livelock
+    // against a persistent fault.
+    val attempts = failureAbandons[taskRef] ?: 0
+    if (attempts >= MAX_TASK_ATTEMPTS_PER_PROCESS) {
+      if (capRefusalsEscalated.add(taskRef)) {
+        escalate(
+          "pod-spawn refused for taskRef '${taskRef.take(80)}': $attempts failed " +
+            "attempts this process (cap $MAX_TASK_ATTEMPTS_PER_PROCESS) — not " +
+            "re-proposing; fix the fault and restart the lead"
+        )
+      }
+      return
+    }
+    // Defense-in-depth backstops the workflow's own ref checks: a ref that carried odd
+    // characters would still be caught by the charset + canonical-containment checks.
+    if (!TASK_REF_RE.matches(taskRef)) {
+      escalate("pod-spawn rejected: malformed taskRef '${taskRef.take(80)}'")
+      return
+    }
+    val artifactsDir = File(workdir, "artifacts").canonicalFile
+    val artifactFile = File(artifactsDir, taskRef.replace(':', '-')).canonicalFile
+    if (!artifactFile.path.startsWith(artifactsDir.path + File.separator)) {
+      escalate("pod-spawn rejected: artifact path escapes the artifacts dir for taskRef '${taskRef.take(80)}'")
+      return
+    }
+    // The fail-closed fence, LAST before the substrate commits to the
+    // launch: a fenced profile (transport=acp, provider≠claude, no egress-enforcement
+    // capability — and none is constructible today) THROWS here, before the intent is
+    // journaled and before any side effect. A throw is deliberate, not an escalation:
+    // a fenced profile is a configuration fault, and the daemon must stop (the loop's
+    // wake-fault path journals it and halts for a supervisor), never proceed.
+    profile.requireSpawnable()
+    // Intent BEFORE the side-effect: a pod launch is a side-effect
+    // on the world, so it obeys the same intent-before-effect discipline as an effect
+    // fire. Journaling POD_SPAWN_INTENDED first means a kill before POD_SPAWNED leaves a
+    // RECORDED orphan (adopt abandons it and re-proposes), never an invisible one that a
+    // fresh re-fold would wrongly report as "nothing happened".
+    store.append(
+      LeadKinds.POD_SPAWN_INTENDED,
+      buildJsonObject {
+        put("taskRef", taskRef)
+        put("artifactPath", artifactFile.path)
+      },
+      origin = ORIGIN_SUBSTRATE,
+    )
+    faults.at("after-spawn-intended")
+    val spawned =
+      podRunner.spawn(profile, taskRef, workdir, artifactFile.path) { completion ->
+        queue.put(WakeEvent.PodDone(completion))
+      }
+    faults.at("between-spawn-and-journal")
+    store.append(
+      LeadKinds.POD_SPAWNED,
+      buildJsonObject {
+        put("podId", spawned.podId.take(MAX_JOURNALED_STRING))
+        put("sessionId", spawned.sessionId.take(MAX_JOURNALED_STRING))
+        put("taskRef", taskRef)
+        put("artifactPath", artifactFile.path)
+        // Profile provenance: the chain records WHAT launched —
+        // provider/transport/model/pin — because append-only means this cannot be
+        // backfilled once profile switching exists. Fold-invisible today (extra keys
+        // are ignored); the audit value is the record itself.
+        put("provider", profile.provider.name)
+        put("transport", profile.transport.name)
+        put("model", profile.model)
+        put("pinnedVersion", profile.pinnedVersion)
+      },
+      origin = ORIGIN_SUBSTRATE,
+    )
+    faults.at("after-pod-spawned")
   }
 
   /**

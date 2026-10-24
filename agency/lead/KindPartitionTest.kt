@@ -85,6 +85,8 @@ class KindPartitionTest {
 
     override fun gateArtifactPath(gateKind: String, lead: LeadState): String? = null
 
+    override fun admitPodSpawn(taskRef: String, lead: LeadState, turn: ProposalTurn, host: HostServices) = false
+
     override fun redriveMessage(key: String, lead: LeadState): String? = null
 
     override fun redriveDeclineReason(key: String): String? = null

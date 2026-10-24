@@ -43,6 +43,12 @@ internal interface Workflow {
    * open, or that this turn has handled. */
   fun admitGateOpen(gateKind: String, payloadDigest: String, gateId: String, lead: LeadState): GateOpenDecision
 
+  /** Whether the host may launch a pod for [taskRef], as cognition proposed, in [turn]. Refusals
+   * the workflow makes are escalated through [host] here, as the workflow's guards require; a
+   * proposal it skips without refusing returns false too. The host's own guards (the attempt cap,
+   * the ref's form, the artifact path, the launch profile) run after an admission. */
+  fun admitPodSpawn(taskRef: String, lead: LeadState, turn: ProposalTurn, host: HostServices): Boolean
+
   /** The bound copy an operator reads to decide a gate of [gateKind]: the evidence the gate opened
    * on, or null when the workflow recorded none for that kind. */
   fun gateArtifactPath(gateKind: String, lead: LeadState): String?
@@ -72,6 +78,10 @@ internal interface HostServices {
   /** Escalate [reason] to an operator. */
   fun escalate(reason: String)
 
+  /** Escalate [reason] about [gate], recording the gate and the digest it is open on beside it
+   * ([LeadState.escalatedStalls]), so the escalation and its record are one append. */
+  fun escalateGate(gate: OpenGate, reason: String)
+
   /** Fire the effect keyed [key] with [message] through the effect receiver, and journal its done
    * entry as attempt [attempt]. */
   fun fireEffect(key: String, message: String, attempt: Int)
@@ -83,6 +93,17 @@ internal interface HostServices {
   /** [pod]'s bound artifact, verified against its journaled digest, or null when the copy is
    * missing or disturbed, in which case the pod has been abandoned. */
   fun verifiedBoundArtifact(pod: PodRecord): VerifiedArtifact?
+}
+
+/** What one cognition turn's proposals have done so far, which the state the turn was decided on
+ * cannot show: the host makes one per turn, and it is gone with the turn. */
+internal class ProposalTurn {
+  /** Task refs this turn has already acted on. */
+  val seenTaskRefs = mutableSetOf<String>()
+
+  /** Gates this turn escalated as open off their evidence: the record of such an escalation is in
+   * the journal, which the turn's state was folded from before the turn ran. */
+  val escalatedOffEvidence = mutableSetOf<String>()
 }
 
 /** The workflow's answer to a proposed gate-open ([Workflow.admitGateOpen]). */
