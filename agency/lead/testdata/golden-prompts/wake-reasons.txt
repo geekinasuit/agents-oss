@@ -1,0 +1,70 @@
+=== wake 1 ===
+WAKE: Adopted
+ticket: t1  phase: PLAN_GATED
+planArtifactSha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+commitManifestDigest: none
+openGates: plan-approval:t1(digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, approved=false)
+activePods: none
+staleReleases: 1  escalations: 1
+undeliveredMail:
+  none
+=== wake 2 ===
+WAKE: MailArrived(35 chars; mail still undelivered is listed under undeliveredMail)
+ticket: t1  phase: PLAN_GATED
+planArtifactSha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+commitManifestDigest: none
+openGates: plan-approval:t1(digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, approved=false)
+activePods: none
+staleReleases: 1  escalations: 1
+undeliveredMail:
+  none
+=== wake 3 ===
+WAKE: TimerFired(timerId=announce-retry:n:1)
+ticket: t1  phase: PLAN_GATED
+planArtifactSha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+commitManifestDigest: none
+openGates: plan-approval:t1(digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, approved=false)
+activePods: none
+staleReleases: 1  escalations: 1
+undeliveredMail:
+  none
+=== wake 4 ===
+WAKE: PodCompleted(podId=pod-z1)
+ticket: t1  phase: PLAN_GATED
+planArtifactSha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+commitManifestDigest: none
+openGates: plan-approval:t1(digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, approved=false)
+activePods: none
+staleReleases: 1  escalations: 1
+undeliveredMail:
+  none
+=== wake 5 ===
+WAKE: PodDisposed(podId=pod-z1, disposition=wall-clock-kill)
+ticket: t1  phase: PLAN_GATED
+planArtifactSha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+commitManifestDigest: none
+openGates: plan-approval:t1(digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, approved=false)
+activePods: none
+staleReleases: 1  escalations: 1
+undeliveredMail:
+  none
+=== wake 6 ===
+WAKE: GateReleased(gateId=plan-approval:t1)
+ticket: t1  phase: PLAN_GATED
+planArtifactSha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+commitManifestDigest: none
+openGates: plan-approval:t1(digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, approved=false)
+activePods: none
+staleReleases: 1  escalations: 1
+undeliveredMail:
+  none
+=== wake 7 ===
+WAKE: Adopted
+ticket: t1  phase: COMMIT_APPROVED
+planArtifactSha: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+commitManifestDigest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+openGates: plan-approval:t1(digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, approved=true), commit-approval:t1(digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, approved=true)
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none

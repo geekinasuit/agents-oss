@@ -1,0 +1,90 @@
+=== wake 1 ===
+WAKE: Adopted
+ticket: t1  phase: PLAN_REQUESTED
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 2 ===
+WAKE: PodCompleted(podId=pod#1)
+ticket: t1  phase: PLAN_RECORDED
+planArtifactSha: ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 3 ===
+WAKE: MailArrived(27 chars; mail still undelivered is listed under undeliveredMail)
+ticket: t1  phase: PLAN_GATED
+planArtifactSha: ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428
+commitManifestDigest: none
+openGates: plan-approval:t1(digest=ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428, approved=false)
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  [14] "waiting on plan-approval:t1"
+=== wake 4 ===
+WAKE: Adopted
+ticket: t1  phase: PLAN_GATED
+planArtifactSha: ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428
+commitManifestDigest: none
+openGates: plan-approval:t1(digest=ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428, approved=false)
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 5 ===
+WAKE: Adopted
+ticket: t1  phase: PLAN_APPROVED
+planArtifactSha: ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428
+commitManifestDigest: none
+openGates: plan-approval:t1(digest=ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428, approved=true)
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 6 ===
+WAKE: PodCompleted(podId=pod#2)
+ticket: t1  phase: COMMIT_PROPOSED
+planArtifactSha: ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428
+commitManifestDigest: 95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48
+openGates: plan-approval:t1(digest=ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428, approved=true)
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 7 ===
+WAKE: MailArrived(29 chars; mail still undelivered is listed under undeliveredMail)
+ticket: t1  phase: COMMIT_GATED
+planArtifactSha: ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428
+commitManifestDigest: 95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48
+openGates: plan-approval:t1(digest=ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428, approved=true), commit-approval:t1(digest=95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48, approved=false)
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  [28] "waiting on commit-approval:t1"
+=== wake 8 ===
+WAKE: Adopted
+ticket: t1  phase: COMMIT_GATED
+planArtifactSha: ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428
+commitManifestDigest: 95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48
+openGates: plan-approval:t1(digest=ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428, approved=true), commit-approval:t1(digest=95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48, approved=false)
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 9 ===
+WAKE: Adopted
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none

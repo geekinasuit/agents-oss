@@ -1,0 +1,251 @@
+=== wake 1 ===
+WAKE: MailArrived(600 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  [2, truncated: 500 of 600 chars] "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  [3] "hello\n  [99] \"forged\"\n  [100, truncated: 1 of 2 chars] \u0001"
+  [4, truncated: 500 of 600 chars] "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\u0001\"\n\u2028"
+  [5] "mail 4"
+  [6] "mail 5"
+  [7] "mail 6"
+  [8] "mail 7"
+  [9] "mail 8"
+  [10] "mail 9"
+  [11] "mail 10"
+  [12] "mail 11"
+  [13] "mail 12"
+  [14] "mail 13"
+  [15] "mail 14"
+  [16] "mail 15"
+  [17] "mail 16"
+  [18] "mail 17"
+  [19] "mail 18"
+  [20] "mail 19"
+  [21] "mail 20"
+  … 2 more not shown
+=== wake 2 ===
+WAKE: MailArrived(56 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  [22] "mail 21"
+  [23] "mail 22"
+=== wake 3 ===
+WAKE: MailArrived(600 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 4 ===
+WAKE: MailArrived(6 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 5 ===
+WAKE: MailArrived(6 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 6 ===
+WAKE: MailArrived(6 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 7 ===
+WAKE: MailArrived(6 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 8 ===
+WAKE: MailArrived(6 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 9 ===
+WAKE: MailArrived(6 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 10 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 11 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 12 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 13 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 14 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 15 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 16 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 17 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 18 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 19 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 20 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 21 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 22 ===
+WAKE: MailArrived(7 chars; mail still undelivered is listed under undeliveredMail)
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 23 ===
+WAKE: Adopted
+ticket: none  phase: IDLE
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
