@@ -1,0 +1,20 @@
+=== wake 1 ===
+WAKE: MailArrived(13 chars; mail still undelivered is listed under undeliveredMail)
+ticket: t1  phase: PLAN_REQUESTED
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  [2] "a second wake"
+=== wake 2 ===
+WAKE: Adopted
+ticket: t1  phase: PLANNING
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: pod#1:plan:t1
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none

@@ -240,6 +240,39 @@ java_test(
     ],
 )
 
+# Pins what a model is sent: the system prompt and the context rendered at every wake of the
+# scripted walk, under both auths, for a pod in flight, for a mailbox past its bounds and for every
+# wake reason, against golden files generated before the cognition protocol split; and checks at
+# the wire (a stand-in claude, a loopback chat endpoint) that each strategy sends exactly those.
+# Goldens are runfiles, as golden_journal_test's are.
+kt_jvm_library(
+    name = "prompt_golden_test_lib",
+    testonly = True,
+    srcs = ["PromptGoldenTest.kt"],
+    deps = [
+        ":ceremony_test_support",
+        ":lead",
+        "//agency/pod",
+        "//agency/shared/harness",
+        "//agency/shared/harness:fake_openai_endpoint",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_json_json",
+    ],
+)
+
+java_test(
+    name = "prompt_golden_test",
+    size = "small",
+    data = glob(["testdata/golden-prompts/*.txt"]),
+    env = {"GOLDEN_PROMPT": "$(rlocationpath testdata/golden-prompts/system-prompt.txt)"},
+    test_class = "com.geekinasuit.agency.lead.PromptGoldenTest",
+    runtime_deps = [
+        ":prompt_golden_test_lib",
+        "@maven//:org_xerial_sqlite_jdbc",
+    ],
+)
+
 # Folds a seeded corpus of journals with the pre-split fold (LegacyLeadFold.kt, frozen verbatim)
 # and with the host/workflow split fold, and asserts they agree on every one, failures included.
 kt_jvm_test(
