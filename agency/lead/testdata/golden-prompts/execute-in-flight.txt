@@ -1,0 +1,40 @@
+=== wake 1 ===
+WAKE: Adopted
+ticket: t1  phase: PLAN_REQUESTED
+planArtifactSha: none
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 2 ===
+WAKE: PodCompleted(podId=pod#1)
+ticket: t1  phase: PLAN_RECORDED
+planArtifactSha: ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428
+commitManifestDigest: none
+openGates: none
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
+=== wake 3 ===
+WAKE: MailArrived(23 chars; mail still undelivered is listed under undeliveredMail)
+ticket: t1  phase: PLAN_APPROVED
+planArtifactSha: ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428
+commitManifestDigest: none
+openGates: plan-approval:t1(digest=ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428, approved=true)
+activePods: none
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  [15] "while the executor runs"
+=== wake 4 ===
+WAKE: Adopted
+ticket: t1  phase: EXECUTING
+planArtifactSha: ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428
+commitManifestDigest: none
+openGates: plan-approval:t1(digest=ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428, approved=true)
+activePods: pod#2:execute:t1
+staleReleases: 0  escalations: 0
+undeliveredMail:
+  none
