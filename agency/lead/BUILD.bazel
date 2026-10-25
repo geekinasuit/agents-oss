@@ -437,6 +437,22 @@ kt_jvm_test(
     ],
 )
 
+# Hermetic: the contract between the composed cognition protocol and a workflow's part of it. A
+# workflow near-miss is returned, not thrown, and a workflow claiming a host proposal type is
+# refused. associates (not deps) on :lead, since the ticket workflow's protocol is internal to it.
+kt_jvm_test(
+    name = "workflow_protocol_test",
+    size = "small",
+    srcs = ["WorkflowProtocolTest.kt"],
+    associates = [":lead"],
+    test_class = "com.geekinasuit.agency.lead.WorkflowProtocolTest",
+    deps = [
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_json_json",
+    ],
+)
+
 # Hermetic: the Claude cognition strategy's presentation answers (spend cap, failed turn,
 # parsed turn) against a stand-in claude executable. No claude CLI required.
 kt_jvm_test(

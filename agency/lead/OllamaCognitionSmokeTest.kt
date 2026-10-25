@@ -74,7 +74,7 @@ class OllamaCognitionSmokeTest {
     )
   }
 
-  private fun cognition() = OpenAiCompatCognition(OpenAiCompatHarness(profile))
+  private fun cognition() = OpenAiCompatCognition(OpenAiCompatHarness(profile), CognitionProtocol.composed)
 
   @Test
   fun theConfigurationIsLoopbackAndKeyFree() {

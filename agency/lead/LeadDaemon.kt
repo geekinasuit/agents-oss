@@ -618,7 +618,7 @@ class LeadDaemon(
     // item. So a wake whose cognition produced no usable output retires nothing, nor does a
     // decision whose strategy reports its context was not presented (no turn ran, the turn
     // failed) or cannot say. A presented decision retires only the mail its context showed
-    // ([CognitionProtocol.mailRenderedForRetirement]): mail past the render's cap stays
+    // ([MailRender.mailRenderedForRetirement]): mail past the render's cap stays
     // undelivered for a later turn.
     val decision = decideWithRetry(reasonOf(ev), folded) ?: return
     val out = decision.out
@@ -632,7 +632,7 @@ class LeadDaemon(
       executeProposals(out, decision.folded.lead)
     }
     if (out.presentation.retiresMail) {
-      markMailDelivered(CognitionProtocol.mailRenderedForRetirement(decision.folded.shared.undeliveredMail))
+      markMailDelivered(MailRender.mailRenderedForRetirement(decision.folded.shared.undeliveredMail))
     }
   }
 

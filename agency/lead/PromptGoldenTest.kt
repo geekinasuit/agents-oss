@@ -4,8 +4,6 @@ import com.geekinasuit.agency.pod.PodCompletion
 import com.geekinasuit.agency.pod.PodSpec
 import com.geekinasuit.agency.shared.harness.ClaudeHarness
 import com.geekinasuit.agency.shared.harness.FakeOpenAiEndpoint
-import com.geekinasuit.agency.shared.harness.OpenAiCompatHarness
-import com.geekinasuit.agency.shared.harness.OpenAiCompatProfile
 import com.geekinasuit.agency.shared.journal.EffectReceiver
 import com.geekinasuit.agency.shared.journal.JournalState
 import com.geekinasuit.agency.shared.journal.SqliteStore
@@ -126,7 +124,7 @@ class PromptGoldenTest {
         )
         setExecutable(true)
       }
-    val claude = ClaudeCognition(harness = ClaudeHarness(bin.absolutePath), workDir = dir, timeoutSec = 30)
+    val claude = CognitionSelection.claude(workDir = dir, harness = ClaudeHarness(bin.absolutePath)).strategy
     return contexts.map { context ->
       claude.decide(context)
       val args = argv.readText().split('\u0000').dropLast(1)
@@ -141,7 +139,7 @@ class PromptGoldenTest {
    * [contexts]. Each request must hold exactly a system message, the golden, and that user message. */
   private fun sentToOpenAi(contexts: List<WakeContext>): List<String> =
     FakeOpenAiEndpoint(FakeOpenAiEndpoint.reply("""{"proposals": [], "reasoning": "waiting"}""")).use { ep ->
-      val cognition = OpenAiCompatCognition(OpenAiCompatHarness(OpenAiCompatProfile.ollama("m", ep.baseUrl)))
+      val cognition = CognitionSelection.ollama("m", ep.baseUrl).strategy
       contexts.map { context ->
         cognition.decide(context)
         val messages = JSONObject(ep.lastRequestBody!!).getJSONArray("messages")
