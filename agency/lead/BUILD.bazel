@@ -423,6 +423,19 @@ kt_jvm_test(
     ],
 )
 
+# The exact malformed reason the parser gives each near-miss, and which near-miss decides the reason
+# when an output has several.
+kt_jvm_test(
+    name = "parse_reasons_test",
+    size = "small",
+    srcs = ["ParseReasonsTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.ParseReasonsTest",
+    deps = [
+        ":lead",
+        "@maven//:junit_junit",
+    ],
+)
+
 # Hermetic: the Claude cognition strategy's presentation answers (spend cap, failed turn,
 # parsed turn) against a stand-in claude executable. No claude CLI required.
 kt_jvm_test(
