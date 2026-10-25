@@ -41,6 +41,7 @@ kt_jvm_library(
         "OpenAiCompatCognition.kt",
         "PodSeam.kt",
         "TicketWorkflow.kt",
+        "TicketWorkflowProtocol.kt",
         "Workflow.kt",
     ],
     visibility = ["//visibility:public"],

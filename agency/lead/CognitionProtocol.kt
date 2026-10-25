@@ -16,9 +16,12 @@ import org.json.JSONObject
  *
  * Nothing here trusts its input. Parsing is lenient about packaging and strict about
  * structure, and a strategy's transport concerns (auth, timeouts, cost) stay out.
+ *
+ * The ticket workflow's parts (its proposal types, rules and state lines) come from
+ * [TicketWorkflowProtocol]. This object holds the host's parts and composes the two.
  */
 object CognitionProtocol {
-  val SYSTEM_PROMPT =
+  private val PROMPT_HEADER =
     """
     You are the cognition loop of an Agency lead daemon. You are shown the lead's folded
     state once per wake. You PROPOSE; you never release gates — releases come only from
@@ -26,18 +29,28 @@ object CognitionProtocol {
 
     Respond with EXACTLY one JSON object, no prose around it:
     {"proposals": [
-       {"type": "pod-spawn", "taskRef": "plan:<ticket>" | "execute:<ticket>"}
-     | {"type": "gate-open", "gateKind": "plan-approval" | "commit-approval", "payloadDigest": "<sha256 from the state>"}
-     | {"type": "status", "status": "<short line>"}
-     | {"type": "escalate", "reason": "<why a human should look>"}
-     ], "reasoning": "<one or two sentences>"}
-    An empty proposals array means idle. Open a gate only on a digest shown in the state.
-    Follow the pipeline: no plan artifact -> spawn planner; plan artifact and no plan
-    gate -> open plan-approval on its sha; plan gate approved=true and no manifest ->
-    spawn executor; manifest and no commit gate -> open commit-approval on its digest;
-    otherwise idle and wait.
     """
       .trimIndent()
+
+  /** The shapes of the host's own proposals, listed after the workflow's. */
+  private val HOST_PROPOSAL_SHAPES =
+    listOf(
+      """{"type": "status", "status": "<short line>"}""",
+      """{"type": "escalate", "reason": "<why a human should look>"}""",
+    )
+
+  /**
+   * The header, then every proposal shape as one union (the first indented, each later one after
+   * a `|`), then the closing line and the workflow's rules.
+   */
+  val SYSTEM_PROMPT =
+    (listOf(PROMPT_HEADER) +
+        (TicketWorkflowProtocol.PROPOSAL_SHAPES + HOST_PROPOSAL_SHAPES).mapIndexed { i, shape ->
+          (if (i == 0) "   " else " | ") + shape
+        } +
+        """ ], "reasoning": "<one or two sentences>"}""" +
+        TicketWorkflowProtocol.RULES)
+      .joinToString("\n")
 
   /** Prompt bounds on untrusted mailbox content. */
   private const val MAX_MAIL_SHOWN = 20
@@ -104,24 +117,12 @@ object CognitionProtocol {
     val lead = context.lead
     val sb = StringBuilder()
     sb.appendLine("WAKE: ${renderReason(context.reason)}")
-    sb.appendLine("ticket: ${lead.currentTicket ?: "none"}  phase: ${lead.phase}")
-    sb.appendLine("planArtifactSha: ${lead.planArtifactSha ?: "none"}")
-    sb.appendLine("commitManifestDigest: ${lead.commitManifestDigest ?: "none"}")
-    // A gate reads approved only when it is one a stage of the current ticket waits on, and it is
-    // released on the digest it is open on, which is the substrate's evidence for its kind
-    // ([LeadState.approvedOnEvidence]). The daemon asks the same of each gate before it acts; the
-    // commit effect also asks it of the plan gate.
-    fun approved(gate: OpenGate): Boolean {
-      val ticket = lead.currentTicket ?: return false
-      return GateKinds.ALL.any { kind ->
-        gateIdFor(kind, ticket) == gate.gateId && lead.approvedOnEvidence(kind, ticket)
-      }
-    }
+    for (line in TicketWorkflowProtocol.renderLines(lead)) sb.appendLine(line)
     sb.appendLine(
       "openGates: " +
         lead.openGates.values
           .joinToString(", ") {
-            "${it.gateId}(digest=${it.payloadDigest}, approved=${approved(it)})"
+            "${it.gateId}(digest=${it.payloadDigest}, approved=${TicketWorkflowProtocol.gateReadsApproved(lead, it)})"
           }
           .ifEmpty { "none" }
     )
@@ -198,23 +199,19 @@ object CognitionProtocol {
           val p =
             arr.opt(i) as? JSONObject
               ?: return CognitionOutput.malformed(MalformedReasons.PROPOSAL_NOT_OBJECT, meta)
-          when (p.optString("type")) {
+          when (val type = p.optString("type")) {
             "" -> return CognitionOutput.malformed(MalformedReasons.PROPOSAL_NO_TYPE, meta)
-            "pod-spawn" -> {
-              val taskRef = p.required("taskRef")
-              if (!TASK_REF_SHAPE.matches(taskRef))
-                return CognitionOutput.malformed(MalformedReasons.BAD_TASK_REF, meta)
-              proposals += Proposal.ProposePodSpawn(taskRef)
-            }
-            "gate-open" -> {
-              val kind = p.required("gateKind")
-              if (kind !in GateKinds.ALL)
-                return CognitionOutput.malformed(MalformedReasons.UNKNOWN_GATE_KIND, meta)
-              proposals += Proposal.ProposeGateOpen(kind, p.required("payloadDigest"))
-            }
             "status" -> proposals += Proposal.ProposeStatus(p.required("status"))
             "escalate" -> proposals += Proposal.ProposeEscalate(p.required("reason"))
-            else -> return CognitionOutput.malformed(MalformedReasons.UNKNOWN_TYPE, meta)
+            // Any other type is the workflow's or unknown. Each proposal is parsed as it is
+            // reached and appended to the one list, so the batch keeps its order and the first
+            // near-miss decides the reason, whichever side owns its type.
+            else ->
+              when (val parsed = TicketWorkflowProtocol.parseProposal(type, p)) {
+                is ProposalParse.Ok -> proposals += parsed.proposal
+                is ProposalParse.Malformed -> return CognitionOutput.malformed(parsed.reason, meta)
+                null -> return CognitionOutput.malformed(MalformedReasons.UNKNOWN_TYPE, meta)
+              }
           }
         }
       }
@@ -227,26 +224,25 @@ object CognitionProtocol {
     }
   }
 
-  /** plan:/execute: over a ticket ref in the same conservative charset the substrate's own
-   * task refs use. The only two task namespaces cognition may name.
-   *
-   * This is a SHAPE check and nothing more. Excluding '/' removes the obvious traversal
-   * spelling, but `plan:..` matches this regex and is well-formed here — what actually
-   * stops traversal is execute-time: the ref must equal the current ticket, and the
-   * artifact path must canonically resolve inside the workspace. Which TICKET is legal is
-   * folded state's call, never the parser's. */
-  private val TASK_REF_SHAPE = Regex("""^(plan|execute):[A-Za-z0-9._-]+$""")
+}
 
-  private class MalformedProposal(field: String) : RuntimeException(MalformedReasons.missingField(field))
+/** What a workflow made of one proposal of a type it owns. */
+internal sealed interface ProposalParse {
+  data class Ok(val proposal: Proposal) : ProposalParse
 
-  /** Demands an actual non-blank JSON string. `optString` would stringify whatever it
-   * found — a number, or a whole nested object — turning a wrong-shaped field into a
-   * plausible-looking value instead of the near-miss it is. */
-  private fun JSONObject.required(field: String): String {
-    val v = opt(field)
-    if (v !is String || v.isBlank()) throw MalformedProposal(field)
-    return v
-  }
+  /** The proposal is a near-miss; [reason] is one of [MalformedReasons]. */
+  data class Malformed(val reason: String) : ProposalParse
+}
+
+internal class MalformedProposal(field: String) : RuntimeException(MalformedReasons.missingField(field))
+
+/** Demands an actual non-blank JSON string. `optString` would stringify whatever it
+ * found — a number, or a whole nested object — turning a wrong-shaped field into a
+ * plausible-looking value instead of the near-miss it is. */
+internal fun JSONObject.required(field: String): String {
+  val v = opt(field)
+  if (v !is String || v.isBlank()) throw MalformedProposal(field)
+  return v
 }
 
 /**
