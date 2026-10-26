@@ -39,7 +39,7 @@ class OpenAiCompatCognitionTest {
     endpoint?.close()
   }
 
-  private fun cognitionFor(body: String, status: Int = 200): OpenAiCompatCognition {
+  private fun cognitionFor(body: String, status: Int = 200): OpenAiCompatCognition<LeadState> {
     val ep = FakeOpenAiEndpoint(body, status)
     endpoint = ep
     return OpenAiCompatCognition(

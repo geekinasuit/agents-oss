@@ -71,7 +71,7 @@ object MailRender {
  * of the system prompt, and its lines of the rendered state. [ComposedCognitionProtocol] composes
  * it with the host's part.
  */
-interface WorkflowProtocol {
+interface WorkflowProtocol<S : HostView> {
   /** The shapes of this workflow's proposals, which the system prompt lists ahead of the host's. */
   val proposalShapes: List<String>
 
@@ -82,10 +82,10 @@ interface WorkflowProtocol {
   val proposalTypes: Set<String>
 
   /** This workflow's lines of the rendered state, shown after the wake reason. */
-  fun renderLines(lead: LeadState): List<String>
+  fun renderLines(lead: S): List<String>
 
   /** Whether [gate] reads approved in the rendered state. */
-  fun gateReadsApproved(lead: LeadState, gate: OpenGate): Boolean
+  fun gateReadsApproved(lead: S, gate: OpenGate): Boolean
 
   /**
    * Parses [p], a proposal of [type], one of [proposalTypes]. A near-miss is returned as
@@ -95,7 +95,7 @@ interface WorkflowProtocol {
 }
 
 /**
- * The contract every model-backed [CognitionStrategy] speaks: what the model is told
+ * The contract every model-backed [AgentCognition] speaks: what the model is told
  * ([systemPrompt]), how a wake's folded state is shown to it ([renderContext]), and how
  * its reply is turned into typed proposals ([parseOutput]).
  *
@@ -111,7 +111,7 @@ interface WorkflowProtocol {
  * This class holds the host's part and composes it with [workflow]'s. It refuses a workflow that
  * claims a type the host parses, which the host's arms would otherwise shadow.
  */
-class ComposedCognitionProtocol(private val workflow: WorkflowProtocol) {
+class ComposedCognitionProtocol<S : HostView>(private val workflow: WorkflowProtocol<S>) {
   init {
     val shared = workflow.proposalTypes intersect HOST_TYPES
     require(shared.isEmpty()) { "the workflow claims proposal types the host parses: ${shared.sorted()}" }
@@ -153,7 +153,7 @@ class ComposedCognitionProtocol(private val workflow: WorkflowProtocol) {
    * fold, so two calls against one fold render identical text — which is what makes a
    * within-wake retry a repeat of the same question rather than a new one.
    */
-  fun renderContext(context: WakeContext): String {
+  fun renderContext(context: AgentWakeContext<S>): String {
     val lead = context.lead
     val sb = StringBuilder()
     sb.appendLine("WAKE: ${renderReason(context.reason)}")
@@ -298,7 +298,7 @@ internal fun JSONObject.required(field: String): String {
 /**
  * Every reason the lead writes on a [HostKinds.COGNITION_MALFORMED] row: [ComposedCognitionProtocol.parseOutput]'s
  * classifications and the daemon's fallback. The fold holds a reason only when [isLeads] accepts
- * it, so a row the lead did not write cannot put its own text in [LeadState.malformedCognition].
+ * it, so a row the lead did not write cannot put its own text in [HostState.malformedCognition].
  */
 object MalformedReasons {
   const val NOT_JSON = "cognition output was not JSON"

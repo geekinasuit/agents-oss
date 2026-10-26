@@ -11,20 +11,20 @@ import com.geekinasuit.agency.shared.harness.OpenAiCompatHarness
  * as a decision. Nothing returned here can release a gate; the fold keys on origin.
  *
  * **No budget cap, deliberately.** [ClaudeCognition] gates on
- * [LeadState.cognitionSpendUsd] because its turns are billed. A loopback endpoint has no
+ * [HostView.cognitionSpendUsd] because its turns are billed. A loopback endpoint has no
  * billing relationship, so there is no spend to bound and a cap would be ceremony over a
  * number that is always zero. What bounds this strategy is the wake loop itself: it is
  * consulted once per wake and the loop blocks between wakes, so an idle lead runs no
  * turns at all. That is also why this strategy writes no `costUsd` into
  * [CognitionOutput.meta] — see [decide].
  */
-class OpenAiCompatCognition(
+class OpenAiCompatCognition<S : HostView>(
   private val harness: OpenAiCompatHarness,
   /** The protocol the lead speaks; required, so no strategy can default to one workflow's. */
-  private val protocol: ComposedCognitionProtocol,
+  private val protocol: ComposedCognitionProtocol<S>,
   private val maxTokens: Int = OpenAiCompatHarness.DEFAULT_MAX_TOKENS,
   private val timeoutSec: Int = OpenAiCompatHarness.DEFAULT_TIMEOUT_SEC,
-) : CognitionStrategy {
+) : AgentCognition<S> {
   override val name = harness.profile.name
 
   /**
@@ -33,12 +33,12 @@ class OpenAiCompatCognition(
    * with the substrate's own account of the turn when the row is journaled.
    *
    * It carries token counts and no `costUsd`. Cost is not the observable on a free local
-   * model, and writing a 0.0 into the key [LeadState.cognitionSpendUsd] accumulates would
+   * model, and writing a 0.0 into the key [HostView.cognitionSpendUsd] accumulates would
    * quietly change what that field means — from "what cognition has spent" to "what the
    * billed strategies have spent", weakening a number the budget cap reads. Tokens are
    * what this wire actually reports, so tokens are what gets recorded.
    */
-  override fun decide(context: WakeContext): CognitionOutput {
+  override fun decide(context: AgentWakeContext<S>): CognitionOutput {
     val turn =
       harness.chat(
         systemPrompt = protocol.systemPrompt,
