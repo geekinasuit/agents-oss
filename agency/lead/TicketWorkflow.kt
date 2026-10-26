@@ -14,6 +14,15 @@ import kotlinx.serialization.json.put
 // half of the lead fold, its mechanical steps, the ticket source, and the scripted playbook that
 // drives it.
 
+/** The lead-chain entry kinds the ticket workflow writes and folds. */
+object TicketKinds {
+  const val TICKET_CLAIMED = "ticket-claimed"
+  const val PLAN_REQUESTED = "plan-requested"
+  const val PLAN_ARTIFACT_RECORDED = "plan-artifact-recorded"
+  const val COMMIT_PROPOSED = "commit-proposed"
+  const val TICKET_DONE = "ticket-done"
+}
+
 /** Gate kinds the ticket pipeline opens. */
 object GateKinds {
   const val PLAN_APPROVAL = "plan-approval"
