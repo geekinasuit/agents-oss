@@ -6,7 +6,7 @@ import com.geekinasuit.agency.shared.harness.OpenAiCompatHarness
  * Model-backed cognition over an OpenAI-compatible endpoint: one chat
  * completion per wake, producing the same typed proposals every other strategy does.
  *
- * The prompt, the state rendering and the parse are [CognitionProtocol], identical to the
+ * The prompt, the state rendering and the parse are [protocol], identical to the
  * Claude path — the provider changes which model answers, never what the lead will accept
  * as a decision. Nothing returned here can release a gate; the fold keys on origin.
  *
@@ -20,6 +20,8 @@ import com.geekinasuit.agency.shared.harness.OpenAiCompatHarness
  */
 class OpenAiCompatCognition(
   private val harness: OpenAiCompatHarness,
+  /** The protocol the lead speaks; required, so no strategy can default to one workflow's. */
+  private val protocol: ComposedCognitionProtocol,
   private val maxTokens: Int = OpenAiCompatHarness.DEFAULT_MAX_TOKENS,
   private val timeoutSec: Int = OpenAiCompatHarness.DEFAULT_TIMEOUT_SEC,
 ) : CognitionStrategy {
@@ -39,8 +41,8 @@ class OpenAiCompatCognition(
   override fun decide(context: WakeContext): CognitionOutput {
     val turn =
       harness.chat(
-        systemPrompt = CognitionProtocol.SYSTEM_PROMPT,
-        userPrompt = CognitionProtocol.renderContext(context),
+        systemPrompt = protocol.systemPrompt,
+        userPrompt = protocol.renderContext(context),
         maxTokens = maxTokens,
         timeoutSec = timeoutSec,
       )
@@ -64,7 +66,7 @@ class OpenAiCompatCognition(
         presentation = ContextPresentation.NOT_PRESENTED,
       )
     }
-    return CognitionProtocol.parseOutput(turn.text, meta, ContextPresentation.PRESENTED)
+    return protocol.parseOutput(turn.text, meta, ContextPresentation.PRESENTED)
   }
 
   companion object {
@@ -73,7 +75,7 @@ class OpenAiCompatCognition(
      * ([LeadDaemon.maxCognitionAttempts]).
      *
      * One, because a retry here asks an identical question and gets an identical answer.
-     * The request pins `temperature: 0`, and [CognitionProtocol.renderContext] renders only
+     * The request pins `temperature: 0`, and [ComposedCognitionProtocol.renderContext] renders only
      * fields derived from the fold — none of which the substrate changes between attempts
      * within a wake (the malformed row is not rendered, and the escalation that would move
      * the rendered count is written only after the attempts are exhausted). So a second

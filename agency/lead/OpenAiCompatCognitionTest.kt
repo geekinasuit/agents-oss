@@ -43,7 +43,8 @@ class OpenAiCompatCognitionTest {
     val ep = FakeOpenAiEndpoint(body, status)
     endpoint = ep
     return OpenAiCompatCognition(
-      OpenAiCompatHarness(OpenAiCompatProfile.ollama(MODEL, ep.baseUrl))
+      OpenAiCompatHarness(OpenAiCompatProfile.ollama(MODEL, ep.baseUrl)),
+      CognitionProtocol.composed,
     )
   }
 
@@ -145,7 +146,8 @@ class OpenAiCompatCognitionTest {
   fun aDeadEndpointEscalatesAndIsNotRecordedAsModelDegradation() {
     val cognition =
       OpenAiCompatCognition(
-        OpenAiCompatHarness(OpenAiCompatProfile.ollama(MODEL, "http://127.0.0.1:1"))
+        OpenAiCompatHarness(OpenAiCompatProfile.ollama(MODEL, "http://127.0.0.1:1")),
+        CognitionProtocol.composed,
       )
     val out = cognition.decide(wake())
 
@@ -184,7 +186,8 @@ class OpenAiCompatCognitionTest {
         store = store,
         cognition =
           OpenAiCompatCognition(
-            OpenAiCompatHarness(OpenAiCompatProfile.ollama(MODEL, ep.baseUrl))
+            OpenAiCompatHarness(OpenAiCompatProfile.ollama(MODEL, ep.baseUrl)),
+            CognitionProtocol.composed,
           ),
         podRunner = FakePodRunner(holdCompletions = true),
         podSpec = PodSpec.fixture(),

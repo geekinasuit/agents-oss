@@ -54,6 +54,7 @@ class ClaudeCognitionSmokeTest {
         ClaudeCognition(
           harness = ClaudeHarness(),
           workDir = dir,
+          protocol = CognitionProtocol.composed,
           maxBudgetUsd = 0.25,
         )
       )

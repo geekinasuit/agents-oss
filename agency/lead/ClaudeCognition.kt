@@ -11,7 +11,7 @@ import java.io.File
  * can release a gate — the folds' provenance check is indifferent to how clever the
  * proposal text is.
  *
- * The prompt, the state rendering and the parse are [CognitionProtocol] — shared with
+ * The prompt, the state rendering and the parse are [protocol] — shared with
  * every other model-backed strategy so the lead accepts exactly one definition of a
  * decision regardless of which provider produced it. What this class owns is the Claude
  * transport: the headless CLI turn, its budget caps, and its session/cost provenance.
@@ -27,6 +27,8 @@ class ClaudeCognition(
   private val harness: ClaudeHarness = ClaudeHarness(),
   private val model: String = ClaudeHarness.MODEL,
   private val workDir: File,
+  /** The protocol the lead speaks; required, so no strategy can default to one workflow's. */
+  private val protocol: ComposedCognitionProtocol,
   private val maxBudgetUsd: Double = 0.25,
   /** Cumulative cap across the lead's LIFE, read from the journal-derived
    * [LeadState.cognitionSpendUsd] — not an in-memory counter, so restarts keep every cost
@@ -67,11 +69,11 @@ class ClaudeCognition(
     }
     val turn =
       harness.turn(
-        prompt = CognitionProtocol.renderContext(context),
+        prompt = protocol.renderContext(context),
         workDir = workDir,
         model = model,
         maxBudgetUsd = maxBudgetUsd,
-        appendSystemPrompt = CognitionProtocol.SYSTEM_PROMPT,
+        appendSystemPrompt = protocol.systemPrompt,
         timeoutSec = timeoutSec,
       )
     val meta =
@@ -88,6 +90,6 @@ class ClaudeCognition(
         presentation = ContextPresentation.NOT_PRESENTED,
       )
     }
-    return CognitionProtocol.parseOutput(turn.resultText, meta, ContextPresentation.PRESENTED)
+    return protocol.parseOutput(turn.resultText, meta, ContextPresentation.PRESENTED)
   }
 }

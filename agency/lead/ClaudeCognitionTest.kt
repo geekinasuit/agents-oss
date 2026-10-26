@@ -40,6 +40,7 @@ class ClaudeCognitionTest {
     ClaudeCognition(
       harness = ClaudeHarness(fake.bin.absolutePath),
       workDir = workDir,
+      protocol = CognitionProtocol.composed,
       maxTotalUsd = maxTotalUsd,
       timeoutSec = 30,
     )

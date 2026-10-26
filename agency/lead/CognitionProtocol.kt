@@ -4,60 +4,17 @@ import org.json.JSONException
 import org.json.JSONObject
 
 /**
- * The contract every model-backed [CognitionStrategy] speaks: what the model is told
- * ([SYSTEM_PROMPT]), how a wake's folded state is shown to it ([renderContext]), and how
- * its reply is turned into typed proposals ([parseOutput]).
- *
- * It lives apart from any one strategy because the contract is a property of the
- * SUBSTRATE, not of the provider underneath. Two strategies reaching the same model
- * through different transports must agree on it exactly — a second prompt or a second
- * parser would let "what the lead accepts as a decision" drift by provider, and the fold
- * would then be recording two different things under one origin.
- *
- * Nothing here trusts its input. Parsing is lenient about packaging and strict about
- * structure, and a strategy's transport concerns (auth, timeouts, cost) stay out.
- *
- * The ticket workflow's parts (its proposal types, rules and state lines) come from
- * [TicketWorkflowProtocol]. This object holds the host's parts and composes the two.
+ * Which undelivered mail a render shows, and how. It depends on no workflow: the protocol's
+ * render ([ComposedCognitionProtocol.renderContext]) and the daemon's retirement of what a turn
+ * was shown both read it, so the two cannot disagree.
  */
-object CognitionProtocol {
-  private val PROMPT_HEADER =
-    """
-    You are the cognition loop of an Agency lead daemon. You are shown the lead's folded
-    state once per wake. You PROPOSE; you never release gates — releases come only from
-    the human authorization layer, and the journal fold rejects anything else.
-
-    Respond with EXACTLY one JSON object, no prose around it:
-    {"proposals": [
-    """
-      .trimIndent()
-
-  /** The shapes of the host's own proposals, listed after the workflow's. */
-  private val HOST_PROPOSAL_SHAPES =
-    listOf(
-      """{"type": "status", "status": "<short line>"}""",
-      """{"type": "escalate", "reason": "<why a human should look>"}""",
-    )
-
-  /**
-   * The header, then every proposal shape as one union (the first indented, each later one after
-   * a `|`), then the closing line and the workflow's rules.
-   */
-  val SYSTEM_PROMPT =
-    (listOf(PROMPT_HEADER) +
-        (TicketWorkflowProtocol.PROPOSAL_SHAPES + HOST_PROPOSAL_SHAPES).mapIndexed { i, shape ->
-          (if (i == 0) "   " else " | ") + shape
-        } +
-        """ ], "reasoning": "<one or two sentences>"}""" +
-        TicketWorkflowProtocol.RULES)
-      .joinToString("\n")
-
+object MailRender {
   /** Prompt bounds on untrusted mailbox content. */
-  private const val MAX_MAIL_SHOWN = 20
+  internal const val MAX_MAIL_SHOWN = 20
   private const val MAX_MAIL_CHARS = 500
 
   /**
-   * One undelivered mail as [renderContext] shows it: [text] is the first [MAX_MAIL_CHARS] chars
+   * One undelivered mail as [ComposedCognitionProtocol.renderContext] shows it: [text] is the first [MAX_MAIL_CHARS] chars
    * of a message [totalChars] long, which [line] quotes into the prompt.
    *
    * The bound is measured on the source text, before quoting. Cutting the quoted form instead
@@ -85,7 +42,7 @@ object CognitionProtocol {
 
   /**
    * The mail a render shows: the first [MAX_MAIL_SHOWN] undelivered messages, each bounded to
-   * [MAX_MAIL_CHARS]. [renderContext] renders exactly this, and [mailRenderedForRetirement]
+   * [MAX_MAIL_CHARS]. [ComposedCognitionProtocol.renderContext] renders exactly this, and [mailRenderedForRetirement]
    * derives from it, so what the prompt shows and what the daemon retires cannot disagree.
    */
   fun mailShown(undelivered: List<Pair<Long, String>>): List<ShownMail> =
@@ -107,6 +64,89 @@ object CognitionProtocol {
    */
   fun mailRenderedForRetirement(undelivered: List<Pair<Long, String>>): Set<Long> =
     mailShown(undelivered).map { it.seq }.toSet()
+}
+
+/**
+ * A workflow's part of the cognition protocol: its proposal types and how they parse, its lines
+ * of the system prompt, and its lines of the rendered state. [ComposedCognitionProtocol] composes
+ * it with the host's part.
+ */
+interface WorkflowProtocol {
+  /** The shapes of this workflow's proposals, which the system prompt lists ahead of the host's. */
+  val proposalShapes: List<String>
+
+  /** The rules that end the system prompt. */
+  val rules: String
+
+  /** The proposal types [parseProposal] parses. None may be a host type. */
+  val proposalTypes: Set<String>
+
+  /** This workflow's lines of the rendered state, shown after the wake reason. */
+  fun renderLines(lead: LeadState): List<String>
+
+  /** Whether [gate] reads approved in the rendered state. */
+  fun gateReadsApproved(lead: LeadState, gate: OpenGate): Boolean
+
+  /**
+   * Parses [p], a proposal of [type], one of [proposalTypes]. A near-miss is returned as
+   * [ProposalParse.Malformed], never thrown.
+   */
+  fun parseProposal(type: String, p: JSONObject): ProposalParse
+}
+
+/**
+ * The contract every model-backed [CognitionStrategy] speaks: what the model is told
+ * ([systemPrompt]), how a wake's folded state is shown to it ([renderContext]), and how
+ * its reply is turned into typed proposals ([parseOutput]).
+ *
+ * It lives apart from any one strategy because the contract is a property of the
+ * SUBSTRATE, not of the provider underneath. Two strategies reaching the same model
+ * through different transports must agree on it exactly — a second prompt or a second
+ * parser would let "what the lead accepts as a decision" drift by provider, and the fold
+ * would then be recording two different things under one origin.
+ *
+ * Nothing here trusts its input. Parsing is lenient about packaging and strict about
+ * structure, and a strategy's transport concerns (auth, timeouts, cost) stay out.
+ *
+ * This class holds the host's part and composes it with [workflow]'s. It refuses a workflow that
+ * claims a type the host parses, which the host's arms would otherwise shadow.
+ */
+class ComposedCognitionProtocol(private val workflow: WorkflowProtocol) {
+  init {
+    val shared = workflow.proposalTypes intersect HOST_TYPES
+    require(shared.isEmpty()) { "the workflow claims proposal types the host parses: ${shared.sorted()}" }
+  }
+
+  private val PROMPT_HEADER =
+    """
+    You are the cognition loop of an Agency lead daemon. You are shown the lead's folded
+    state once per wake. You PROPOSE; you never release gates — releases come only from
+    the human authorization layer, and the journal fold rejects anything else.
+
+    Respond with EXACTLY one JSON object, no prose around it:
+    {"proposals": [
+    """
+      .trimIndent()
+
+  /** The shapes of the host's own proposals, listed after the workflow's. */
+  private val HOST_PROPOSAL_SHAPES =
+    listOf(
+      """{"type": "status", "status": "<short line>"}""",
+      """{"type": "escalate", "reason": "<why a human should look>"}""",
+    )
+
+  /**
+   * The header, then every proposal shape as one union (the first indented, each later one after
+   * a `|`), then the closing line and the workflow's rules.
+   */
+  val systemPrompt =
+    (listOf(PROMPT_HEADER) +
+        (workflow.proposalShapes + HOST_PROPOSAL_SHAPES).mapIndexed { i, shape ->
+          (if (i == 0) "   " else " | ") + shape
+        } +
+        """ ], "reasoning": "<one or two sentences>"}""" +
+        workflow.rules)
+      .joinToString("\n")
 
   /**
    * The wake's state as the model sees it. Every field rendered here is derived from the
@@ -117,12 +157,12 @@ object CognitionProtocol {
     val lead = context.lead
     val sb = StringBuilder()
     sb.appendLine("WAKE: ${renderReason(context.reason)}")
-    for (line in TicketWorkflowProtocol.renderLines(lead)) sb.appendLine(line)
+    for (line in workflow.renderLines(lead)) sb.appendLine(line)
     sb.appendLine(
       "openGates: " +
         lead.openGates.values
           .joinToString(", ") {
-            "${it.gateId}(digest=${it.payloadDigest}, approved=${TicketWorkflowProtocol.gateReadsApproved(lead, it)})"
+            "${it.gateId}(digest=${it.payloadDigest}, approved=${workflow.gateReadsApproved(lead, it)})"
           }
           .ifEmpty { "none" }
     )
@@ -135,11 +175,11 @@ object CognitionProtocol {
     // Mail is untrusted content rendered into the model prompt: bound
     // both the count and per-message length so a huge or prompt-injected mailbox cannot
     // amplify cost or dominate the context. The per-message bound is on the source text, and
-    // quoting can expand it about sixfold (see [ShownMail]). Content is data, never executed — the
-    // execute-time proposal guards are what stop a hostile message causing an effect.
-    for (mail in mailShown(context.undeliveredMail)) sb.appendLine(mail.line())
-    if (context.undeliveredMail.size > MAX_MAIL_SHOWN)
-      sb.appendLine("  … ${context.undeliveredMail.size - MAX_MAIL_SHOWN} more not shown")
+    // quoting can expand it about sixfold (see [MailRender.ShownMail]). Content is data, never
+    // executed — the execute-time proposal guards are what stop a hostile message causing an effect.
+    for (mail in MailRender.mailShown(context.undeliveredMail)) sb.appendLine(mail.line())
+    if (context.undeliveredMail.size > MailRender.MAX_MAIL_SHOWN)
+      sb.appendLine("  … ${context.undeliveredMail.size - MailRender.MAX_MAIL_SHOWN} more not shown")
     if (context.undeliveredMail.isEmpty()) sb.appendLine("  none")
     return sb.toString()
   }
@@ -201,17 +241,16 @@ object CognitionProtocol {
               ?: return CognitionOutput.malformed(MalformedReasons.PROPOSAL_NOT_OBJECT, meta)
           when (val type = p.optString("type")) {
             "" -> return CognitionOutput.malformed(MalformedReasons.PROPOSAL_NO_TYPE, meta)
-            "status" -> proposals += Proposal.ProposeStatus(p.required("status"))
-            "escalate" -> proposals += Proposal.ProposeEscalate(p.required("reason"))
-            // Any other type is the workflow's or unknown. Each proposal is parsed as it is
-            // reached and appended to the one list, so the batch keeps its order and the first
-            // near-miss decides the reason, whichever side owns its type.
-            else ->
-              when (val parsed = TicketWorkflowProtocol.parseProposal(type, p)) {
+            // Each proposal is parsed as it is reached and appended to the one list, so the batch
+            // keeps its order and the first near-miss decides the reason, whichever side owns its
+            // type.
+            in HOST_PARSERS -> proposals += HOST_PARSERS.getValue(type)(p)
+            in workflow.proposalTypes ->
+              when (val parsed = workflow.parseProposal(type, p)) {
                 is ProposalParse.Ok -> proposals += parsed.proposal
                 is ProposalParse.Malformed -> return CognitionOutput.malformed(parsed.reason, meta)
-                null -> return CognitionOutput.malformed(MalformedReasons.UNKNOWN_TYPE, meta)
               }
+            else -> return CognitionOutput.malformed(MalformedReasons.UNKNOWN_TYPE, meta)
           }
         }
       }
@@ -224,10 +263,21 @@ object CognitionProtocol {
     }
   }
 
+  private companion object {
+    /** The host's own proposals, by type. A missing or blank field throws from [required]. */
+    val HOST_PARSERS: Map<String, (JSONObject) -> Proposal> =
+      mapOf(
+        "status" to { p -> Proposal.ProposeStatus(p.required("status")) },
+        "escalate" to { p -> Proposal.ProposeEscalate(p.required("reason")) },
+      )
+
+    /** The types the host parses or reads as "no type"; a workflow may claim none of them. */
+    val HOST_TYPES = HOST_PARSERS.keys + ""
+  }
 }
 
 /** What a workflow made of one proposal of a type it owns. */
-internal sealed interface ProposalParse {
+sealed interface ProposalParse {
   data class Ok(val proposal: Proposal) : ProposalParse
 
   /** The proposal is a near-miss; [reason] is one of [MalformedReasons]. */
@@ -246,7 +296,7 @@ internal fun JSONObject.required(field: String): String {
 }
 
 /**
- * Every reason the lead writes on a [LeadKinds.COGNITION_MALFORMED] row: [CognitionProtocol.parseOutput]'s
+ * Every reason the lead writes on a [LeadKinds.COGNITION_MALFORMED] row: [ComposedCognitionProtocol.parseOutput]'s
  * classifications and the daemon's fallback. The fold holds a reason only when [isLeads] accepts
  * it, so a row the lead did not write cannot put its own text in [LeadState.malformedCognition].
  */
@@ -263,7 +313,7 @@ object MalformedReasons {
   const val PARSE_FAILURE_JSON = PARSE_FAILURE_PREFIX + "JSONException"
   const val PARSE_FAILURE_OTHER = PARSE_FAILURE_PREFIX + "an unexpected exception"
 
-  /** The fields [CognitionProtocol.parseOutput] requires; a missing one is named. */
+  /** The fields [ComposedCognitionProtocol.parseOutput] requires; a missing one is named. */
   val REQUIRED_FIELDS = setOf("taskRef", "gateKind", "payloadDigest", "status", "reason")
 
   fun missingField(field: String): String = "proposal field '$field' is missing or blank"

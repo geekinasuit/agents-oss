@@ -25,7 +25,7 @@ data class CognitionChoice(
 
 /**
  * Where a lead's cognition strategy is chosen. Provider plurality is the point:
- * each entry differs only in transport, and all of them speak [CognitionProtocol].
+ * each entry differs only in transport, and all of them speak [CognitionProtocol.composed].
  */
 object CognitionSelection {
   /** Deterministic playbook, no model: the CI default. */
@@ -33,16 +33,16 @@ object CognitionSelection {
 
   /** Headless Claude CLI. Billed, so the daemon's default retry allowance applies —
    * a resample can legitimately differ from the near-miss that preceded it. */
-  fun claude(workDir: File, model: String = ClaudeHarness.MODEL) =
+  fun claude(workDir: File, model: String = ClaudeHarness.MODEL, harness: ClaudeHarness = ClaudeHarness()) =
     CognitionChoice(
-      ClaudeCognition(workDir = workDir, model = model),
+      ClaudeCognition(harness = harness, workDir = workDir, model = model, protocol = PROTOCOL),
       maxCognitionAttempts = DEFAULT_MAX_ATTEMPTS,
     )
 
   /** Local Ollama over loopback: no key, no egress, no bill. */
   fun ollama(model: String, baseUrl: String = OpenAiCompatProfile.OLLAMA_BASE_URL) =
     CognitionChoice(
-      OpenAiCompatCognition(OpenAiCompatHarness(OpenAiCompatProfile.ollama(model, baseUrl))),
+      OpenAiCompatCognition(OpenAiCompatHarness(OpenAiCompatProfile.ollama(model, baseUrl)), PROTOCOL),
       maxCognitionAttempts = OpenAiCompatCognition.MAX_ATTEMPTS_PER_WAKE,
     )
 
@@ -69,4 +69,7 @@ object CognitionSelection {
 
   /** The daemon's own default, restated here so a choice that wants it says so. */
   private const val DEFAULT_MAX_ATTEMPTS = 2
+
+  /** The protocol every strategy chosen here speaks: a ticket lead's. */
+  private val PROTOCOL = CognitionProtocol.composed
 }
