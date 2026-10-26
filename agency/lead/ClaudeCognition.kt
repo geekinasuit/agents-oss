@@ -23,15 +23,15 @@ import java.io.File
  * Model selection comes from the capability descriptor; the wake-loop
  * blocking guarantee — zero turns while nothing happens — lives in the daemon, not here.
  */
-class ClaudeCognition(
+class ClaudeCognition<S : HostView>(
   private val harness: ClaudeHarness = ClaudeHarness(),
   private val model: String = ClaudeHarness.MODEL,
   private val workDir: File,
   /** The protocol the lead speaks; required, so no strategy can default to one workflow's. */
-  private val protocol: ComposedCognitionProtocol,
+  private val protocol: ComposedCognitionProtocol<S>,
   private val maxBudgetUsd: Double = 0.25,
   /** Cumulative cap across the lead's LIFE, read from the journal-derived
-   * [LeadState.cognitionSpendUsd] — not an in-memory counter, so restarts keep every cost
+   * [HostView.cognitionSpendUsd] — not an in-memory counter, so restarts keep every cost
    * already journaled. At the cap: one visible escalation, then idle without spending (no
    * turn is run). KNOWN GAP, stated not hidden: the paid turn is NOT
    * journaled intent-before-effect, so a crash between the harness call returning and
@@ -42,7 +42,7 @@ class ClaudeCognition(
    * unbounded wake-driven spend, not an exact meter. */
   private val maxTotalUsd: Double = 5.0,
   private val timeoutSec: Int = 120,
-) : CognitionStrategy {
+) : AgentCognition<S> {
   override val name = "claude"
 
   /**
@@ -51,7 +51,7 @@ class ClaudeCognition(
    * context, so both report [ContextPresentation.NOT_PRESENTED] and leave the wake's mail
    * undelivered.
    */
-  override fun decide(context: WakeContext): CognitionOutput {
+  override fun decide(context: AgentWakeContext<S>): CognitionOutput {
     if (context.lead.cognitionSpendUsd >= maxTotalUsd) {
       val alreadyRaised = context.lead.escalations.any { it.startsWith("cognition budget") }
       return if (alreadyRaised) CognitionOutput.idle(ContextPresentation.NOT_PRESENTED)

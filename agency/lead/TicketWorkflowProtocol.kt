@@ -6,7 +6,7 @@ import org.json.JSONObject
  * The ticket workflow's part of the cognition protocol: its proposal types and how they parse, its
  * lines of the system prompt, and its lines of the rendered state. This object holds no state.
  */
-internal object TicketWorkflowProtocol : WorkflowProtocol {
+internal object TicketWorkflowProtocol : WorkflowProtocol<LeadState> {
   override val proposalShapes =
     listOf(
       """{"type": "pod-spawn", "taskRef": "plan:<ticket>" | "execute:<ticket>"}""",

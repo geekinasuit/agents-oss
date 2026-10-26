@@ -48,7 +48,7 @@ class WorkflowProtocolTest {
   @Test
   fun theHostSpeaksThroughTheWorkflowItIsGiven() {
     val stub =
-      object : WorkflowProtocol {
+      object : WorkflowProtocol<LeadState> {
         override val proposalShapes = listOf("""{"type": "stub-note"}""")
         override val rules = "Stub rules."
         override val proposalTypes = setOf("stub-note")
@@ -90,7 +90,7 @@ class WorkflowProtocolTest {
   }
 
   private fun workflowOwning(type: String) =
-    object : WorkflowProtocol {
+    object : WorkflowProtocol<LeadState> {
       override val proposalShapes = emptyList<String>()
       override val rules = ""
       override val proposalTypes = setOf(type)

@@ -4,11 +4,11 @@ import com.geekinasuit.agency.shared.journal.JournalState
 
 /**
  * The cognition seam: the model-bearing layer is a
- * strategy the model-free substrate HOSTS. Per wake the substrate renders a [WakeContext]
- * view, calls [CognitionStrategy.decide], journals a usable output with origin = cognition (the
+ * strategy the model-free substrate HOSTS. Per wake the substrate renders an [AgentWakeContext]
+ * view, calls [AgentCognition.decide], journals a usable output with origin = cognition (the
  * audit record) unless it has neither proposals nor call meta, as a scripted idle turn does, then
  * executes the proposals itself — the substrate is the sole journal writer and the sole actor.
- * While the output is unusable, the substrate calls [CognitionStrategy.decide] again, a bounded
+ * While the output is unusable, the substrate calls [AgentCognition.decide] again, a bounded
  * number of times, and journals each unusable attempt with substrate origin and without the
  * model's text. A gate-open retry timer's wake does not call it while the timer's nonce is still
  * the one its gate waits on and no mail waits: the substrate sends the failed announce again
@@ -20,13 +20,25 @@ import com.geekinasuit.agency.shared.journal.JournalState
  * ticket, recording a finished pod's artifact, proposing the commit manifest, driving the
  * post-approval effect). Nothing cognition can output releases a gate: the fold's release
  * check keys on origin == auth layer, and cognition-origin entries can never satisfy it.
+ *
+ * [lead] is the folded state of a lead running some workflow: the host reads it only through
+ * [HostView], and the workflow's own code reads the rest.
  */
-data class WakeContext(
+data class AgentWakeContext<out S : HostView>(
   val reason: WakeReason,
-  val lead: LeadState,
+  val lead: S,
   val shared: JournalState,
   val undeliveredMail: List<Pair<Long, String>>,
 )
+
+/** What the host's own code reads of a lead's folded state, whatever workflow the lead runs. */
+interface HostView {
+  val openGates: Map<String, OpenGate>
+  val activePods: List<PodRecord>
+  val staleReleases: List<Pair<Long, String>>
+  val escalations: List<String>
+  val cognitionSpendUsd: Double
+}
 
 sealed interface WakeReason {
   /** First pass after adopt (fresh start or kill-recovery). */
@@ -134,21 +146,21 @@ data class CognitionOutput(
   }
 }
 
-interface CognitionStrategy {
+interface AgentCognition<in S : HostView> {
   val name: String
 
-  fun decide(context: WakeContext): CognitionOutput
+  fun decide(context: AgentWakeContext<S>): CognitionOutput
 }
 
 /** Test wrapper: counts [decide] calls — the zero-spend-while-idle assertion's probe. Its
  * output, presentation included, is the wrapped strategy's own. */
-class CountingCognition(private val inner: CognitionStrategy) : CognitionStrategy {
+class CountingCognition<S : HostView>(private val inner: AgentCognition<S>) : AgentCognition<S> {
   @Volatile var calls: Int = 0
     private set
 
   override val name = inner.name
 
-  override fun decide(context: WakeContext): CognitionOutput {
+  override fun decide(context: AgentWakeContext<S>): CognitionOutput {
     calls += 1
     return inner.decide(context)
   }

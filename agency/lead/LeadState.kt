@@ -74,7 +74,7 @@ data class LeadState(
   val planArtifactSha: String? = null,
   val commitManifestPath: String? = null,
   val commitManifestDigest: String? = null,
-  val openGates: Map<String, OpenGate> = emptyMap(),
+  override val openGates: Map<String, OpenGate> = emptyMap(),
   val releasedGates: Set<String> = emptySet(),
   /** For each gate, the payload digests it has ALREADY been released on — the epoch-precise
    * single-release guard. [releasedGates] answers "released at all this ticket?" (gate-keyed,
@@ -94,7 +94,7 @@ data class LeadState(
    * keeps its old mark, and the mark's seq says which release it describes (never the
    * current one). */
   val nonceLessReleases: Map<String, Long> = emptyMap(),
-  val staleReleases: List<Pair<Long, String>> = emptyList(), // (seq, open gate's id, or "an unknown gate id of N chars") — auth origin, but digest mismatch, unknown gate, or nonce indiscipline (consumed/unknown/misbound/absent-where-required)
+  override val staleReleases: List<Pair<Long, String>> = emptyList(), // (seq, open gate's id, or "an unknown gate id of N chars") — auth origin, but digest mismatch, unknown gate, or nonce indiscipline (consumed/unknown/misbound/absent-where-required)
   /** Every nonce issued this ticket, by value — consumed ones stay listed ([consumedNonces]
    * marks them) so a re-issue of a spent value is detectable as the anomaly it is. */
   val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
@@ -136,7 +136,7 @@ data class LeadState(
   val pendingSpawnIntents: Map<String, Long> = emptyMap(), // taskRef → intent seq: spawn journaled, POD_SPAWNED not yet
   val misOriginedEntries: List<Pair<Long, String>> = emptyList(), // (seq, kind): substrate-authored kind with a non-substrate origin — never honored
   val statusTail: List<String> = emptyList(),
-  val escalations: List<String> = emptyList(),
+  override val escalations: List<String> = emptyList(),
   /** Gate id → the digests the gate was escalated on this ticket as holding up the stage it guards.
    * A gate is escalated on a digest in four cases: it is open on the digest under a ceremony auth
    * with no usable nonce, one the mint issues none for, and not released on it; it is open on the
@@ -173,12 +173,12 @@ data class LeadState(
   val doneTickets: List<String> = emptyList(),
   /** Journal-derived total model spend: the sum of costUsd across journaled cognition
    * decisions. The budget guard reads THIS, not an in-memory counter — restarts keep it. */
-  val cognitionSpendUsd: Double = 0.0,
-) {
+  override val cognitionSpendUsd: Double = 0.0,
+) : HostView {
   val pendingGates: List<OpenGate>
     get() = openGates.values.filter { it.gateId !in releasedGates }.sortedBy { it.openedSeq }
 
-  val activePods: List<PodRecord>
+  override val activePods: List<PodRecord>
     get() = pods.values.filter { it.active }.sortedBy { it.spawnedSeq }
 
   fun gate(gateKind: String): OpenGate? = openGates.values.firstOrNull { it.gateKind == gateKind }
@@ -294,6 +294,12 @@ data class LeadState(
       .filter { it.taskRef == taskRef && it.abandonedReason == null }
       .maxByOrNull { it.spawnedSeq }
 }
+
+/** A wake's context in a ticket lead. */
+typealias WakeContext = AgentWakeContext<LeadState>
+
+/** A cognition strategy for a ticket lead. */
+typealias CognitionStrategy = AgentCognition<LeadState>
 
 /** The form the substrate records an evidence digest in: [sha256HexBytes]'s lowercase hex. */
 private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
