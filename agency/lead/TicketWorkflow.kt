@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.lead
 
+import com.geekinasuit.agency.lead.PayloadReaders.str
 import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.JournalState
 import com.geekinasuit.agency.shared.journal.payloadObject
