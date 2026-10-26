@@ -26,6 +26,7 @@ load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
 kt_jvm_library(
     name = "lead",
     srcs = [
+        "AgentHost.kt",
         "AuthStub.kt",
         "ClaudeCognition.kt",
         "Cognition.kt",
@@ -38,7 +39,6 @@ kt_jvm_library(
         "HostKinds.kt",
         "HostRecords.kt",
         "HostSeams.kt",
-        "LeadDaemon.kt",
         "LeadState.kt",
         "OpenAiCompatCognition.kt",
         "PayloadReaders.kt",
