@@ -200,10 +200,12 @@ private const val COMMIT_EFFECT_PREFIX = "apply-commit:"
  * The ticket workflow: claim an offered ticket, record its plan, propose its commit, and apply the
  * commit once both gates are approved on their evidence. Tickets come from [ticketSource].
  */
-internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow {
+internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow<LeadState> {
   override val substrateKinds: Set<String> = TICKET_WORKFLOW_SUBSTRATE_KINDS
   override val scopeEndKinds: Set<String> = TICKET_WORKFLOW_SCOPE_END_KINDS
   override val gateKinds: Set<String> = GateKinds.ALL
+
+  override fun fold(entries: List<JournalEntry>, auth: LeadAuth): LeadState = leadFold(entries, auth)
 
   /** The current ticket, when it is a ref the claim accepts. */
   override fun scopeKey(lead: LeadState): String? = lead.currentTicket?.takeIf { isClaimableTicketRef(it) }

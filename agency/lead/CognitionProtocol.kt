@@ -208,7 +208,7 @@ class ComposedCognitionProtocol<S : HostView>(private val workflow: WorkflowProt
    *
    * SEMANTIC validity is a separate boundary and stays where it is: whether a well-formed
    * taskRef names the CURRENT ticket, and whether a digest matches substrate evidence, are
-   * checked against folded state at execute time (LeadDaemon.executeProposals), which is
+   * checked against folded state at execute time (AgentHost.executeProposals), which is
    * the only place that state is authoritative.
    *
    * [presentation] is the caller's account of the turn [text] came from, carried onto a usable

@@ -60,25 +60,26 @@ import kotlinx.serialization.json.put
  * the real ceremony) and are honored by the folds' provenance + digest checks, never by
  * this class's control flow.
  */
-class LeadDaemon(
+class AgentHost<S : HostView> internal constructor(
   private val store: JournalStore,
-  private val cognition: CognitionStrategy,
+  private val cognition: AgentCognition<S>,
   private val podRunner: PodRunner,
   /** The pod profile this lead spawns — LEAD-OWNED config (substrate-constructed;
    * cognition proposes a task, never a descriptor). REQUIRED, no default: which profile a
    * daemon launches is a deliberate configuration act, and a silently-defaulted profile
    * would be a footgun in either direction. Fence-checked at the spawn site. */
   private val podSpec: PodSpec,
-  ticketSource: TicketSource,
+  /** The workflow this lead runs. */
+  private val workflow: Workflow<S>,
   private val workdir: File,
   private val effects: EffectReceiver,
   /** The authorization context every fold verifies against — allow-list, signature verifier,
    * and release quorum ([LeadAuth]). REQUIRED, no default, for the same reason [podSpec] is:
    * which principals and quorum authorize a release is a security-load-bearing choice, and a
-   * silently-defaulted one would be exactly the footgun [leadFold] refuses at the fold. A
+   * silently-defaulted one would be exactly the footgun [Workflow.fold] refuses at the fold. A
    * daemon not yet wired for the real ceremony passes [LeadAuth.DENY_ALL] explicitly — the
    * honest spelling of "this daemon cannot clear a ceremony gate yet"; its nonce-less
-   * pre-ceremony releases still fold as before, since the fold ([leadFold]) refuses the
+   * pre-ceremony releases still fold as before, since the fold ([Workflow.fold]) refuses the
    * nonce-less path only under a ceremony auth ([LeadAuth.hasApprovers]), never under DENY_ALL. */
   private val leadAuth: LeadAuth,
   /** Fires the daemon's timers, such as the one a failed gate-open announce waits on before it is
@@ -130,9 +131,6 @@ class LeadDaemon(
   private val maxParkedBoundReads: Int = DEFAULT_MAX_PARKED_BOUND_READS,
 ) {
 
-  /** The workflow this lead runs: the ticket workflow, on tickets from the ticket source. */
-  private val workflow = TicketWorkflow(ticketSource)
-
   /** What the host does for [workflow]. */
   private val hostServices =
     object : HostServices {
@@ -142,17 +140,17 @@ class LeadDaemon(
 
       override fun faultAt(point: String) = faults.at(point)
 
-      override fun escalate(reason: String) = this@LeadDaemon.escalate(reason)
+      override fun escalate(reason: String) = this@AgentHost.escalate(reason)
 
-      override fun escalateGate(gate: OpenGate, reason: String) = this@LeadDaemon.escalateGate(gate, reason)
+      override fun escalateGate(gate: OpenGate, reason: String) = this@AgentHost.escalateGate(gate, reason)
 
       override fun fireEffect(key: String, message: String, attempt: Int) =
-        this@LeadDaemon.fireEffect(key, message, attempt)
+        this@AgentHost.fireEffect(key, message, attempt)
 
       override fun effectSeen(key: String): Boolean = key in effects.seenKeys()
 
       override fun verifiedBoundArtifact(pod: PodRecord): VerifiedArtifact? =
-        this@LeadDaemon.verifiedBoundArtifact(pod)
+        this@AgentHost.verifiedBoundArtifact(pod)
     }
 
   init {
@@ -288,7 +286,7 @@ class LeadDaemon(
    * longer loses the approval (the next adopt re-folds it and the pipeline advances). The
    * folds' teeth are unchanged: provenance + digest binding decide whether the release is
    * honored, and a release accepted before its gate opened lands VISIBLY in
-   * [LeadState.staleReleases] — re-approving remains safe.
+   * [HostView.staleReleases] — re-approving remains safe.
    */
   fun injectAuthRelease(gateId: String, payloadDigest: String) {
     AuthStub.appendRelease(store, gateId, payloadDigest)
@@ -448,7 +446,7 @@ class LeadDaemon(
    * completions arrive through the queue, so "drained" means the pipeline is blocked on
    * outside input: a pending gate, a held pod, or nothing to do).
    */
-  fun driveUntilQuiescent(): Folded {
+  fun driveUntilQuiescent(): Folded<S> {
     check(active.compareAndSet(false, true)) { "lead daemon is already running (single loop rule)" }
     try {
       adopt(refold())
@@ -463,16 +461,16 @@ class LeadDaemon(
     }
   }
 
-  data class Folded(val entriesSize: Int, val shared: JournalState, val lead: LeadState)
+  data class Folded<out T : HostView>(val entriesSize: Int, val shared: JournalState, val lead: T)
 
-  fun refold(): Folded {
+  fun refold(): Folded<S> {
     val entries = store.readAll()
-    return Folded(entries.size, fold(entries), leadFold(entries, leadAuth))
+    return Folded(entries.size, fold(entries), workflow.fold(entries, leadAuth))
   }
 
   // ---- adopt ----
 
-  private fun adopt(folded: Folded) {
+  private fun adopt(folded: Folded<S>) {
     faults.at("mid-adopt")
     for (t in folded.shared.pendingTimers) {
       timers.arm(t) { id -> queue.put(WakeEvent.TimerDue(id)) }
@@ -501,17 +499,17 @@ class LeadDaemon(
    * key (attempt 2 mirrors the journal fixture).
    *
    * The lead journals one intent, the current ticket's commit effect, and only once
-   * [LeadState.approvedToCommit] holds. The re-drive exists to finish such an intent that a crash
+   * the workflow's commit check holds ([Workflow.redriveMessage]). The re-drive exists to finish such an intent that a crash
    * cut short, so it asks the same question, and fires the message the commit arm builds from the
    * lead's own state, not the one the row carries. The commit arm would fire the same intent on the
    * first wake; the re-drive fires it first, so the approved commit lands even when a later adopt
    * step, or the first wake before the arm, faults, and a fault that persists there recurs on every
    * start. The shared fold accepts an intent row of any origin and reads only its key, so a journal
    * the lead did not write can hold any intent. One that fails the question is not fired, and is
-   * escalated once ([LeadState.declinedEffects]). It stays pending: once the question holds, the
+   * escalated once ([HostView.declinedEffects]). It stays pending: once the question holds, the
    * commit arm fires it.
    */
-  private fun redrivePendingEffects(shared: JournalState, lead: LeadState) {
+  private fun redrivePendingEffects(shared: JournalState, lead: S) {
     for (key in shared.pendingEffectKeys) {
       val message = workflow.redriveMessage(key, lead)
       if (message != null) {
@@ -537,7 +535,7 @@ class LeadDaemon(
 
   /** Fake pods re-spawn, not resume — abandon the in-flight record visibly; the
    * playbook re-proposes from the missing evidence. Real re-attach (--resume) is later work. */
-  private fun respawnActivePods(lead: LeadState) {
+  private fun respawnActivePods(lead: S) {
     for (pod in lead.activePods) {
       store.append(
         HostKinds.POD_ABANDONED,
@@ -559,7 +557,7 @@ class LeadDaemon(
    * that window, regardless of pod realism (a record-integrity obligation: a fresh
    * re-fold must not report "nothing happened" when a spawn was in flight).
    */
-  private fun abandonOrphanedSpawnIntents(lead: LeadState) {
+  private fun abandonOrphanedSpawnIntents(lead: S) {
     for ((taskRef, _) in lead.pendingSpawnIntents) {
       store.append(
         HostKinds.POD_SPAWN_ABANDONED,
@@ -638,7 +636,7 @@ class LeadDaemon(
 
   /** A wake's cognition result together with the fold it was decided on — see
    * [decideWithRetry], which may re-fold between attempts. */
-  private class Decision(val out: CognitionOutput, val folded: Folded)
+  private inner class Decision(val out: CognitionOutput, val folded: Folded<S>)
 
   /**
    * One wake's cognition call, retried a bounded number of times while the output is
@@ -658,10 +656,10 @@ class LeadDaemon(
    * A returned [Decision] carries the fold its winning attempt actually saw, not merely the
    * output: a retry re-folds, and the caller must execute and mark mail against that state.
    */
-  private fun decideWithRetry(reason: WakeReason, initial: Folded): Decision? {
+  private fun decideWithRetry(reason: WakeReason, initial: Folded<S>): Decision? {
     var folded = initial
     for (attempt in 1..maxCognitionAttempts) {
-      val wc = WakeContext(reason, folded.lead, folded.shared, folded.shared.undeliveredMail)
+      val wc = AgentWakeContext(reason, folded.lead, folded.shared, folded.shared.undeliveredMail)
       val out = cognition.decide(wc)
       if (out.malformed == null) return Decision(out, folded)
       journalMalformedCognition(out, attempt)
@@ -839,7 +837,7 @@ class LeadDaemon(
   }
 
   /** Advance everything that needs no judgment. Returns true if anything was appended. */
-  private fun mechanicalPass(folded: Folded): Boolean {
+  private fun mechanicalPass(folded: Folded<S>): Boolean {
     val lead = folded.lead
     val shared = folded.shared
 
@@ -878,7 +876,7 @@ class LeadDaemon(
       // kind is not the kind its id names, which the mint never issues a nonce for, and otherwise
       // once evidence is recorded for its kind, which until then may yet be its digest. It is
       // escalated once per gate and digest: the escalation names both, and the fold keeps them
-      // ([LeadState.escalatedStalls]), so no later pass or restart escalates it again. The one
+      // ([HostView.escalatedStalls]), so no later pass or restart escalates it again. The one
       // append is the escalation and its record, so no crash can fall between them.
       for (kind in workflow.gateKinds) {
         val gate = lead.openGates[workflow.gateId(kind, scopeKey)] ?: continue
@@ -902,7 +900,7 @@ class LeadDaemon(
     // one needs a quorum no approver on its allow-list can meet ([foldRelease]). Nor is the gate
     // escalated anywhere else, and under a timer service that fires nothing a failed announce of it is
     // never sent again. So such a gate is escalated once per gate and digest, under the record the
-    // stall escalation above keeps ([LeadState.escalatedStalls]), whatever the timer service. Only a
+    // stall escalation above keeps ([HostView.escalatedStalls]), whatever the timer service. Only a
     // gate under an id the gate-open derives for the current ticket is escalated, so the id the
     // reason quotes is one the lead derives.
     if (!leadAuth.hasApprovers && scopeKey != null) {
@@ -927,7 +925,7 @@ class LeadDaemon(
     // and the stage it guards waits with nothing to say why. Such a gate is escalated once evidence
     // is recorded for its kind, since until then its digest may yet be that evidence. It is
     // escalated once per gate and digest, under the record the stall escalation above keeps
-    // ([LeadState.escalatedStalls]): no later pass or restart escalates it again, and a gate
+    // ([HostView.escalatedStalls]): no later pass or restart escalates it again, and a gate
     // already escalated on that digest for another reason is not escalated again for its release.
     // This runs under any auth, since such a journal can release a gate under any: under DENY_ALL
     // a release needs no nonce, and under a ceremony auth the journal can issue the nonce too. The
@@ -1015,7 +1013,7 @@ class LeadDaemon(
    * be open on the evidence for its kind ([Workflow.evidenceMismatch]), and no nonce may have been issued on
    * that digest before: a voided one stays withdrawn, and a spent one's release already decided the
    * gate on that digest. */
-  private fun mintRefusal(gate: OpenGate, lead: LeadState): String? {
+  private fun mintRefusal(gate: OpenGate, lead: S): String? {
     val mismatch = workflow.evidenceMismatch(gate.gateKind, gate.payloadDigest, lead)
     return when {
       mismatch != null -> mismatch
@@ -1038,7 +1036,7 @@ class LeadDaemon(
     )
 
   /** Escalate [reason] about [gate]. The row names the gate and the digest it is open on beside the
-   * reason, the pair [LeadState.escalatedStalls] keeps, so the escalation and its record are one
+   * reason, the pair [HostView.escalatedStalls] keeps, so the escalation and its record are one
    * append. */
   private fun escalateGate(gate: OpenGate, reason: String) {
     store.append(
@@ -1070,7 +1068,7 @@ class LeadDaemon(
    * once and its marker is final. An artifact not read is the exception: only whatever blocks the
    * reads can end that, so it is escalated once at that attempt and sent again past it, at the
    * last delay, until the copy is read. Such attempts are counted apart
-   * ([LeadState.notReadAnnounces]), so once the copy is read the sink still gets all of its
+   * ([HostView.notReadAnnounces]), so once the copy is read the sink still gets all of its
    * attempts. An announce no sink made ([AnnounceOutcome.NoSink]) is escalated
    * at once, and its marker is final: no operator was asked for the approval the gate waits on.
    * These bounds count attempts whose marker landed: a crash between an attempt and its marker
@@ -1092,7 +1090,7 @@ class LeadDaemon(
     gateKind: String,
     payloadDigest: String,
     nonce: String,
-    lead: LeadState,
+    lead: S,
   ) {
     val attempt = (lead.failedAnnounces[nonce] ?: 0) + 1
     val resolved = resolveGateArtifact(gateKind, payloadDigest, lead)
@@ -1330,7 +1328,7 @@ class LeadDaemon(
   private fun resolveGateArtifact(
     gateKind: String,
     payloadDigest: String,
-    lead: LeadState,
+    lead: S,
   ): ArtifactResolution {
     val path = workflow.gateArtifactPath(gateKind, lead) ?: return ArtifactResolution.Unresolved("no-bound-path")
     val bytes =
@@ -1581,7 +1579,7 @@ class LeadDaemon(
    *  - duplicates WITHIN one output batch execute once (the snapshot guards alone cannot
    *    see intra-batch repeats).
    */
-  private fun executeProposals(out: CognitionOutput, leadAtDecision: LeadState) {
+  private fun executeProposals(out: CognitionOutput, leadAtDecision: S) {
     val seenGateIds = mutableSetOf<String>()
     val turn = ProposalTurn()
     // Cardinality guard: a wake executes a bounded number of proposals,
@@ -1620,7 +1618,7 @@ class LeadDaemon(
           // Under a ceremony auth every release is nonce-bound, so the gate-open a ceremony
           // daemon journals is immediately followed by the nonce that authorizes THAT gate's
           // release — bound to (gateId, digest) exactly as the fold reads it back
-          // (LeadState.openNonceFor). Guarded on hasApprovers: DENY_ALL has no approvers, and
+          // (HostView.openNonceFor). Guarded on hasApprovers: DENY_ALL has no approvers, and
           // minting under it would brick the pipeline, since an empty allow-list leaves the
           // quorum unsatisfiable and the gate could never release. Idempotent without a key:
           // the seen-gate guard above opens a gate at most once, so this append rides that
@@ -1928,14 +1926,14 @@ private fun announceRetryTimerId(nonce: String, failures: Int): String =
   "gate-open-retry:$nonce:$failures"
 
 /** Whether [timerId] is the retry timer of a failed announce of a nonce some open gate still waits
- * on: that gate's [LeadState.openNonceFor], on the digest it is open on and not consumed. */
-private fun LeadState.isRetryTimerOfAnOpenNonce(timerId: String): Boolean =
+ * on: that gate's [HostView.openNonceFor], on the digest it is open on and not consumed. */
+private fun HostView.isRetryTimerOfAnOpenNonce(timerId: String): Boolean =
   openGates.values.any { gate ->
     val nonce = openNonceFor(gate)?.nonce ?: return@any false
     (1..(failedAnnounces[nonce] ?: 0)).any { announceRetryTimerId(nonce, it) == timerId }
   }
 
-/** Lead-tier attempt cap (see [LeadDaemon] failureAbandons): failure-abandons per taskRef
+/** Lead-tier attempt cap (see [AgentHost] failureAbandons): failure-abandons per taskRef
  * per PROCESS before the spawn site stops re-proposing and escalates. Three genuine
  * attempts before wedging visibly; a restart grants three more. */
 private const val MAX_TASK_ATTEMPTS_PER_PROCESS = 3

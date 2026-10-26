@@ -72,7 +72,7 @@ class OpenAiCompatCognition<S : HostView>(
   companion object {
     /**
      * Cognition attempts to allow per wake when the lead is wired with this strategy
-     * ([LeadDaemon.maxCognitionAttempts]).
+     * ([AgentHost.maxCognitionAttempts]).
      *
      * One, because a retry here asks an identical question and gets an identical answer.
      * The request pins `temperature: 0`, and [ComposedCognitionProtocol.renderContext] renders only

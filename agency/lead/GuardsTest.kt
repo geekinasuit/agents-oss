@@ -1350,8 +1350,8 @@ class GuardsTest {
   private fun awaitFold(
     d: LeadDaemon,
     what: String,
-    cond: (LeadDaemon.Folded) -> Boolean,
-  ): LeadDaemon.Folded {
+    cond: (AgentHost.Folded<LeadState>) -> Boolean,
+  ): AgentHost.Folded<LeadState> {
     val deadline = System.currentTimeMillis() + 5_000
     while (System.currentTimeMillis() < deadline) {
       val f = d.refold()

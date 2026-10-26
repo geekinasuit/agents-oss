@@ -35,7 +35,7 @@ class ClaudeCognition<S : HostView>(
    * already journaled. At the cap: one visible escalation, then idle without spending (no
    * turn is run). KNOWN GAP, stated not hidden: the paid turn is NOT
    * journaled intent-before-effect, so a crash between the harness call returning and
-   * [LeadDaemon.journalCognitionOutput] loses that turn's cost — cumulative spend can
+   * [AgentHost.journalCognitionOutput] loses that turn's cost — cumulative spend can
    * UNDERCOUNT by at most one turn across a crash. Closing the window (journal an intent with
    * an estimated cost BEFORE the call, reconcile the real cost on completion) is future
    * budget work. Until then this is a FLOOR that bounds

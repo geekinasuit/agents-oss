@@ -19,9 +19,9 @@ import kotlinx.serialization.json.JsonObject
 
 /**
  * The host's half of the lead fold: the records every agent keeps, whatever workflow it runs —
- * gates, nonces, approvals, releases, announces, pods, escalations, spend. Each field means what
- * the [LeadState] field of the same name means; [leadFold] assembles a [LeadState] from this and a
- * [TicketWorkflowState].
+ * gates, nonces, approvals, releases, announces, pods, escalations, spend. A workflow assembles
+ * its lead's state from this and its own half ([foldLeadJournal]), and the host reads that state
+ * through [HostView], whose fields mean what the fields of the same name here mean.
  */
 internal data class HostState(
   val runsStarted: Int = 0,
@@ -81,7 +81,7 @@ internal data class HostStep(val state: HostState, val outcome: HostOutcome)
  * gate in [hostStep]. COGNITION_PROPOSED is excluded (legitimately cognition-origin); GATE_RELEASED
  * is not a lead kind — its auth-origin check lives in foldRelease. State-inert kinds (POD_EVENT —
  * no fold arm consumes them) are still listed: "never honored" is vacuous for them, but a forged
- * row must land in [LeadState.misOriginedEntries] rather than fold invisibly — the audit half of
+ * row must land in [HostState.misOriginedEntries] rather than fold invisibly — the audit half of
  * the origin gate applies to every substrate-only kind, not just the state-carrying ones. */
 internal val HOST_SUBSTRATE_KINDS =
   setOf(
@@ -107,6 +107,49 @@ internal val HOST_SUBSTRATE_KINDS =
  * ([requireKindPartition]). */
 internal val HOST_KINDS: Set<String> =
   HOST_SUBSTRATE_KINDS + setOf(HostKinds.APPROVAL_RECORDED, HostKinds.COGNITION_PROPOSED, KIND_GATE_RELEASED)
+
+/**
+ * Folds a lead's journal: each entry through the host's step ([hostStep]) and then the workflow's
+ * ([workflowStep]), which sees what the host step did with the entry, and the two results assembled
+ * into the lead's state ([assemble]). A failure is classified by the entry it failed on
+ * ([LeadFoldException]).
+ *
+ * The loop, the order of the two steps and the failure's classification are the host's; the
+ * workflow supplies its own state's start, step and assembly, and what [hostStep] asks of it.
+ */
+internal fun <W, S> foldLeadJournal(
+  entries: List<JournalEntry>,
+  auth: LeadAuth,
+  workflowKinds: Set<String>,
+  isScopeEnd: (JournalEntry) -> Boolean,
+  workflowStart: W,
+  expectedTaskRefs: (W) -> Set<String>,
+  workflowStep: (W, JournalEntry, HostOutcome) -> W,
+  assemble: (HostState, W) -> S,
+): S {
+  var host = HostState()
+  var workflow = workflowStart
+  for (e in entries) {
+    try {
+      val step =
+        hostStep(
+          host,
+          e,
+          auth,
+          workflowKinds = workflowKinds,
+          isScopeEnd = isScopeEnd(e),
+          expectedTaskRefs = expectedTaskRefs(workflow),
+        )
+      workflow = workflowStep(workflow, e, step.outcome)
+      host = step.state
+    } catch (x: LeadFoldException) {
+      throw x
+    } catch (x: Exception) {
+      throw LeadFoldException(e.seq, e.kind, x)
+    }
+  }
+  return assemble(host, workflow)
+}
 
 /**
  * Folds one entry into the host's records.
@@ -149,7 +192,7 @@ internal fun hostStep(
     // (statusTail, escalations, misOriginedEntries, malformedCognition) persist as the running
     // record — a model's degradation rate is a property of the model, not of the scope it
     // happened to be working, so it must not reset at a scope boundary. declinedEffects persists
-    // too (see [LeadState.declinedEffects]).
+    // too (see [HostState.declinedEffects]).
     return HostStep(
       s.copy(
         openGates = emptyMap(),
@@ -177,7 +220,7 @@ internal fun hostStep(
     HostKinds.ESCALATED -> {
       val escalated = s.copy(escalations = (s.escalations + p.str("reason")).takeLast(ANOMALY_TAIL))
       // An escalation of a gate that holds up its stage names the gate and its digest beside the
-      // reason ([LeadState.escalatedStalls]). Only two JSON strings are recorded: a row with any
+      // reason ([HostState.escalatedStalls]). Only two JSON strings are recorded: a row with any
       // other value there is still an escalation, and at worst its gate is escalated again, never
       // silenced. Any digest counts, blank or not, since it is the one the gate is open on.
       val gateId = p.jsonStringOrNull("stalledGateId")
@@ -405,7 +448,7 @@ private fun folded(s: HostState): HostStep = HostStep(s, HostOutcome.Folded)
  * value must never enter the total the budget cap reads — NaN makes every `spend >= cap`
  * comparison false, so the cap would never trip and wake-driven spend would be unbounded,
  * and a negative value would understate spend. Only a finite, non-negative cost accrues, so
- * [LeadState.cognitionSpendUsd] stays finite and monotonic non-decreasing.
+ * [HostState.cognitionSpendUsd] stays finite and monotonic non-decreasing.
  */
 private fun accruedCost(p: JsonObject): Double =
   p.strOrNull("costUsd")?.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0
@@ -416,7 +459,7 @@ private fun accruedCost(p: JsonObject): Double =
  * nonce (ceremony) path — a quorum of VERIFIED approvers is satisfied. Wrong origin is the
  * shared fold's visible rejection (re-asserted here by simply not honoring); everything else
  * auth-origin-but-unfaithful (or quorum-unmet) is retained visibly as
- * [LeadState.staleReleases]. An honored release is reported as [HostOutcome.GateReleased], which
+ * [HostState.staleReleases]. An honored release is reported as [HostOutcome.GateReleased], which
  * is what lets the workflow advance on it.
  *
  * QUORUM (2b): once a release names a faithful nonce, the gate clears only if
@@ -456,18 +499,18 @@ private fun accruedCost(p: JsonObject): Double =
  * hold the ceremony-auth refusal; the per-gate clause's own stale-fold is exercised by
  * `nullNonceFieldOnAReleaseReadsAsAbsent` under DENY_ALL.
  *
- * Nonce-less honors (reachable on a DENY_ALL fold only) are marked in [LeadState.nonceLessReleases], keyed by gate to
+ * Nonce-less honors (reachable on a DENY_ALL fold only) are marked in [HostState.nonceLessReleases], keyed by gate to
  * the FIRST honoring release's seq, so the disposition stays legible after the fact — the
  * honor is itself single-use per gate, mirroring the consumed-nonce rule: a second
  * nonce-less release of a marked gate folds stale rather than silently re-honoring and
  * retargeting the mark. That also means a re-opened gate cannot be honored nonce-less a
  * second time within a scope (the guard reads the mark, which the scope end clears with the
  * rest of the scoped records) — deliberate conservatism on a stub
- * path, and visible in [LeadState.staleReleases] rather than silent. A later ceremony
+ * path, and visible in [HostState.staleReleases] rather than silent. A later ceremony
  * release of a re-opened gate stays distinguishable from the mark.
  *
  * On the re-open shapes several cells exercise: the daemon opens each gateId at most once
- * per ticket (LeadDaemon's seen-gate guard), so a re-opened gate is a journal-level fold
+ * per ticket (the host's seen-gate guard), so a re-opened gate is a journal-level fold
  * surface, not a transition the daemon currently produces. On a real payload change today
  * the gate stays open on the old digest and the voiding path that fires is an explicit
  * [HostKinds.NONCE_CONSUMED] — which the step-2 ceremony must remember to journal.
@@ -543,9 +586,9 @@ private fun foldRelease(s: HostState, e: JournalEntry, p: JsonObject, auth: Lead
  * flat columns (top-level and evidence) are lookup indices held to agreement, never trusted —
  * so the flat `principalId` a record claims can never by itself put an approver in a quorum.
  *
- * A verified approval lands in [LeadState.verifiedApprovals] under its COMMITTED gate, keyed
+ * A verified approval lands in [HostState.verifiedApprovals] under its COMMITTED gate, keyed
  * by the preimage-derived principal, deduped on (principal, nonce, digest). Anything that
- * fails a step lands in [LeadState.unverifiedApprovals] with a reason and contributes
+ * fails a step lands in [HostState.unverifiedApprovals] with a reason and contributes
  * nothing — a null/absent preimage included (fail-closed: unverifiable, never a pass). The
  * refusal names WHICH layer disagreed, so a split-source attempt is legible after the fact.
  *
@@ -624,7 +667,7 @@ private fun foldApproval(s: HostState, e: JournalEntry, p: JsonObject, auth: Lea
 }
 
 /** Preimage-derived principals whose VERIFIED approval binds [gate] AS IT STANDS — same digest the
- * gate is open on, same [nonce]. See [LeadState.boundApprovers], which reads it. */
+ * gate is open on, same [nonce]. See [foldRelease], which reads it. */
 internal fun boundApprovers(
   verifiedApprovals: Map<String, List<VerifiedApproval>>,
   gate: OpenGate,
