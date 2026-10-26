@@ -21,13 +21,13 @@ import kotlinx.serialization.json.put
  * this helper IS the act of approval: it is a test/CLI hook that appends the release
  * entry with authorization provenance. There is no capability check, principal, or nonce
  * on the call itself — reaching this surface, or
- * [LeadDaemon.injectAuthRelease], IS authorizing a release. So neither may be exposed to a
+ * [AgentHost.injectAuthRelease], IS authorizing a release. So neither may be exposed to a
  * network surface, a mailbox handler, or anything a pod or cognition strategy can reach
  * before the real ceremony lands; that is what keeps "proposer never releases" true here.
  *
  * Note on echoing: current callers copy [payloadDigest] from the pending gate, which would
  * be circular if cognition controlled gate digests — it does not: the substrate opens
- * gates only on its own recorded evidence (see LeadDaemon.executeProposals), so what the
+ * gates only on its own recorded evidence (see AgentHost.executeProposals), so what the
  * echo confirms is substrate evidence. The real ceremony shows the human the digest AND
  * the artifact behind it before they sign.
  */
@@ -36,7 +36,7 @@ object AuthStub {
    * Append a gate release with authorization provenance, bound to [payloadDigest].
    * Store-level surface for SEQUENTIAL processes (fixture subcommands, CLI with no daemon
    * up); in-process approvals while the daemon runs go through
-   * [LeadDaemon.injectAuthRelease], which performs THIS SAME append at the accept boundary
+   * [AgentHost.injectAuthRelease], which performs THIS SAME append at the accept boundary
    * and then rings the loop's doorbell (journal-then-ack, AGENCY-021).
    *
    * SECOND-WRITER HAZARD, updated by the AGENCY-021 fix: within one

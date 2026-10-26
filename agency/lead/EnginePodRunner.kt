@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicReference
  * transport gains an engine, and until then a non-ACP spec is refused loudly below.
  *
  * EVENT SINK, LATE-BOUND: engine and bridge report supervisory facts ([PodEvent]) which
- * belong in the journal via [LeadDaemon.injectPodEvent] — but the daemon is constructed
+ * belong in the journal via [AgentHost.injectPodEvent] — but the daemon is constructed
  * WITH its runner, so the sink cannot exist at construction time. [bindEventSink] closes
  * the loop once, after the daemon exists. An event arriving UNBOUND (a mis-wired rig —
  * impossible through the daemon, which only spawns after construction) throws into the
@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicReference
  * refused — the synchronous accept-boundary append stays (a queue would re-open the
  * accepted-but-not-durable window AGENCY-021 closed), and the counters are READ:
  * [drainHealthFaults] watermarks both counters and returns one fault line per NEW batch
- * of refusals, which [LeadDaemon.handleWake] escalates at the top of every wake — so a
+ * of refusals, which [AgentHost.handleWake] escalates at the top of every wake — so a
  * journal with holes announces itself within one wake, and an idle daemon (no wakes)
  * is also generating no reportable facts beyond what its last wake swept.
  */

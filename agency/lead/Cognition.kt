@@ -38,6 +38,20 @@ interface HostView {
   val staleReleases: List<Pair<Long, String>>
   val escalations: List<String>
   val cognitionSpendUsd: Double
+  val pods: Map<String, PodRecord>
+  val pendingSpawnIntents: Map<String, Long>
+  val declinedEffects: Set<String>
+  val escalatedStalls: Map<String, Set<String>>
+  val issuedNonces: Map<String, IssuedNonce>
+  val notifiedNonces: Set<String>
+  val failedAnnounces: Map<String, Int>
+  val notReadAnnounces: Map<String, Int>
+
+  /** Whether [gateId] is approved on the digest it is open on now. */
+  fun approvedOnCurrentDigest(gateId: String): Boolean
+
+  /** [gate]'s usable nonce: issued for it, on the digest it is open on, and not consumed. */
+  fun openNonceFor(gate: OpenGate): IssuedNonce?
 }
 
 sealed interface WakeReason {

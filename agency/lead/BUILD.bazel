@@ -43,6 +43,7 @@ kt_jvm_library(
         "OpenAiCompatCognition.kt",
         "PayloadReaders.kt",
         "PodSeam.kt",
+        "TicketLead.kt",
         "TicketWorkflow.kt",
         "TicketWorkflowProtocol.kt",
         "Workflow.kt",

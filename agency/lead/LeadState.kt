@@ -97,7 +97,7 @@ data class LeadState(
   override val staleReleases: List<Pair<Long, String>> = emptyList(), // (seq, open gate's id, or "an unknown gate id of N chars") — auth origin, but digest mismatch, unknown gate, or nonce indiscipline (consumed/unknown/misbound/absent-where-required)
   /** Every nonce issued this ticket, by value — consumed ones stay listed ([consumedNonces]
    * marks them) so a re-issue of a spent value is detectable as the anomaly it is. */
-  val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
+  override val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
   val consumedNonces: Set<String> = emptySet(),
   /** Nonces whose gate-open announce is final ([LeadKinds.GATE_OPEN_NOTIFIED] without `retry`):
    * announced, not announced because no sink is wired or the artifact could not be inlined, or
@@ -106,18 +106,18 @@ data class LeadState(
    * afresh, while a final one is never announced again. The notify arm reads this to stop; a
    * marker that says the announce will be sent again counts in [failedAnnounces] instead.
    * Ticket-scoped: [LeadKinds.TICKET_DONE] clears it, as it does [issuedNonces]. */
-  val notifiedNonces: Set<String> = emptySet(),
+  override val notifiedNonces: Set<String> = emptySet(),
   /** Nonce → how many of its announces failed with a failure the sink reported, each marked to be
    * sent again ([LeadKinds.GATE_OPEN_NOTIFIED] with `retry`). The notify arm reads it to find the
    * timer the next attempt waits on, and the daemon to number that attempt, so a failing sink is
    * called once per attempt, never once per pass. [notifiedNonces] takes precedence: a nonce in it
    * is not sent again whatever this holds. Ticket-scoped: [LeadKinds.TICKET_DONE] clears it. */
-  val failedAnnounces: Map<String, Int> = emptyMap(),
+  override val failedAnnounces: Map<String, Int> = emptyMap(),
   /** Nonce → how many of the attempts in [failedAnnounces] were not attempts at all: the bound copy
    * was not read, for a cause outside it (a marker with `notRead`). The daemon counts only the
    * rest toward the bound on a failing sink's attempts. Ticket-scoped: [LeadKinds.TICKET_DONE]
    * clears it. */
-  val notReadAnnounces: Map<String, Int> = emptyMap(),
+  override val notReadAnnounces: Map<String, Int> = emptyMap(),
   /** gateId → approvals that RE-VERIFIED at fold time (signature over preimage, key in the
    * allow-list, committed binding agreeing with the flat copies). The set a release's quorum
    * is evaluated over — an approval that did not verify never lands here, so the flat
@@ -132,8 +132,8 @@ data class LeadState(
    * [LeadKinds.TICKET_DONE] — the one approval-derived view bounded by a tail rather than
    * correctness, because an unverified approval contributes nothing a release depends on. */
   val unverifiedApprovals: List<Pair<Long, String>> = emptyList(),
-  val pods: Map<String, PodRecord> = emptyMap(),
-  val pendingSpawnIntents: Map<String, Long> = emptyMap(), // taskRef → intent seq: spawn journaled, POD_SPAWNED not yet
+  override val pods: Map<String, PodRecord> = emptyMap(),
+  override val pendingSpawnIntents: Map<String, Long> = emptyMap(), // taskRef → intent seq: spawn journaled, POD_SPAWNED not yet
   val misOriginedEntries: List<Pair<Long, String>> = emptyList(), // (seq, kind): substrate-authored kind with a non-substrate origin — never honored
   val statusTail: List<String> = emptyList(),
   override val escalations: List<String> = emptyList(),
@@ -149,7 +149,7 @@ data class LeadState(
    * record are one append. The daemon reads it to escalate each gate and digest once, across
    * restarts, which the capped [escalations] tail cannot promise. Ticket-scoped:
    * [LeadKinds.TICKET_DONE] clears it. */
-  val escalatedStalls: Map<String, Set<String>> = emptyMap(),
+  override val escalatedStalls: Map<String, Set<String>> = emptyMap(),
   /** The pending effect intents adopt declined to re-fire and escalated, each as the SHA-256 of its
    * key's UTF-8 text: a key comes from the journal, of any length, so the record holds a digest of
    * fixed size. Read from the digest an [LeadKinds.ESCALATED] row names beside its reason. The
@@ -166,7 +166,7 @@ data class LeadState(
    * `effect-done` row of any origin already takes an intent out of adopt's view. Adopt never fires
    * such an intent. The lead's own commit intent is still fired by the commit arm, which records its
    * ticket done only once the effect receiver has seen its key. */
-  val declinedEffects: Set<String> = emptySet(),
+  override val declinedEffects: Set<String> = emptySet(),
   /** (seq, reason) for turns whose output was unusable — the degradation signal, kept apart
    * from [escalations] so a degrading model is countable rather than merely noisy. */
   val malformedCognition: List<Pair<Long, String>> = emptyList(),
@@ -196,7 +196,7 @@ data class LeadState(
    * releasedDigests[gateId]`. Fail-closed: a gate not open is not approved. [pendingGates]
    * deliberately keeps the epoch-blind [releasedGates] read; "do not re-surface a gate released
    * at all this ticket" is a different question. */
-  fun approvedOnCurrentDigest(gateId: String): Boolean {
+  override fun approvedOnCurrentDigest(gateId: String): Boolean {
     val gate = openGates[gateId] ?: return false
     return gate.payloadDigest in releasedDigests[gateId].orEmpty()
   }
@@ -262,7 +262,7 @@ data class LeadState(
    * fold stale, and handing it to a notifier would be a silent liveness failure). Latest
    * by issue order if several are open (the release names its nonce explicitly, so
    * "latest" is a convenience for issuers, not an ambiguity at verification). */
-  fun openNonceFor(gate: OpenGate): IssuedNonce? =
+  override fun openNonceFor(gate: OpenGate): IssuedNonce? =
     issuedNonces.values
       .filter {
         it.gateId == gate.gateId &&
@@ -325,30 +325,17 @@ private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
  * would be the footgun this parameter exists to refuse. A substrate not yet wired for the
  * ceremony passes [LeadAuth.DENY_ALL] explicitly.
  */
-fun leadFold(entries: List<JournalEntry>, auth: LeadAuth): LeadState {
-  var host = HostState()
-  var workflow = TicketWorkflowState()
-  for (e in entries) {
-    try {
-      val step =
-        hostStep(
-          host,
-          e,
-          auth,
-          workflowKinds = TICKET_WORKFLOW_SUBSTRATE_KINDS,
-          isScopeEnd = isTicketScopeEnd(e),
-          expectedTaskRefs = workflow.expectedTaskRefs(),
-        )
-      workflow = ticketWorkflowStep(workflow, e, step.outcome)
-      host = step.state
-    } catch (x: LeadFoldException) {
-      throw x
-    } catch (x: Exception) {
-      throw LeadFoldException(e.seq, e.kind, x)
-    }
-  }
-  return assemble(host, workflow)
-}
+fun leadFold(entries: List<JournalEntry>, auth: LeadAuth): LeadState =
+  foldLeadJournal(
+    entries,
+    auth,
+    workflowKinds = TICKET_WORKFLOW_SUBSTRATE_KINDS,
+    isScopeEnd = ::isTicketScopeEnd,
+    workflowStart = TicketWorkflowState(),
+    expectedTaskRefs = TicketWorkflowState::expectedTaskRefs,
+    workflowStep = ::ticketWorkflowStep,
+    assemble = ::assemble,
+  )
 
 private fun assemble(h: HostState, w: TicketWorkflowState): LeadState =
   LeadState(

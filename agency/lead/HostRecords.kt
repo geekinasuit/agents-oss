@@ -64,7 +64,7 @@ data class VerifiedApproval(
 }
 
 /**
- * The authorization context the fold verifies against — supplied to [leadFold], never
+ * The authorization context the fold verifies against — supplied to [foldLeadJournal], never
  * journaled. It bundles the three things a release verdict is a function of BESIDES the
  * journal: the [allowList] of principals permitted to authorize (it lives with us, never
  * with the approval carrier), the signature [verifier] (a port; the real scheme adapter is
@@ -72,8 +72,8 @@ data class VerifiedApproval(
  * approvers must satisfy to release.
  *
  * Because verification happens AT THE FOLD, folded state is a function of (journal, auth):
- * the same journal folded under a different [LeadAuth] can reach a different verdict — see
- * [leadFold]'s recovery-contract note. [DENY_ALL] is the restrictive default: an empty
+ * the same journal folded under a different [LeadAuth] can reach a different verdict, and recovery
+ * re-decides authorization under the auth in force then. [DENY_ALL] is the restrictive default: an empty
  * allow-list, the rejecting verifier, and a quorum naming a principal that cannot exist, so
  * nothing on the ceremony path can clear a gate. It is the honest spelling of "this daemon
  * cannot authorize a ceremony release yet": [hasApprovers] is false, and [foldRelease]
@@ -125,20 +125,20 @@ data class PodRecord(
  * buggy strategy cannot grow re-fold memory without bound. Higher than [statusTail]'s 20 —
  * these carry security-relevant tails (escalations, stale releases, mis-origined entries).
  *
- * The nonce/approval records ([LeadState.issuedNonces], [LeadState.consumedNonces],
- * [LeadState.verifiedApprovals], [LeadState.notifiedNonces], [LeadState.failedAnnounces]) sit
+ * The nonce/approval records ([HostState.issuedNonces], [HostState.consumedNonces],
+ * [HostState.verifiedApprovals], [HostState.notifiedNonces], [HostState.failedAnnounces]) sit
  * DELIBERATELY outside this cap: they are correctness-bearing records, not views. Evicting a
  * consumed nonce re-enables the replay it exists to reject; evicting an issued nonce or a verified
  * approval silently voids a live authorization; evicting a notified nonce re-enables the duplicate
  * gate-open announce its marker exists to suppress; evicting a failed-announce count restarts that
- * nonce's attempts, undoing their bound. ([LeadState.unverifiedApprovals] IS capped by this
+ * nonce's attempts, undoing their bound. ([HostState.unverifiedApprovals] IS capped by this
  * tail — an approval that did not verify contributes nothing a release depends on, so it is a
- * view, not a record.) [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
+ * view, not a record.) [HostState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
  * an audit marker whose absence is itself a claim ("released under the ceremony"), so an
- * evicted entry would not lose the answer, it would invert it. [LeadState.escalatedStalls] is
+ * evicted entry would not lose the answer, it would invert it. [HostState.escalatedStalls] is
  * uncapped too: evicting an entry escalates its gate again, the repeat it exists to suppress. Those
  * seven share the same bound: the ticket, not a tail — TICKET_DONE clears them.
- * [LeadState.declinedEffects] is uncapped for the same reason as the stall record, and is not
+ * [HostState.declinedEffects] is uncapped for the same reason as the stall record, and is not
  * ticket-scoped: it holds one digest per distinct pending intent key adopt declined, since a
  * declined intent stays pending across tickets. Each entry costs its writer a journal row. All
  * their kinds are origin-gated, so only the substrate and the authorization layer can grow them: a

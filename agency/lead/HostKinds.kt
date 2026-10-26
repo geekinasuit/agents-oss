@@ -36,7 +36,7 @@ object HostKinds {
    *
    * SUBSTRATE-authored, always: these are OUR observations of an untrusted process, never
    * anything the pod said about itself. The fold does not act on them — a pod event never
-   * advances the pipeline (see [com.geekinasuit.agency.lead.LeadDaemon.injectPodEvent]) —
+   * advances the pipeline (see [com.geekinasuit.agency.lead.AgentHost.injectPodEvent]) —
    * it is the AUDIT half of the launcher: what a pod asked for, what we answered, and why
    * it died.
    */
@@ -88,14 +88,14 @@ object HostKinds {
    * the one lead kind besides the release itself that is: approvals accumulate toward a
    * quorum, so an approval-shaped entry from cognition or a pod stuffing the count is the
    * same threat as a forged release, and gets the same treatment (never honored, retained
-   * visibly in [LeadState.misOriginedEntries]).
+   * visibly in [HostState.misOriginedEntries]).
    *
    * The fold CONSUMES the evidence sub-object (2b): [foldApproval] re-derives the signer's
    * identity from the signed preimage, re-verifies the signature over it, resolves the
    * committed key to an allow-listed principal, and cross-checks the committed (gate, digest,
    * nonce) against the flat copies — trusting the PREIMAGE, never the flat `principalId`. An
-   * approval that clears all of that lands in [LeadState.verifiedApprovals]; one that does not
-   * lands in [LeadState.unverifiedApprovals] with a reason and contributes nothing. Verified
+   * approval that clears all of that lands in [HostState.verifiedApprovals]; one that does not
+   * lands in [HostState.unverifiedApprovals] with a reason and contributes nothing. Verified
    * accumulation is durable so a k-of-n quorum can fill across restarts, and each verified
    * approval keeps its binding (nonce + digest) so one bound to a superseded digest can never
    * satisfy the re-opened gate. A null/absent preimage is fail-closed: unverifiable, never a

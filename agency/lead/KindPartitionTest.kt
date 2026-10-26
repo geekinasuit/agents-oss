@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.lead
 
+import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.JournalState
 import java.lang.reflect.Modifier
 import org.junit.Assert.assertEquals
@@ -69,10 +70,12 @@ class KindPartitionTest {
     requireKindPartition(HOST_KINDS, FakeWorkflow(kinds = setOf("w-kind", "w-done"), scopeEnds = setOf("w-done")))
   }
 
-  private class FakeWorkflow(kinds: Set<String>, scopeEnds: Set<String> = emptySet()) : Workflow {
+  private class FakeWorkflow(kinds: Set<String>, scopeEnds: Set<String> = emptySet()) : Workflow<LeadState> {
     override val substrateKinds = kinds
     override val scopeEndKinds = scopeEnds
     override val gateKinds = emptySet<String>()
+
+    override fun fold(entries: List<JournalEntry>, auth: LeadAuth) = LeadState()
 
     override fun scopeKey(lead: LeadState): String? = null
 

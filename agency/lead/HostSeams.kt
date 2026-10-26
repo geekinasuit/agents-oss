@@ -11,7 +11,7 @@ fun interface TimerService {
 
   companion object {
     /** Fires nothing: a test that passes it fires each timer itself, with
-     * [LeadDaemon.injectTimerDue]. A daemon under a ceremony auth refuses it, since there a failed
+     * [AgentHost.injectTimerDue]. A daemon under a ceremony auth refuses it, since there a failed
      * gate-open announce waits on a timer to be sent again or escalated. */
     val NOOP = TimerService { _, _ -> }
   }

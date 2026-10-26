@@ -32,7 +32,7 @@ interface PodRunner {
    * completion can arrive synchronously inside spawn, BEFORE the loop has journaled
    * POD_SPAWNED, so an append here would write the result ahead of its pod's spawn record
    * and the fold would drop it (completion facts are the loop's to journal — see
-   * [LeadDaemon.injectPodCompletion]).
+   * [AgentHost.injectPodCompletion]).
    */
   fun spawn(
     spec: PodSpec,

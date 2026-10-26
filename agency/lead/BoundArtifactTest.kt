@@ -111,7 +111,7 @@ class BoundArtifactTest {
 
   /** Asserts that [abandoned]'s pod was abandoned for [reason], that the playbook then proposed the
    * plan again, and that the plan is recorded from the new pod's own bound copy. */
-  private fun assertThePlanWasProposedAgain(f: LeadDaemon.Folded, store: SqliteStore, abandoned: Result, reason: String) {
+  private fun assertThePlanWasProposedAgain(f: AgentHost.Folded<LeadState>, store: SqliteStore, abandoned: Result, reason: String) {
     assertEquals("the pod was abandoned", reason, f.lead.pods[abandoned.podId]?.abandonedReason)
     assertEquals("the playbook proposed the plan again", 2, spawns(store))
     val next = results(store).single { it.podId != abandoned.podId }
