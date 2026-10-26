@@ -331,6 +331,13 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
     return true
   }
 
+  /** The plan's sha for the plan gate, the manifest's digest for the commit gate
+   * ([LeadState.recordedEvidence]). */
+  override fun recordedEvidence(gateKind: String, lead: LeadState): String? = lead.recordedEvidence(gateKind)
+
+  override fun evidenceMismatch(gateKind: String, digest: String, lead: LeadState): String? =
+    lead.evidenceMismatch(gateKind, digest)
+
   /** The recorded plan for the plan gate, the recorded manifest for the commit gate. */
   override fun gateArtifactPath(gateKind: String, lead: LeadState): String? =
     when (gateKind) {

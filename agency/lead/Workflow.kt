@@ -53,6 +53,21 @@ internal interface Workflow {
    * on, or null when the workflow recorded none for that kind. */
   fun gateArtifactPath(gateKind: String, lead: LeadState): String?
 
+  /** The digest the workflow recorded as the evidence a gate of [gateKind] binds to, in whatever
+   * form the journal holds it, or null while none is recorded. The host waits on a gate's evidence
+   * before it escalates the gate as stalled or released off its evidence. */
+  fun recordedEvidence(gateKind: String, lead: LeadState): String?
+
+  /** Why a gate of [gateKind] open on [digest] is not open on the workflow's evidence for that kind,
+   * or null when it is. The host mints a gate's nonce only when this is null, and escalates a
+   * released gate for which it is not.
+   *
+   * Null is an obligation, not only an answer: the host binds a nonce to [digest] on it, and does
+   * not check [digest] itself. So null only for a digest in the form the substrate records evidence
+   * in (lowercase sha256 hex), never for a blank one. A nonce bound to a blank digest makes every
+   * later fold of the journal fail. */
+  fun evidenceMismatch(gateKind: String, digest: String, lead: LeadState): String?
+
   /** The message to fire a pending effect keyed [key] with again, or null when the workflow would
    * not journal that effect now. The message comes from [lead], never from the intent row. */
   fun redriveMessage(key: String, lead: LeadState): String?

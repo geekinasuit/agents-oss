@@ -856,8 +856,9 @@ class LeadDaemon(
     // spent and would only announce a decided gate again.
     //
     // So the id and digest a nonce is bound to here are never blank, which the fold refuses, and
-    // are in the forms the lead itself writes: the id is a kind [LeadState.evidenceDigest] knows
-    // and a ticket ref the claim accepts, and the digest is in the hex form the substrate records.
+    // are in the forms the lead itself writes: the id is a kind [Workflow.recordedEvidence] knows
+    // and a ticket ref the claim accepts, and the digest is in the hex form the substrate records,
+    // the only form for which [Workflow.evidenceMismatch] may return null.
     // A gate under any other id or digest came from a journal the lead did not write, or was
     // opened for a claim that came from one, and the mint does not act on it.
     val scopeKey = workflow.scopeKey(lead)
@@ -887,7 +888,7 @@ class LeadDaemon(
           if (gate.gateKind != kind) {
             "its recorded kind of ${gate.gateKind.length} chars is not the kind its id names"
           } else {
-            if (lead.recordedEvidence(kind) == null) continue
+            if (workflow.recordedEvidence(kind, lead) == null) continue
             mintRefusal(gate, lead) ?: continue
           }
         escalateStall(gate, refusal)
@@ -921,7 +922,7 @@ class LeadDaemon(
     }
 
     // A release is acted on only when the digest it approves is the substrate's evidence for the
-    // kind the gate's id names ([LeadState.approvedOnEvidence]). The lead opens a gate only on that
+    // kind the gate's id names ([Workflow.evidenceMismatch]). The lead opens a gate only on that
     // evidence, so a gate released on another digest came from a journal the lead did not write,
     // and the stage it guards waits with nothing to say why. Such a gate is escalated once evidence
     // is recorded for its kind, since until then its digest may yet be that evidence. It is
@@ -939,8 +940,8 @@ class LeadDaemon(
         val gate = lead.openGates[workflow.gateId(kind, scopeKey)] ?: continue
         if (!lead.approvedOnCurrentDigest(gate.gateId)) continue
         if (gate.payloadDigest in lead.escalatedStalls[gate.gateId].orEmpty()) continue
-        if (lead.recordedEvidence(kind) == null) continue
-        val mismatch = lead.evidenceMismatch(kind, gate.payloadDigest) ?: continue
+        if (workflow.recordedEvidence(kind, lead) == null) continue
+        val mismatch = workflow.evidenceMismatch(kind, gate.payloadDigest, lead) ?: continue
         escalateGate(
           gate,
           "gate released off its evidence for ${gate.gateId}: $mismatch — the lead does not act on " +
@@ -1011,11 +1012,11 @@ class LeadDaemon(
   }
 
   /** Why the mechanical pass's mint issues [gate] no nonce, or null when it issues one. The gate must
-   * be open on the evidence for its kind ([LeadState.evidenceMismatch]), and no nonce may have been issued on
+   * be open on the evidence for its kind ([Workflow.evidenceMismatch]), and no nonce may have been issued on
    * that digest before: a voided one stays withdrawn, and a spent one's release already decided the
    * gate on that digest. */
   private fun mintRefusal(gate: OpenGate, lead: LeadState): String? {
-    val mismatch = lead.evidenceMismatch(gate.gateKind, gate.payloadDigest)
+    val mismatch = workflow.evidenceMismatch(gate.gateKind, gate.payloadDigest, lead)
     return when {
       mismatch != null -> mismatch
       lead.issuedNonces.values.any { it.gateId == gate.gateId && it.payloadDigest == gate.payloadDigest } ->
