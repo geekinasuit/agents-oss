@@ -23,15 +23,17 @@ load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
 # CognitionSelection.kt is where a lead picks one, pairing each strategy with the
 # per-wake attempt cap that strategy is safe to run under.
 
+# The host: what every agent runs, whatever workflow it runs. It builds without :lead's sources, so a
+# host-side reference to ticket code fails to resolve, and :lead depends on it, so adding a dependency
+# back would be a cycle. That holds for symbols only, not for ticket knowledge written as strings.
 kt_jvm_library(
-    name = "lead",
+    name = "host",
     srcs = [
         "AgentHost.kt",
         "AuthStub.kt",
         "ClaudeCognition.kt",
         "Cognition.kt",
         "CognitionProtocol.kt",
-        "CognitionSelection.kt",
         "DeadlinedReads.kt",
         "EnginePodRunner.kt",
         "GateOpenSink.kt",
@@ -39,13 +41,9 @@ kt_jvm_library(
         "HostKinds.kt",
         "HostRecords.kt",
         "HostSeams.kt",
-        "LeadState.kt",
         "OpenAiCompatCognition.kt",
         "PayloadReaders.kt",
         "PodSeam.kt",
-        "TicketLead.kt",
-        "TicketWorkflow.kt",
-        "TicketWorkflowProtocol.kt",
         "Workflow.kt",
     ],
     visibility = ["//visibility:public"],
@@ -61,6 +59,32 @@ kt_jvm_library(
         "//agency/shared/journal",
         # Whether a gate-open artifact has something to read, the rule the notice codec holds too.
         "//agency/shared/text",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+        "@maven//:org_json_json",
+    ],
+)
+
+# A ticket lead: the ticket workflow on the host. It exports the host, so a target that depends on
+# it sees both. associates (not deps alone) on :host, since the workflow implements the host's
+# internal contract (Workflow, HostServices, the fold and its records): the two compile as one Kotlin
+# module, and that contract stays out of the public API.
+kt_jvm_library(
+    name = "lead",
+    srcs = [
+        "CognitionSelection.kt",
+        "LeadState.kt",
+        "TicketLead.kt",
+        "TicketWorkflow.kt",
+        "TicketWorkflowProtocol.kt",
+    ],
+    associates = [":host"],
+    visibility = ["//visibility:public"],
+    exports = [":host"],
+    deps = [
+        "//agency/pod",
+        "//agency/shared/harness",
+        "//agency/shared/journal",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
         "@maven//:org_json_json",
@@ -161,24 +185,27 @@ kt_jvm_test(
 )
 
 # The deadline and the bound on reads left blocked, which the lead's bound-copy read runs under.
-# associates (not deps) on :lead, since DeadlinedReads is internal to it.
+# associates (not deps) on :host, since DeadlinedReads is internal to it.
 kt_jvm_test(
     name = "deadlined_reads_test",
     size = "small",
     srcs = ["DeadlinedReadsTest.kt"],
-    associates = [":lead"],
+    associates = [":host"],
     test_class = "com.geekinasuit.agency.lead.DeadlinedReadsTest",
     deps = ["@maven//:junit_junit"],
 )
 
 # Each lead kind is folded by exactly one of the host and the ticket workflow, and a workflow whose
-# kinds would overlap the host's is refused. associates (not deps) on :lead, since the kind sets and
-# the Workflow interface are internal to it.
+# kinds would overlap the host's is refused. associates (not deps) on :host and :lead, since the
+# host's kind set and the Workflow interface are internal to :host, and the ticket workflow's to :lead.
 kt_jvm_test(
     name = "kind_partition_test",
     size = "small",
     srcs = ["KindPartitionTest.kt"],
-    associates = [":lead"],
+    associates = [
+        ":host",
+        ":lead",
+    ],
     test_class = "com.geekinasuit.agency.lead.KindPartitionTest",
     deps = [
         "//agency/shared/journal",
@@ -396,8 +423,12 @@ kt_jvm_test(
     name = "notify_gate_open_test",
     size = "small",
     srcs = ["NotifyGateOpenTest.kt"],
-    # Associated with :lead so a cell can park a read in the daemon's own bound-read pool.
-    associates = [":lead"],
+    # Associated with :host so a cell can park a read in the daemon's own bound-read pool, and with
+    # :lead for the ticket lead's internals.
+    associates = [
+        ":host",
+        ":lead",
+    ],
     test_class = "com.geekinasuit.agency.lead.NotifyGateOpenTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
