@@ -296,7 +296,7 @@ internal fun JSONObject.required(field: String): String {
 }
 
 /**
- * Every reason the lead writes on a [LeadKinds.COGNITION_MALFORMED] row: [ComposedCognitionProtocol.parseOutput]'s
+ * Every reason the lead writes on a [HostKinds.COGNITION_MALFORMED] row: [ComposedCognitionProtocol.parseOutput]'s
  * classifications and the daemon's fallback. The fold holds a reason only when [isLeads] accepts
  * it, so a row the lead did not write cannot put its own text in [LeadState.malformedCognition].
  */

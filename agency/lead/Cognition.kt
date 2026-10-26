@@ -103,7 +103,7 @@ data class CognitionOutput(
    * The reason is the SUBSTRATE's classification of the failure, never the model's own
    * words — so the row stays an observation about an untrusted producer.
    *
-   * A malformed turn journals [LeadKinds.COGNITION_MALFORMED] and its [proposals] are never
+   * A malformed turn journals [HostKinds.COGNITION_MALFORMED] and its [proposals] are never
    * executed: near-miss structured output (valid JSON, an unknown proposal type, a
    * hallucinated gate kind) is untrusted input at the substrate's boundary, not a decision.
    *

@@ -1,14 +1,7 @@
 package com.geekinasuit.agency.lead
 
-import com.geekinasuit.agency.shared.auth.AllowList
-import com.geekinasuit.agency.shared.auth.ApprovalVerifier
-import com.geekinasuit.agency.shared.auth.QuorumNode
-import com.geekinasuit.agency.shared.auth.RejectingVerifier
-import com.geekinasuit.agency.shared.auth.oneOfOne
 import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
-import com.geekinasuit.agency.shared.journal.foldFaultMessage
-import com.geekinasuit.agency.shared.journal.requireContract
 
 /**
  * Lead-chain entry kinds and the lead fold.
@@ -48,218 +41,29 @@ import com.geekinasuit.agency.shared.journal.requireContract
  * exists only in binaries that also know the kinds.
  */
 object LeadKinds {
-  const val RUN_STARTED = "run-started"
-  const val TICKET_CLAIMED = "ticket-claimed"
-  const val PLAN_REQUESTED = "plan-requested"
-  const val PLAN_ARTIFACT_RECORDED = "plan-artifact-recorded"
-  const val COMMIT_PROPOSED = "commit-proposed"
-  const val STATUS_WRITTEN = "status-written"
-  const val TICKET_DONE = "ticket-done"
-  const val ESCALATED = "escalated"
-  const val GATE_OPENED = "gate-opened"
-  const val GATE_OPEN_NOTIFIED = "gate-open-notified"
-  const val POD_SPAWNED = "pod-spawned"
-  const val POD_RESULT_RECORDED = "pod-result-recorded"
-  const val POD_ABANDONED = "pod-abandoned"
-
-  /** Intent journaled BEFORE the spawn side-effect: a pod launch is a
-   * side-effect on the world, so it obeys the same intent-before-effect discipline as an
-   * [com.geekinasuit.agency.shared.journal.EffectReceiver] fire. A kill between the spawn
-   * call and [POD_SPAWNED] would otherwise leave a live pod with NO journal row — re-fold
-   * would say "nothing happened," which is false (a record-integrity violation). The intent
-   * makes the orphan RECORDED: adopt sees an intent with no matching [POD_SPAWNED] and
-   * abandons it visibly. (Reclaiming a real orphaned OS process is the engine's kill-tree
-   * job; this keeps the substrate's own record honest regardless of pod realism.) */
-  const val POD_SPAWN_INTENDED = "pod-spawn-intended"
-
-  /** Adopt's disposition of an orphaned [POD_SPAWN_INTENDED] (no matching [POD_SPAWNED]):
-   * clears the pending intent and surfaces it as an escalation (the pod may or may not have
-   * started; the playbook re-proposes from the now-absent evidence). */
-  const val POD_SPAWN_ABANDONED = "pod-spawn-abandoned"
-
-  /**
-   * A supervisory fact the pod ENGINE observed about a pod it launched: a
-   * permission ask and its decision, a preflight or artifact refusal, a restart attempt or
-   * exhausted cap, a wall-clock kill, a degraded group kill, a discarded late completion.
-   *
-   * SUBSTRATE-authored, always: these are OUR observations of an untrusted process, never
-   * anything the pod said about itself. The fold does not act on them — a pod event never
-   * advances the pipeline (see [com.geekinasuit.agency.lead.LeadDaemon.injectPodEvent]) —
-   * it is the AUDIT half of the launcher: what a pod asked for, what we answered, and why
-   * it died.
-   */
-  const val POD_EVENT = "pod-event"
-
-  /** Cognition output (proposals + reasoning), journaled by the substrate with origin
-   * [com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION] — the audit record of what
-   * the model-bearing layer decided, distinct from the substrate facts that execute it. */
-  const val COGNITION_PROPOSED = "cognition-proposed"
-
-  /**
-   * A cognition turn whose output the substrate could not use: not JSON, an
-   * unknown proposal type, a hallucinated gate kind, a missing required field.
-   *
-   * SUBSTRATE-authored, unlike [COGNITION_PROPOSED]: the payload is OUR classification of
-   * what arrived, not the model's decision — there is no decision to attribute. Held as its
-   * own kind rather than an [ESCALATED] row because structured-output reliability is
-   * DISTRIBUTIONAL: a model degrades by emitting near-misses at some rate, and that rate is
-   * only visible if malformed turns are countable apart from the escalations a working model
-   * legitimately asks for. The turn still COST money, so the fold accrues its spend.
-   */
-  const val COGNITION_MALFORMED = "cognition-malformed"
-
-  /**
-   * A gate-scoped, single-use nonce the substrate minted and journaled (payload: nonce,
-   * gateId, payloadDigest). SUBSTRATE-issued is load-bearing: if the approval surface
-   * minted nonces it would be the sole source of both the pending-gate list AND the nonce
-   * authorizing against it, and mechanical re-verification would degrade to checking one
-   * client's two assertions against each other. The nonce is what makes an approval mean
-   * "once, now, for this gate" — a signature alone proves only "this key said this", and
-   * an approval, once carried outside, can be replayed indefinitely.
-   */
-  const val NONCE_ISSUED = "nonce-issued"
-
-  /**
-   * A nonce explicitly retired (payload: nonce, reason) without — or in addition to — a
-   * release consuming it: voided when its gate re-opens on a new digest, expired, or
-   * recorded as bookkeeping after a release (the fold already derives that consumption, so
-   * the bookkeeping form folds as a no-op). Journal-derived spent-ness is the point:
-   * rejecting a replay after a restart falls out of re-folding, not out of any in-memory
-   * table.
-   */
-  const val NONCE_CONSUMED = "nonce-consumed"
-
-  /**
-   * A signature-carrying approval the authorization layer journaled (payload: gateId,
-   * principalId, nonce, payloadDigest, evidence{schemeId, publicKey, signature,
-   * carrierArtifactId, gateId, payloadDigest, nonce, signedPreimage}). AUTH-LAYER-authored —
-   * the one lead kind besides the release itself that is: approvals accumulate toward a
-   * quorum, so an approval-shaped entry from cognition or a pod stuffing the count is the
-   * same threat as a forged release, and gets the same treatment (never honored, retained
-   * visibly in [LeadState.misOriginedEntries]).
-   *
-   * The fold CONSUMES the evidence sub-object (2b): [foldApproval] re-derives the signer's
-   * identity from the signed preimage, re-verifies the signature over it, resolves the
-   * committed key to an allow-listed principal, and cross-checks the committed (gate, digest,
-   * nonce) against the flat copies — trusting the PREIMAGE, never the flat `principalId`. An
-   * approval that clears all of that lands in [LeadState.verifiedApprovals]; one that does not
-   * lands in [LeadState.unverifiedApprovals] with a reason and contributes nothing. Verified
-   * accumulation is durable so a k-of-n quorum can fill across restarts, and each verified
-   * approval keeps its binding (nonce + digest) so one bound to a superseded digest can never
-   * satisfy the re-opened gate. A null/absent preimage is fail-closed: unverifiable, never a
-   * pass — the closure the nullable [com.geekinasuit.agency.shared.auth.ApprovalEvidence]
-   * field defers to this fold.
-   */
-  const val APPROVAL_RECORDED = "approval-recorded"
-}
-
-data class OpenGate(
-  val gateId: String,
-  val gateKind: String,
-  val payloadDigest: String,
-  val openedSeq: Long,
-)
-
-/** A substrate-issued nonce as journaled: bound at issue time to one gate AND the digest
- * that gate was open on. The digest binding is what voids an authorization on payload
- * change — a gate re-opened on a new digest leaves old nonces pointing at a digest the
- * gate no longer has. */
-data class IssuedNonce(
-  val nonce: String,
-  val gateId: String,
-  val payloadDigest: String,
-  val issuedSeq: Long,
-) {
-  init {
-    requireContract(nonce.isNotBlank()) { "an issued nonce requires a non-blank value" }
-    requireContract(gateId.isNotBlank()) { "an issued nonce requires a non-blank gateId" }
-    requireContract(payloadDigest.isNotBlank()) {
-      "an issued nonce requires a non-blank payloadDigest"
-    }
-  }
-}
-
-/**
- * One approval that RE-VERIFIED at fold time: its signature checked out over its committed
- * preimage, the preimage's key resolved to an allow-listed principal, and the preimage's
- * (gate, digest, nonce) agreed with the flat copies beside it. [principalId] is therefore
- * the PREIMAGE-DERIVED identity (the allow-list principal for the committed key) — never the
- * flat `principalId` a record claimed, which the fold no longer trusts. The binding it
- * committed to is retained so consumers filter on (nonce, payloadDigest) against the gate's
- * CURRENT state, leaving a stale-bound approval inert rather than silently counted.
- */
-data class VerifiedApproval(
-  val principalId: String,
-  val nonce: String,
-  val payloadDigest: String,
-  val seq: Long,
-) {
-  init {
-    requireContract(principalId.isNotBlank()) {
-      "a verified approval requires a non-blank principalId"
-    }
-    requireContract(nonce.isNotBlank()) { "a verified approval requires a non-blank nonce" }
-    requireContract(payloadDigest.isNotBlank()) {
-      "a verified approval requires a non-blank payloadDigest"
-    }
-  }
-}
-
-/**
- * The authorization context the fold verifies against — supplied to [leadFold], never
- * journaled. It bundles the three things a release verdict is a function of BESIDES the
- * journal: the [allowList] of principals permitted to authorize (it lives with us, never
- * with the approval carrier), the signature [verifier] (a port; the real scheme adapter is
- * later work, the fold's default is [RejectingVerifier]), and the [quorum] a gate's verified
- * approvers must satisfy to release.
- *
- * Because verification happens AT THE FOLD, folded state is a function of (journal, auth):
- * the same journal folded under a different [LeadAuth] can reach a different verdict — see
- * [leadFold]'s recovery-contract note. [DENY_ALL] is the restrictive default: an empty
- * allow-list, the rejecting verifier, and a quorum naming a principal that cannot exist, so
- * nothing on the ceremony path can clear a gate. It is the honest spelling of "this daemon
- * cannot authorize a ceremony release yet": [hasApprovers] is false, and [foldRelease]
- * refuses the nonce-LESS pre-ceremony path under any ceremony auth, so only a DENY_ALL fold
- * still honors a nonce-less release.
- */
-class LeadAuth(
-  val allowList: AllowList,
-  val verifier: ApprovalVerifier,
-  val quorum: QuorumNode,
-) {
-  /** Whether this auth can authorize a ceremony release at all — true iff the [allowList]
-   * names at least one principal. It is the semantic complement of [DENY_ALL]'s empty
-   * allow-list, derived from the security object rather than an identity check against the
-   * sentinel, so a hand-built equivalent of DENY_ALL is classified the same. The substrate
-   * mints a nonce at gate-open iff this holds, and [foldRelease] refuses a nonce-less release
-   * iff this holds — one predicate, read at both the write and the fold. */
-  val hasApprovers: Boolean
-    get() = !allowList.isEmpty()
-
-  companion object {
-    val DENY_ALL: LeadAuth = LeadAuth(AllowList(emptyList()), RejectingVerifier, oneOfOne("__none__"))
-  }
-}
-
-data class PodRecord(
-  val podId: String,
-  val sessionId: String,
-  val taskRef: String,
-  /** The pod's WRITE TARGET — provenance only after result-record time: consumers
-   * read [boundPath], never this, because the pod's path can be swapped under a digest. */
-  val artifactPath: String,
-  val spawnedSeq: Long,
-  val resultDigest: String? = null,
-  val costUsd: Double? = null,
-  /** The lead-owned immutable copy of the result (bind-once): written from the
-   * engine's single disciplined read before the result row was journaled. Null on a pod
-   * with no result yet — and on pre-bind-once rows, which downstream verification treats
-   * as missing evidence (abandon + re-propose), never as license to read [artifactPath]. */
-  val boundPath: String? = null,
-  val abandonedReason: String? = null,
-) {
-  val active: Boolean
-    get() = resultDigest == null && abandonedReason == null
+  // Every kind of a ticket lead's chain, by its old name: the host's ([HostKinds]) and the ticket
+  // workflow's ([TicketKinds]). Host code names the host's kinds through [HostKinds].
+  const val RUN_STARTED = HostKinds.RUN_STARTED
+  const val TICKET_CLAIMED = TicketKinds.TICKET_CLAIMED
+  const val PLAN_REQUESTED = TicketKinds.PLAN_REQUESTED
+  const val PLAN_ARTIFACT_RECORDED = TicketKinds.PLAN_ARTIFACT_RECORDED
+  const val COMMIT_PROPOSED = TicketKinds.COMMIT_PROPOSED
+  const val STATUS_WRITTEN = HostKinds.STATUS_WRITTEN
+  const val TICKET_DONE = TicketKinds.TICKET_DONE
+  const val ESCALATED = HostKinds.ESCALATED
+  const val GATE_OPENED = HostKinds.GATE_OPENED
+  const val GATE_OPEN_NOTIFIED = HostKinds.GATE_OPEN_NOTIFIED
+  const val POD_SPAWNED = HostKinds.POD_SPAWNED
+  const val POD_RESULT_RECORDED = HostKinds.POD_RESULT_RECORDED
+  const val POD_ABANDONED = HostKinds.POD_ABANDONED
+  const val POD_SPAWN_INTENDED = HostKinds.POD_SPAWN_INTENDED
+  const val POD_SPAWN_ABANDONED = HostKinds.POD_SPAWN_ABANDONED
+  const val POD_EVENT = HostKinds.POD_EVENT
+  const val COGNITION_PROPOSED = HostKinds.COGNITION_PROPOSED
+  const val COGNITION_MALFORMED = HostKinds.COGNITION_MALFORMED
+  const val NONCE_ISSUED = HostKinds.NONCE_ISSUED
+  const val NONCE_CONSUMED = HostKinds.NONCE_CONSUMED
+  const val APPROVAL_RECORDED = HostKinds.APPROVAL_RECORDED
 }
 
 data class LeadState(
@@ -491,45 +295,8 @@ data class LeadState(
       .maxByOrNull { it.spawnedSeq }
 }
 
-/** Bounded-view cap for cognition-controllable / anomaly lists: the
- * journal remains the complete record; these FOLD VIEWS keep only a tail so a hostile or
- * buggy strategy cannot grow re-fold memory without bound. Higher than [statusTail]'s 20 —
- * these carry security-relevant tails (escalations, stale releases, mis-origined entries).
- *
- * The nonce/approval records ([LeadState.issuedNonces], [LeadState.consumedNonces],
- * [LeadState.verifiedApprovals], [LeadState.notifiedNonces], [LeadState.failedAnnounces]) sit
- * DELIBERATELY outside this cap: they are correctness-bearing records, not views. Evicting a
- * consumed nonce re-enables the replay it exists to reject; evicting an issued nonce or a verified
- * approval silently voids a live authorization; evicting a notified nonce re-enables the duplicate
- * gate-open announce its marker exists to suppress; evicting a failed-announce count restarts that
- * nonce's attempts, undoing their bound. ([LeadState.unverifiedApprovals] IS capped by this
- * tail — an approval that did not verify contributes nothing a release depends on, so it is a
- * view, not a record.) [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
- * an audit marker whose absence is itself a claim ("released under the ceremony"), so an
- * evicted entry would not lose the answer, it would invert it. [LeadState.escalatedStalls] is
- * uncapped too: evicting an entry escalates its gate again, the repeat it exists to suppress. Those
- * seven share the same bound: the ticket, not a tail — TICKET_DONE clears them.
- * [LeadState.declinedEffects] is uncapped for the same reason as the stall record, and is not
- * ticket-scoped: it holds one digest per distinct pending intent key adopt declined, since a
- * declined intent stays pending across tickets. Each entry costs its writer a journal row. All
- * their kinds are origin-gated, so only the substrate and the authorization layer can grow them: a
- * party positioned to flood them could already write worse. */
-internal const val ANOMALY_TAIL = 100
-
-/** The one reason the lead writes on a [LeadKinds.POD_SPAWN_ABANDONED] entry; the fold quotes
- * a reason only when it is this one. */
-const val ORPHANED_SPAWN_REASON =
-  "spawn intent orphaned at restart (pod may or may not have started; re-proposing)"
-
 /** The form the substrate records an evidence digest in: [sha256HexBytes]'s lowercase hex. */
 private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
-
-/** A fold failure with its position identified — a malformed payload on a known kind
- * (field missing, wrong type) is chain corruption or payload-contract drift, and it must
- * fail CLASSIFIED (seq + kind named) rather than as an anonymous NPE boot-loop. The message
- * takes [foldFaultMessage]'s form, so it quotes nothing from the entry's payload. */
-class LeadFoldException(seq: Long, kind: String, cause: Throwable) :
-  RuntimeException(foldFaultMessage("lead fold", seq, kind, cause), cause)
 
 /**
  * The lead state machine: `leadState = leadFold(entries, auth)`. Folds the SAME entry list

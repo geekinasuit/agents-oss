@@ -85,20 +85,20 @@ internal data class HostStep(val state: HostState, val outcome: HostOutcome)
  * the origin gate applies to every substrate-only kind, not just the state-carrying ones. */
 internal val HOST_SUBSTRATE_KINDS =
   setOf(
-    LeadKinds.RUN_STARTED,
-    LeadKinds.STATUS_WRITTEN,
-    LeadKinds.ESCALATED,
-    LeadKinds.GATE_OPENED,
-    LeadKinds.GATE_OPEN_NOTIFIED,
-    LeadKinds.POD_SPAWNED,
-    LeadKinds.POD_RESULT_RECORDED,
-    LeadKinds.POD_ABANDONED,
-    LeadKinds.POD_SPAWN_INTENDED,
-    LeadKinds.POD_SPAWN_ABANDONED,
-    LeadKinds.POD_EVENT,
-    LeadKinds.COGNITION_MALFORMED,
-    LeadKinds.NONCE_ISSUED,
-    LeadKinds.NONCE_CONSUMED,
+    HostKinds.RUN_STARTED,
+    HostKinds.STATUS_WRITTEN,
+    HostKinds.ESCALATED,
+    HostKinds.GATE_OPENED,
+    HostKinds.GATE_OPEN_NOTIFIED,
+    HostKinds.POD_SPAWNED,
+    HostKinds.POD_RESULT_RECORDED,
+    HostKinds.POD_ABANDONED,
+    HostKinds.POD_SPAWN_INTENDED,
+    HostKinds.POD_SPAWN_ABANDONED,
+    HostKinds.POD_EVENT,
+    HostKinds.COGNITION_MALFORMED,
+    HostKinds.NONCE_ISSUED,
+    HostKinds.NONCE_CONSUMED,
   )
 
 /** Every kind the host folds: its substrate-only kinds, plus approvals (authored by the
@@ -106,7 +106,7 @@ internal val HOST_SUBSTRATE_KINDS =
  * releases, which the host's release fold reads. A workflow's kinds must be disjoint from these
  * ([requireKindPartition]). */
 internal val HOST_KINDS: Set<String> =
-  HOST_SUBSTRATE_KINDS + setOf(LeadKinds.APPROVAL_RECORDED, LeadKinds.COGNITION_PROPOSED, KIND_GATE_RELEASED)
+  HOST_SUBSTRATE_KINDS + setOf(HostKinds.APPROVAL_RECORDED, HostKinds.COGNITION_PROPOSED, KIND_GATE_RELEASED)
 
 /**
  * Folds one entry into the host's records.
@@ -137,7 +137,7 @@ internal fun hostStep(
   // Same teeth, different sole author: an approval accumulates toward quorum, so its one
   // legitimate origin is the authorization layer — approval-shaped entries from anywhere
   // else (cognition, a pod, an import) are quorum-stuffing and land visibly, never counted.
-  if (e.kind == LeadKinds.APPROVAL_RECORDED && e.origin != ORIGIN_AUTH_LAYER) {
+  if (e.kind == HostKinds.APPROVAL_RECORDED && e.origin != ORIGIN_AUTH_LAYER) {
     return rejected(s, e)
   }
   val p = payloadObject(e.payloadJson)
@@ -172,9 +172,9 @@ internal fun hostStep(
     )
   }
   return when (e.kind) {
-    LeadKinds.RUN_STARTED -> folded(s.copy(runsStarted = s.runsStarted + 1))
-    LeadKinds.STATUS_WRITTEN -> folded(s.copy(statusTail = (s.statusTail + p.str("status")).takeLast(20)))
-    LeadKinds.ESCALATED -> {
+    HostKinds.RUN_STARTED -> folded(s.copy(runsStarted = s.runsStarted + 1))
+    HostKinds.STATUS_WRITTEN -> folded(s.copy(statusTail = (s.statusTail + p.str("status")).takeLast(20)))
+    HostKinds.ESCALATED -> {
       val escalated = s.copy(escalations = (s.escalations + p.str("reason")).takeLast(ANOMALY_TAIL))
       // An escalation of a gate that holds up its stage names the gate and its digest beside the
       // reason ([LeadState.escalatedStalls]). Only two JSON strings are recorded: a row with any
@@ -193,12 +193,12 @@ internal fun hostStep(
       val declined = p.jsonStringOrNull("declinedEffectDigest")
       folded(if (declined == null) stalled else stalled.copy(declinedEffects = stalled.declinedEffects + declined))
     }
-    LeadKinds.GATE_OPENED -> {
+    HostKinds.GATE_OPENED -> {
       val gate = OpenGate(p.str("gateId"), p.str("gateKind"), p.str("payloadDigest"), e.seq)
       HostStep(s.copy(openGates = s.openGates + (gate.gateId to gate)), HostOutcome.GateOpened(gate))
     }
     KIND_GATE_RELEASED -> foldRelease(s, e, p, auth)
-    LeadKinds.POD_SPAWNED -> {
+    HostKinds.POD_SPAWNED -> {
       val pod =
         PodRecord(
           podId = p.str("podId"),
@@ -223,7 +223,7 @@ internal fun hostStep(
     // exactly the no-trace loss that fix exists to end. The lead's own code never writes
     // such an entry, so nothing vouches for its fields: the anomaly names the entry by its
     // seq and the refused pod id by its length, as the nonce re-issue below does its gate id.
-    LeadKinds.POD_RESULT_RECORDED -> {
+    HostKinds.POD_RESULT_RECORDED -> {
       val podId = p.str("podId")
       val pod = s.pods[podId]
       if (pod == null)
@@ -260,7 +260,7 @@ internal fun hostStep(
         HostStep(s.copy(pods = s.pods + (podId to updated)), HostOutcome.PodResultRecorded(updated))
       }
     }
-    LeadKinds.POD_ABANDONED -> {
+    HostKinds.POD_ABANDONED -> {
       val podId = p.str("podId")
       val pod = s.pods[podId]
       if (pod == null)
@@ -277,9 +277,9 @@ internal fun hostStep(
     }
     // A pod launch's intent, journaled before the side-effect. Tracked by taskRef;
     // POD_SPAWNED clears it (fulfilled), POD_SPAWN_ABANDONED clears it (orphaned on adopt).
-    LeadKinds.POD_SPAWN_INTENDED ->
+    HostKinds.POD_SPAWN_INTENDED ->
       folded(s.copy(pendingSpawnIntents = s.pendingSpawnIntents + (p.str("taskRef") to e.seq)))
-    LeadKinds.POD_SPAWN_ABANDONED -> {
+    HostKinds.POD_SPAWN_ABANDONED -> {
       val taskRef = p.str("taskRef")
       val reason = p.str("reason")
       // The lead writes this only for a pending intent, with its one fixed reason; a field
@@ -299,7 +299,7 @@ internal fun hostStep(
         )
       )
     }
-    LeadKinds.NONCE_ISSUED -> {
+    HostKinds.NONCE_ISSUED -> {
       val issued = IssuedNonce(p.str("nonce"), p.str("gateId"), p.str("payloadDigest"), e.seq)
       when {
         // A re-issue of an existing value would REBIND it (or resurrect a spent one) —
@@ -332,7 +332,7 @@ internal fun hostStep(
         }
       }
     }
-    LeadKinds.NONCE_CONSUMED -> {
+    HostKinds.NONCE_CONSUMED -> {
       val nonce = p.str("nonce")
       when {
         nonce !in s.issuedNonces ->
@@ -348,7 +348,7 @@ internal fun hostStep(
         else -> folded(s.copy(consumedNonces = s.consumedNonces + nonce))
       }
     }
-    LeadKinds.GATE_OPEN_NOTIFIED -> {
+    HostKinds.GATE_OPEN_NOTIFIED -> {
       // One attempt to announce this nonce's gate-open (the outcome rides in the payload for the
       // record). A marker that says the announce will be sent again counts one more failed
       // attempt; any other is final. A marker without the field is final, which is also how a
@@ -368,13 +368,13 @@ internal fun hostStep(
         )
       else folded(s.copy(notifiedNonces = s.notifiedNonces + nonce))
     }
-    LeadKinds.APPROVAL_RECORDED -> folded(foldApproval(s, e, p, auth))
-    LeadKinds.COGNITION_PROPOSED -> folded(s.copy(cognitionSpendUsd = s.cognitionSpendUsd + accruedCost(p)))
+    HostKinds.APPROVAL_RECORDED -> folded(foldApproval(s, e, p, auth))
+    HostKinds.COGNITION_PROPOSED -> folded(s.copy(cognitionSpendUsd = s.cognitionSpendUsd + accruedCost(p)))
     // A turn that produced garbage was billed exactly like one that produced a decision, so
     // its cost accrues on the same terms: a model that ONLY emits near-misses would
     // otherwise spend against a cap that never moves.
     // The reason is held only when it is one the lead writes; any other is described by its length.
-    LeadKinds.COGNITION_MALFORMED -> {
+    HostKinds.COGNITION_MALFORMED -> {
       val reason = p.str("reason")
       val held = if (MalformedReasons.isLeads(reason)) reason else "a reason of ${reason.length} chars"
       folded(
@@ -470,7 +470,7 @@ private fun accruedCost(p: JsonObject): Double =
  * per ticket (LeadDaemon's seen-gate guard), so a re-opened gate is a journal-level fold
  * surface, not a transition the daemon currently produces. On a real payload change today
  * the gate stays open on the old digest and the voiding path that fires is an explicit
- * [LeadKinds.NONCE_CONSUMED] — which the step-2 ceremony must remember to journal.
+ * [HostKinds.NONCE_CONSUMED] — which the step-2 ceremony must remember to journal.
  */
 private fun foldRelease(s: HostState, e: JournalEntry, p: JsonObject, auth: LeadAuth): HostStep {
   if (e.origin != ORIGIN_AUTH_LAYER) return folded(s) // forged provenance: never honored here; shared fold records the rejection

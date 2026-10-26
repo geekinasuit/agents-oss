@@ -35,6 +35,8 @@ kt_jvm_library(
         "EnginePodRunner.kt",
         "GateOpenSink.kt",
         "HostFold.kt",
+        "HostKinds.kt",
+        "HostRecords.kt",
         "HostSeams.kt",
         "LeadDaemon.kt",
         "LeadState.kt",
@@ -179,6 +181,19 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.KindPartitionTest",
     deps = [
         "//agency/shared/journal",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Hermetic: the string every lead-chain kind is journaled under, on its side and through LeadKinds.
+# The journal goldens show only the kinds their walks reach.
+kt_jvm_test(
+    name = "kind_wire_strings_test",
+    size = "small",
+    srcs = ["KindWireStringsTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.KindWireStringsTest",
+    deps = [
+        ":lead",
         "@maven//:junit_junit",
     ],
 )

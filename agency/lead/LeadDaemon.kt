@@ -353,7 +353,7 @@ class LeadDaemon(
    * both reports one incident twice.
    */
   fun injectPodEvent(event: PodEvent) {
-    store.append(LeadKinds.POD_EVENT, podEventPayload(event), origin = ORIGIN_SUBSTRATE)
+    store.append(HostKinds.POD_EVENT, podEventPayload(event), origin = ORIGIN_SUBSTRATE)
     terminalDisposition(event)?.let { disposition ->
       // offer, not put — same false-refusal reasoning as injectMail's doorbell.
       queue.offer(WakeEvent.PodDisposed(event.podId, disposition))
@@ -482,7 +482,7 @@ class LeadDaemon(
     respawnActivePods(folded.lead)
     abandonOrphanedSpawnIntents(folded.lead)
     store.append(
-      LeadKinds.RUN_STARTED,
+      HostKinds.RUN_STARTED,
       buildJsonObject {
         put("workspacePath", workdir.absolutePath)
         put("capabilityDesc", capabilityDesc)
@@ -525,7 +525,7 @@ class LeadDaemon(
           ?: ("effect re-drive declined for a key of ${key.length} chars: it is not a key the lead " +
             "journals — the effect is not fired")
       store.append(
-        LeadKinds.ESCALATED,
+        HostKinds.ESCALATED,
         buildJsonObject {
           put("reason", reason.take(MAX_JOURNALED_STRING))
           put("declinedEffectDigest", digest)
@@ -540,7 +540,7 @@ class LeadDaemon(
   private fun respawnActivePods(lead: LeadState) {
     for (pod in lead.activePods) {
       store.append(
-        LeadKinds.POD_ABANDONED,
+        HostKinds.POD_ABANDONED,
         buildJsonObject {
           put("podId", pod.podId)
           put("reason", "lead-restart")
@@ -562,7 +562,7 @@ class LeadDaemon(
   private fun abandonOrphanedSpawnIntents(lead: LeadState) {
     for ((taskRef, _) in lead.pendingSpawnIntents) {
       store.append(
-        LeadKinds.POD_SPAWN_ABANDONED,
+        HostKinds.POD_SPAWN_ABANDONED,
         buildJsonObject {
           put("taskRef", taskRef)
           put("reason", ORPHANED_SPAWN_REASON)
@@ -689,7 +689,7 @@ class LeadDaemon(
    */
   private fun journalMalformedCognition(out: CognitionOutput, attempt: Int) {
     store.append(
-      LeadKinds.COGNITION_MALFORMED,
+      HostKinds.COGNITION_MALFORMED,
       buildJsonObject {
         // Provenance first, our classification last: a meta key colliding with one of ours
         // must not be able to overwrite the substrate's own account of what happened.
@@ -734,7 +734,7 @@ class LeadDaemon(
           )
           refold().lead.pods[c.podId]?.let { noteFailureAbandon(it.taskRef) }
           store.append(
-            LeadKinds.POD_ABANDONED,
+            HostKinds.POD_ABANDONED,
             buildJsonObject {
               put("podId", c.podId.take(MAX_JOURNALED_STRING))
               put("reason", "snapshot-too-large")
@@ -788,7 +788,7 @@ class LeadDaemon(
             )
             refold().lead.pods[c.podId]?.let { noteFailureAbandon(it.taskRef) }
             store.append(
-              LeadKinds.POD_ABANDONED,
+              HostKinds.POD_ABANDONED,
               buildJsonObject {
                 put("podId", c.podId.take(MAX_JOURNALED_STRING))
                 put("reason", "bound-write-failed")
@@ -798,7 +798,7 @@ class LeadDaemon(
             return
           }
         store.append(
-          LeadKinds.POD_RESULT_RECORDED,
+          HostKinds.POD_RESULT_RECORDED,
           buildJsonObject {
             put("podId", c.podId.take(MAX_JOURNALED_STRING))
             // The pod's write target, journaled as PROVENANCE only — never read again.
@@ -825,7 +825,7 @@ class LeadDaemon(
         if (pod != null && pod.active) {
           noteFailureAbandon(pod.taskRef)
           store.append(
-            LeadKinds.POD_ABANDONED,
+            HostKinds.POD_ABANDONED,
             buildJsonObject {
               put("podId", ev.podId)
               put("reason", "engine-terminal: ${ev.disposition.take(200)}")
@@ -999,7 +999,7 @@ class LeadDaemon(
   private fun mintNonce(gateId: String, payloadDigest: String): String {
     val nonce = freshNonceHex()
     store.append(
-      LeadKinds.NONCE_ISSUED,
+      HostKinds.NONCE_ISSUED,
       buildJsonObject {
         put("nonce", nonce)
         put("gateId", gateId)
@@ -1041,7 +1041,7 @@ class LeadDaemon(
    * append. */
   private fun escalateGate(gate: OpenGate, reason: String) {
     store.append(
-      LeadKinds.ESCALATED,
+      HostKinds.ESCALATED,
       buildJsonObject {
         put("reason", reason.take(MAX_JOURNALED_STRING))
         put("stalledGateId", gate.gateId)
@@ -1053,7 +1053,7 @@ class LeadDaemon(
 
   /**
    * Announce a ceremony gate-open through [gateOpenSink] and mark the attempt
-   * ([LeadKinds.GATE_OPEN_NOTIFIED]). Called at the mint site (the normal announce, in the same
+   * ([HostKinds.GATE_OPEN_NOTIFIED]). Called at the mint site (the normal announce, in the same
    * drive the gate opens) and from the mechanical pass (the restart-recovery re-announce, and each
    * retry). The sink must not throw; an ordinary exception is contained as a failed outcome, so it
    * cannot sink the single loop thread — a fatal [Error] is not caught, it propagates as one does
@@ -1155,7 +1155,7 @@ class LeadDaemon(
     if (escalation != null) escalate(escalation)
     faults.at("after-gate-announced")
     store.append(
-      LeadKinds.GATE_OPEN_NOTIFIED,
+      HostKinds.GATE_OPEN_NOTIFIED,
       buildJsonObject {
         put("gateId", gateId)
         put("payloadDigest", payloadDigest)
@@ -1474,7 +1474,7 @@ class LeadDaemon(
   private fun abandon(pod: PodRecord, reason: String) {
     noteFailureAbandon(pod.taskRef)
     store.append(
-      LeadKinds.POD_ABANDONED,
+      HostKinds.POD_ABANDONED,
       buildJsonObject {
         put("podId", pod.podId)
         put("reason", reason.take(MAX_JOURNALED_STRING))
@@ -1522,7 +1522,7 @@ class LeadDaemon(
    */
   private fun journalCognitionOutput(out: CognitionOutput) {
     store.append(
-      LeadKinds.COGNITION_PROPOSED,
+      HostKinds.COGNITION_PROPOSED,
       buildJsonObject {
         // Provenance meta first, our structured account last: strategy / reasoning / proposals
         // are the substrate's own record of the turn, and a meta key colliding with one of ours
@@ -1607,7 +1607,7 @@ class LeadDaemon(
               is GateOpenDecision.Open -> decision.digest
             }
           store.append(
-            LeadKinds.GATE_OPENED,
+            HostKinds.GATE_OPENED,
             buildJsonObject {
               put("gateId", gateId)
               put("gateKind", p.gateKind)
@@ -1642,7 +1642,7 @@ class LeadDaemon(
         }
         is Proposal.ProposeStatus ->
           store.append(
-            LeadKinds.STATUS_WRITTEN,
+            HostKinds.STATUS_WRITTEN,
             buildJsonObject { put("status", p.status.take(MAX_JOURNALED_STRING)) },
             origin = ORIGIN_SUBSTRATE,
           )
@@ -1698,7 +1698,7 @@ class LeadDaemon(
     // RECORDED orphan (adopt abandons it and re-proposes), never an invisible one that a
     // fresh re-fold would wrongly report as "nothing happened".
     store.append(
-      LeadKinds.POD_SPAWN_INTENDED,
+      HostKinds.POD_SPAWN_INTENDED,
       buildJsonObject {
         put("taskRef", taskRef)
         put("artifactPath", artifactFile.path)
@@ -1712,7 +1712,7 @@ class LeadDaemon(
       }
     faults.at("between-spawn-and-journal")
     store.append(
-      LeadKinds.POD_SPAWNED,
+      HostKinds.POD_SPAWNED,
       buildJsonObject {
         put("podId", spawned.podId.take(MAX_JOURNALED_STRING))
         put("sessionId", spawned.sessionId.take(MAX_JOURNALED_STRING))
@@ -1849,7 +1849,7 @@ class LeadDaemon(
    */
   private fun escalate(reason: String) {
     store.append(
-      LeadKinds.ESCALATED,
+      HostKinds.ESCALATED,
       buildJsonObject { put("reason", reason.take(MAX_JOURNALED_STRING)) },
       origin = ORIGIN_SUBSTRATE,
     )
