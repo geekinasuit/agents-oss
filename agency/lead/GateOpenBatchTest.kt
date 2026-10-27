@@ -24,10 +24,12 @@ class GateOpenBatchTest {
 
   /** A strategy whose turns are built from the context each wake presents, so a turn can propose
    * the plan digest the substrate recorded on an earlier wake. Idles once its turns run out. */
-  private class TurnCognition(val turns: MutableList<(WakeContext) -> List<Proposal>>) : CognitionStrategy {
+  private class TurnCognition(
+    val turns: MutableList<(AgentWakeContext<LeadState>) -> List<Proposal>>
+  ) : AgentCognition<LeadState> {
     override val name = "turns"
 
-    override fun decide(context: WakeContext): CognitionOutput {
+    override fun decide(context: AgentWakeContext<LeadState>): CognitionOutput {
       val turn = turns.removeFirstOrNull() ?: return CognitionOutput(presentation = ContextPresentation.PRESENTED)
       return CognitionOutput(turn(context), "turn", presentation = ContextPresentation.PRESENTED)
     }
@@ -44,7 +46,7 @@ class GateOpenBatchTest {
    * next turn. Fails unless every turn ran.
    */
   private fun run(
-    vararg planTurns: (WakeContext) -> List<Proposal>,
+    vararg planTurns: (AgentWakeContext<LeadState>) -> List<Proposal>,
     drives: Int = 1,
     ceremony: Boolean = false,
   ): Run {
@@ -52,10 +54,14 @@ class GateOpenBatchTest {
     File(dir, "ticket.txt").writeText("t1\n")
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val cognition =
-      TurnCognition(mutableListOf<(WakeContext) -> List<Proposal>>({ listOf(Proposal.ProposePodSpawn("plan:t1")) }))
+      TurnCognition(
+        mutableListOf<(AgentWakeContext<LeadState>) -> List<Proposal>>({
+          listOf(Proposal.ProposePodSpawn("plan:t1"))
+        })
+      )
     cognition.turns += planTurns
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = cognition,
         podRunner = FakePodRunner(holdCompletions = false),
@@ -72,7 +78,7 @@ class GateOpenBatchTest {
     return Run(store, lead)
   }
 
-  private fun plan(ctx: WakeContext): String = ctx.lead.planArtifactSha!!
+  private fun plan(ctx: AgentWakeContext<LeadState>): String = ctx.lead.planArtifactSha!!
 
   private fun count(store: SqliteStore, kind: String): Int = store.readAll().count { it.kind == kind }
 
@@ -186,7 +192,7 @@ class GateOpenBatchTest {
     val cognition =
       TurnCognition(mutableListOf({ listOf(Proposal.ProposeGateOpen(GateKinds.PLAN_APPROVAL, badDigest)) }))
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = cognition,
         podRunner = FakePodRunner(holdCompletions = false),

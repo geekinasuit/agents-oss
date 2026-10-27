@@ -59,7 +59,7 @@ class ClaudeCognitionSmokeTest {
         )
       )
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = counting,
         // Held completions: this smoke exercises ONE model wake deterministically; the

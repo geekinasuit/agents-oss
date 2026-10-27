@@ -45,12 +45,12 @@ class PromptGoldenTest {
   @get:Rule val tmp = TemporaryFolder()
 
   /** Delegates to [ScriptedCognition], keeping each context the daemon decides on. */
-  private class Recording : CognitionStrategy {
+  private class Recording : AgentCognition<LeadState> {
     private val inner = ScriptedCognition()
     override val name = inner.name
-    val contexts = mutableListOf<WakeContext>()
+    val contexts = mutableListOf<AgentWakeContext<LeadState>>()
 
-    override fun decide(context: WakeContext): CognitionOutput {
+    override fun decide(context: AgentWakeContext<LeadState>): CognitionOutput {
       contexts += context
       return inner.decide(context)
     }
@@ -102,7 +102,7 @@ class PromptGoldenTest {
    * sends is compared with the golden FILE, not with the protocol's symbols, so a change to how a
    * strategy composes its prompt fails here whatever state it depends on.
    */
-  private fun scenario(name: String, run: Pair<List<WakeContext>, File>) {
+  private fun scenario(name: String, run: Pair<List<AgentWakeContext<LeadState>>, File>) {
     val (contexts, dir) = run
     check(name, renders(contexts.map(CognitionProtocol::renderContext) to dir))
     check(name, renders(sentToClaude(contexts) to dir), wire = "claude")
@@ -112,7 +112,7 @@ class PromptGoldenTest {
   /** The prompt [ClaudeCognition] sends a stand-in `claude` for each of [contexts]. The stand-in
    * writes its arguments one per NUL, so an argument holding newlines and quotes survives intact.
    * Each turn's system prompt must be the golden, appended once. */
-  private fun sentToClaude(contexts: List<WakeContext>): List<String> {
+  private fun sentToClaude(contexts: List<AgentWakeContext<LeadState>>): List<String> {
     val dir = tmp.newFolder()
     val argv = File(dir, "argv")
     val bin =
@@ -137,7 +137,7 @@ class PromptGoldenTest {
 
   /** The user message [OpenAiCompatCognition] sends a stand-in chat endpoint for each of
    * [contexts]. Each request must hold exactly a system message, the golden, and that user message. */
-  private fun sentToOpenAi(contexts: List<WakeContext>): List<String> =
+  private fun sentToOpenAi(contexts: List<AgentWakeContext<LeadState>>): List<String> =
     FakeOpenAiEndpoint(FakeOpenAiEndpoint.reply("""{"proposals": [], "reasoning": "waiting"}""")).use { ep ->
       val cognition = CognitionSelection.ollama("m", ep.baseUrl).strategy
       contexts.map { context ->
@@ -158,7 +158,7 @@ class PromptGoldenTest {
    * has both gates approved on their evidence, which the walk never renders (the commit fires
    * before cognition runs). The ids avoid the renamed patterns, so they render as given.
    */
-  private val wakeContexts: List<WakeContext> by lazy {
+  private val wakeContexts: List<AgentWakeContext<LeadState>> by lazy {
     val plan = "a".repeat(64)
     val manifest = "b".repeat(64)
     val planGate = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
@@ -193,8 +193,8 @@ class PromptGoldenTest {
         WakeReason.PodDisposed("pod-z1", "wall-clock-kill"),
         WakeReason.GateReleased(planGate),
       )
-      .map { WakeContext(it, gated, JournalState(), emptyList()) } +
-      WakeContext(WakeReason.Adopted, approved, JournalState(), emptyList())
+      .map { AgentWakeContext(it, gated, JournalState(), emptyList()) } +
+      AgentWakeContext(WakeReason.Adopted, approved, JournalState(), emptyList())
   }
 
   @Test
@@ -244,7 +244,7 @@ class PromptGoldenTest {
   /** Drives the walk: drive, release the plan gate, drive, release the commit gate, drive. A mail
    * before each release gives a wake that sees the gate open and not yet approved. Returns every
    * context the daemon decided on, and the run's directory. */
-  private fun walk(ceremony: Boolean): Pair<List<WakeContext>, File> {
+  private fun walk(ceremony: Boolean): Pair<List<AgentWakeContext<LeadState>>, File> {
     val dir = tmp.newFolder()
     File(dir, "ticket.txt").writeText("t1\n")
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
@@ -270,11 +270,11 @@ class PromptGoldenTest {
   private fun daemon(
     dir: File,
     store: SqliteStore,
-    cognition: CognitionStrategy,
+    cognition: AgentCognition<LeadState>,
     ceremony: Boolean,
     runner: PodRunner = FakePodRunner(),
   ) =
-    LeadDaemon(
+    ticketLead(
       store = store,
       cognition = cognition,
       podRunner = runner,

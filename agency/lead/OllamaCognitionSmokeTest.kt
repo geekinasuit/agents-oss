@@ -92,7 +92,7 @@ class OllamaCognitionSmokeTest {
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val counting = CountingCognition(cognition())
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = counting,
         // Held completions: this gate exercises the model wake, not the pipeline walk.
@@ -136,7 +136,7 @@ class OllamaCognitionSmokeTest {
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val counting = CountingCognition(cognition())
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = counting,
         podRunner = FakePodRunner(holdCompletions = true),

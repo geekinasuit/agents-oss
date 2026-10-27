@@ -83,7 +83,7 @@ object LeadFixture {
         else -> FakePodRunner(holdCompletions = a.has("hold-pods"))
       }
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = ScriptedCognition(),
         podRunner = runner,

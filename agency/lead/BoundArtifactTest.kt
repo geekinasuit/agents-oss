@@ -30,7 +30,7 @@ import org.junit.rules.TemporaryFolder
  * wake reads the copy back straight away. A crash between the result record and the plan record
  * makes every restart read it again, so a copy disturbed in that window must not stop the lead:
  * whatever sits at the bound path, the read neither blocks nor throws, and it reads at most
- * [LeadDaemon.MAX_BOUND_ARTIFACT_BYTES] plus one byte. The pod is abandoned, a disturbed copy is
+ * [AgentHost.MAX_BOUND_ARTIFACT_BYTES] plus one byte. The pod is abandoned, a disturbed copy is
  * escalated, and the playbook proposes the plan again. A completion whose snapshot is larger than
  * that is refused before its copy is written.
  *
@@ -41,7 +41,7 @@ class BoundArtifactTest {
 
   @get:Rule val tmp = TemporaryFolder()
 
-  private val limit = LeadDaemon.MAX_BOUND_ARTIFACT_BYTES
+  private val limit = AgentHost.MAX_BOUND_ARTIFACT_BYTES
 
   /** The deadline the cells that leave a read blocked pass, so each waits it out in well under a
    * second. */
@@ -52,11 +52,11 @@ class BoundArtifactTest {
     store: SqliteStore,
     faults: FaultInjector = FaultInjector.NONE,
     podRunner: PodRunner = FakePodRunner(),
-    boundReadDeadlineMs: Long = LeadDaemon.DEFAULT_BOUND_READ_DEADLINE_MS,
-    maxParkedBoundReads: Int = LeadDaemon.DEFAULT_MAX_PARKED_BOUND_READS,
-  ): LeadDaemon {
+    boundReadDeadlineMs: Long = AgentHost.DEFAULT_BOUND_READ_DEADLINE_MS,
+    maxParkedBoundReads: Int = AgentHost.DEFAULT_MAX_PARKED_BOUND_READS,
+  ): AgentHost<LeadState> {
     File(dir, "ticket.txt").also { if (!it.exists()) it.writeText("t1\n") }
-    return LeadDaemon(
+    return ticketLead(
       store = store,
       cognition = ScriptedCognition(),
       podRunner = podRunner,
@@ -129,7 +129,7 @@ class BoundArtifactTest {
     abandoned: Result,
     detail: String,
     faults: FaultInjector = FaultInjector.NONE,
-    boundReadDeadlineMs: Long = LeadDaemon.DEFAULT_BOUND_READ_DEADLINE_MS,
+    boundReadDeadlineMs: Long = AgentHost.DEFAULT_BOUND_READ_DEADLINE_MS,
   ) {
     val f = daemon(dir, store, faults = faults, boundReadDeadlineMs = boundReadDeadlineMs).driveUntilQuiescent()
     val escalation = escalations(store).single()

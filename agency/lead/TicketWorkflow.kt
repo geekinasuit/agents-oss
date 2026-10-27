@@ -495,7 +495,7 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
 private const val STALE_RELEASE_REASON = "stale gate release observed (digest mismatch)"
 
 /**
- * Deterministic playbook on [WakeContext] predicates: drives the full ticket
+ * Deterministic playbook on [AgentWakeContext] predicates: drives the full ticket
  * walk — claim (substrate) → plan pod → plan gate → execute pod → commit gate → done
  * (substrate) — with zero model involvement, so every CI path is deterministic. This is
  * the deterministic half of the coverage; [ClaudeCognition] is the model-backed half.
@@ -505,10 +505,10 @@ private const val STALE_RELEASE_REASON = "stale gate release observed (digest mi
  * after kill-recovery abandons a pod mid-flight: the missing evidence simply gets
  * re-proposed. [LeadState.phase] stays the observability surface tests assert on.
  */
-class ScriptedCognition : CognitionStrategy {
+class ScriptedCognition : AgentCognition<LeadState> {
   override val name = "scripted"
 
-  override fun decide(context: WakeContext): CognitionOutput {
+  override fun decide(context: AgentWakeContext<LeadState>): CognitionOutput {
     val lead = context.lead
     val ticket = lead.currentTicket ?: return IDLE
 

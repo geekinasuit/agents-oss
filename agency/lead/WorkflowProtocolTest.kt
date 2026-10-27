@@ -77,7 +77,7 @@ class WorkflowProtocolTest {
     val gate = OpenGate(gateId = "g1", gateKind = "stub-kind", payloadDigest = "d", openedSeq = 1)
     val rendered =
       protocol.renderContext(
-        WakeContext(
+        AgentWakeContext(
           WakeReason.Adopted,
           LeadState(currentTicket = "t9", openGates = mapOf("g1" to gate)),
           JournalState(),

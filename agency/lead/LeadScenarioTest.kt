@@ -20,7 +20,7 @@ import org.junit.rules.TemporaryFolder
  * Assertions read folded state + effect logs, never timing.
  *
  * One named boundary is deliberately NOT in this matrix: `after-gate-released`
- * lives on the in-process AuthRelease ACCEPT path ([LeadDaemon.injectAuthRelease] journals the
+ * lives on the in-process AuthRelease ACCEPT path ([AgentHost.injectAuthRelease] journals the
  * release, then rings the doorbell — journal-then-ack, AGENCY-021), and this fixture applies
  * releases at the STORE level (`AuthStub.appendRelease`, matching the sequential model where the
  * daemon is not running between advances) — so a release never arrives here through the accept

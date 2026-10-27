@@ -265,7 +265,7 @@ class CognitionParsingTest {
         planArtifactSha = "sha-plan",
       )
     val wc =
-      WakeContext(
+      AgentWakeContext(
         reason = WakeReason.MailArrived("please review"),
         lead = lead,
         shared = JournalState(),
@@ -371,7 +371,7 @@ class CognitionParsingTest {
 
   private fun render(lead: LeadState) =
     CognitionProtocol.renderContext(
-      WakeContext(WakeReason.Adopted, lead, JournalState(), emptyList())
+      AgentWakeContext(WakeReason.Adopted, lead, JournalState(), emptyList())
     )
 }
 

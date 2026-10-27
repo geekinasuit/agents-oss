@@ -46,7 +46,7 @@ class ClaudeCognitionTest {
     )
 
   private fun wake(lead: LeadState) =
-    WakeContext(
+    AgentWakeContext(
       reason = WakeReason.MailArrived("please review"),
       lead = lead,
       shared = JournalState(),

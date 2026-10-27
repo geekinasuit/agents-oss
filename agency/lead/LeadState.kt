@@ -295,12 +295,6 @@ data class LeadState(
       .maxByOrNull { it.spawnedSeq }
 }
 
-/** A wake's context in a ticket lead. */
-typealias WakeContext = AgentWakeContext<LeadState>
-
-/** A cognition strategy for a ticket lead. */
-typealias CognitionStrategy = AgentCognition<LeadState>
-
 /** The form the substrate records an evidence digest in: [sha256HexBytes]'s lowercase hex. */
 private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
 
