@@ -320,18 +320,23 @@ private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
  * ceremony passes [LeadAuth.DENY_ALL] explicitly.
  */
 fun leadFold(entries: List<JournalEntry>, auth: LeadAuth): LeadState =
-  foldLeadJournal(
-    entries,
-    auth,
-    workflowKinds = TICKET_WORKFLOW_SUBSTRATE_KINDS,
-    isScopeEnd = ::isTicketScopeEnd,
-    workflowStart = TicketWorkflowState(),
-    expectedTaskRefs = TicketWorkflowState::expectedTaskRefs,
-    workflowStep = ::ticketWorkflowStep,
-    assemble = ::assemble,
-  )
+  foldLeadJournal(entries, auth, TicketWorkflowFold)
 
-private fun assemble(h: HostState, w: TicketWorkflowState): LeadState =
+/** The ticket workflow's half of the lead fold. */
+internal object TicketWorkflowFold : WorkflowFold<LeadState, TicketWorkflowState> {
+  override val substrateKinds: Set<String> = TICKET_WORKFLOW_SUBSTRATE_KINDS
+  override val scopeEndKinds: Set<String> = TICKET_WORKFLOW_SCOPE_END_KINDS
+  override val start = TicketWorkflowState()
+
+  override fun expectedTaskRefs(w: TicketWorkflowState): Set<String> = w.expectedTaskRefs()
+
+  override fun step(w: TicketWorkflowState, e: JournalEntry, outcome: HostOutcome): TicketWorkflowState =
+    ticketWorkflowStep(w, e, outcome)
+
+  override fun assemble(host: HostState, w: TicketWorkflowState): LeadState = assembleLeadState(host, w)
+}
+
+private fun assembleLeadState(h: HostState, w: TicketWorkflowState): LeadState =
   LeadState(
     runsStarted = h.runsStarted,
     currentTicket = w.currentTicket,

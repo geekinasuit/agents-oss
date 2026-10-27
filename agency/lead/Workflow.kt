@@ -8,25 +8,17 @@ import kotlinx.serialization.json.JsonObject
  * A workflow the lead host runs: the procedure that gives the host's machinery (gates, pods,
  * effects, escalation) its work.
  *
- * The workflow declares the journal kinds it owns. The host folds every other lead kind, so the two
- * sets must not overlap ([requireKindPartition]): a kind in both would be folded twice, and a
- * scope-end kind the host also folds would skip the host's own arm for it.
+ * The workflow declares the journal kinds it owns ([WorkflowFold.substrateKinds]). The host folds
+ * every other lead kind, so the two sets must not overlap ([requireKindPartition]): a kind in both
+ * would be folded twice, and a scope-end kind the host also folds would skip the host's own arm for
+ * it.
  */
 internal interface Workflow<S : HostView> {
-  /** The substrate-only kinds the workflow writes and folds. The host's provenance gate polices
-   * them alongside its own. */
-  val substrateKinds: Set<String>
-
-  /** The kinds among [substrateKinds] that end the workflow's scope. The host clears its scoped
-   * records on an entry of one. */
-  val scopeEndKinds: Set<String>
+  /** The workflow's half of the lead fold. The host runs the loop ([foldLeadJournal]). */
+  val fold: WorkflowFold<S, *>
 
   /** The gate kinds the workflow opens. */
   val gateKinds: Set<String>
-
-  /** The lead's state folded from [entries] under [auth]: the host's records and the workflow's,
-   * through the host's loop ([foldLeadJournal]). */
-  fun fold(entries: List<JournalEntry>, auth: LeadAuth): S
 
   /** The key the current scope's gate ids derive from, or null when no scope is current or its key
    * is not one the workflow would have opened a scope under. The host's gate recovery acts only on
@@ -141,14 +133,18 @@ internal sealed interface GateOpenDecision {
 internal data class VerifiedArtifact(val boundPath: String, val digest: String)
 
 /**
- * Refuses a [workflow] whose kinds the host cannot fold alongside [hostKinds]: a scope-end kind that
- * is not one of the workflow's own kinds, or a workflow kind the host also folds.
+ * Refuses a workflow [fold] whose kinds the host cannot fold alongside [hostKinds]: a scope-end kind
+ * that is not one of the workflow's own kinds, or a workflow kind the host also folds.
  */
-internal fun requireKindPartition(hostKinds: Set<String>, workflow: Workflow<*>) {
-  val strayScopeEnds = workflow.scopeEndKinds - workflow.substrateKinds
+internal fun requireKindPartition(hostKinds: Set<String>, fold: WorkflowFold<*, *>) =
+  requireKindPartition(hostKinds, fold.substrateKinds.toSet(), fold.scopeEndKinds.toSet())
+
+/** Refuses [workflowKinds] and [scopeEndKinds] the host cannot fold alongside [hostKinds]. */
+internal fun requireKindPartition(hostKinds: Set<String>, workflowKinds: Set<String>, scopeEndKinds: Set<String>) {
+  val strayScopeEnds = scopeEndKinds - workflowKinds
   require(strayScopeEnds.isEmpty()) {
     "the workflow's scope-end kinds must be among its own kinds; these are not: ${strayScopeEnds.sorted()}"
   }
-  val shared = workflow.substrateKinds intersect hostKinds
+  val shared = workflowKinds intersect hostKinds
   require(shared.isEmpty()) { "the workflow claims kinds the host folds: ${shared.sorted()}" }
 }
