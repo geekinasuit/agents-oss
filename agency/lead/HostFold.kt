@@ -20,33 +20,41 @@ import kotlinx.serialization.json.JsonObject
 /**
  * The host's half of the lead fold: the records every agent keeps, whatever workflow it runs —
  * gates, nonces, approvals, releases, announces, pods, escalations, spend. A workflow assembles
- * its lead's state from this and its own half ([foldLeadJournal]), and the host reads that state
- * through [HostView], whose fields mean what the fields of the same name here mean.
+ * its lead's state from this and its own half ([foldLeadJournal]). The host reads its records here,
+ * as the [HostView] it folded itself, never back through the workflow's state.
  */
 internal data class HostState(
   val runsStarted: Int = 0,
-  val openGates: Map<String, OpenGate> = emptyMap(),
+  override val openGates: Map<String, OpenGate> = emptyMap(),
   val releasedGates: Set<String> = emptySet(),
   val releasedDigests: Map<String, Set<String>> = emptyMap(),
   val nonceLessReleases: Map<String, Long> = emptyMap(),
-  val staleReleases: List<Pair<Long, String>> = emptyList(),
-  val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
+  override val staleReleases: List<Pair<Long, String>> = emptyList(),
+  override val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
   val consumedNonces: Set<String> = emptySet(),
-  val notifiedNonces: Set<String> = emptySet(),
-  val failedAnnounces: Map<String, Int> = emptyMap(),
-  val notReadAnnounces: Map<String, Int> = emptyMap(),
+  override val notifiedNonces: Set<String> = emptySet(),
+  override val failedAnnounces: Map<String, Int> = emptyMap(),
+  override val notReadAnnounces: Map<String, Int> = emptyMap(),
   val verifiedApprovals: Map<String, List<VerifiedApproval>> = emptyMap(),
   val unverifiedApprovals: List<Pair<Long, String>> = emptyList(),
-  val pods: Map<String, PodRecord> = emptyMap(),
-  val pendingSpawnIntents: Map<String, Long> = emptyMap(),
+  override val pods: Map<String, PodRecord> = emptyMap(),
+  override val pendingSpawnIntents: Map<String, Long> = emptyMap(),
   val misOriginedEntries: List<Pair<Long, String>> = emptyList(),
   val statusTail: List<String> = emptyList(),
-  val escalations: List<String> = emptyList(),
-  val escalatedStalls: Map<String, Set<String>> = emptyMap(),
-  val declinedEffects: Set<String> = emptySet(),
+  override val escalations: List<String> = emptyList(),
+  override val escalatedStalls: Map<String, Set<String>> = emptyMap(),
+  override val declinedEffects: Set<String> = emptySet(),
   val malformedCognition: List<Pair<Long, String>> = emptyList(),
-  val cognitionSpendUsd: Double = 0.0,
-)
+  override val cognitionSpendUsd: Double = 0.0,
+) : HostView {
+  override val activePods: List<PodRecord>
+    get() = activePods(pods)
+
+  override fun approvedOnCurrentDigest(gateId: String): Boolean =
+    approvedOnCurrentDigest(openGates, releasedDigests, gateId)
+
+  override fun openNonceFor(gate: OpenGate): IssuedNonce? = openNonceFor(issuedNonces, consumedNonces, gate)
+}
 
 /**
  * What the host step did with an entry, for the workflow step that follows it. The workflow reads
@@ -695,6 +703,32 @@ private fun foldApproval(s: HostState, e: JournalEntry, p: JsonObject, auth: Lea
     verifiedApprovals = flagged.verifiedApprovals + (committed.gateId to (current + verified))
   )
 }
+
+/** The pods still running, by spawn order. See [HostView.activePods]. */
+internal fun activePods(pods: Map<String, PodRecord>): List<PodRecord> =
+  pods.values.filter { it.active }.sortedBy { it.spawnedSeq }
+
+/** Whether [gateId] is open and released on the digest it is open on now. See
+ * [HostView.approvedOnCurrentDigest]. */
+internal fun approvedOnCurrentDigest(
+  openGates: Map<String, OpenGate>,
+  releasedDigests: Map<String, Set<String>>,
+  gateId: String,
+): Boolean {
+  val gate = openGates[gateId] ?: return false
+  return gate.payloadDigest in releasedDigests[gateId].orEmpty()
+}
+
+/** [gate]'s usable nonce: issued for it, on the digest it is open on, not consumed; the latest by
+ * issue order. See [HostView.openNonceFor]. */
+internal fun openNonceFor(
+  issuedNonces: Map<String, IssuedNonce>,
+  consumedNonces: Set<String>,
+  gate: OpenGate,
+): IssuedNonce? =
+  issuedNonces.values
+    .filter { it.gateId == gate.gateId && it.payloadDigest == gate.payloadDigest && it.nonce !in consumedNonces }
+    .maxByOrNull { it.issuedSeq }
 
 /** Preimage-derived principals whose VERIFIED approval binds [gate] AS IT STANDS — same digest the
  * gate is open on, same [nonce]. See [foldRelease], which reads it. */
