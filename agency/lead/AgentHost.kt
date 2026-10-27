@@ -75,10 +75,10 @@ class AgentHost<S : HostView> internal constructor(
   /** The authorization context every fold verifies against — allow-list, signature verifier,
    * and release quorum ([LeadAuth]). REQUIRED, no default, for the same reason [podSpec] is:
    * which principals and quorum authorize a release is a security-load-bearing choice, and a
-   * silently-defaulted one would be exactly the footgun [Workflow.fold] refuses at the fold. A
+   * silently-defaulted one would be exactly the footgun [foldLeadJournal] refuses at the fold. A
    * daemon not yet wired for the real ceremony passes [LeadAuth.DENY_ALL] explicitly — the
    * honest spelling of "this daemon cannot clear a ceremony gate yet"; its nonce-less
-   * pre-ceremony releases still fold as before, since the fold ([Workflow.fold]) refuses the
+   * pre-ceremony releases still fold as before, since the host's fold ([foldLeadJournal]) refuses the
    * nonce-less path only under a ceremony auth ([LeadAuth.hasApprovers]), never under DENY_ALL. */
   private val leadAuth: LeadAuth,
   /** Fires the daemon's timers, such as the one a failed gate-open announce waits on before it is
@@ -153,7 +153,7 @@ class AgentHost<S : HostView> internal constructor(
     }
 
   init {
-    requireKindPartition(HOST_KINDS, workflow)
+    requireKindPartition(HOST_KINDS, workflow.fold)
     // A cap below 1 would skip cognition entirely and then escalate claiming it had asked,
     // which is a silently model-free daemon reporting a model failure. The ceiling is the
     // same guard from the other side: every attempt blocks the single loop thread for a
@@ -464,7 +464,7 @@ class AgentHost<S : HostView> internal constructor(
 
   fun refold(): Folded<S> {
     val entries = store.readAll()
-    return Folded(entries.size, fold(entries), workflow.fold(entries, leadAuth))
+    return Folded(entries.size, fold(entries), foldLeadJournal(entries, leadAuth, workflow.fold))
   }
 
   // ---- adopt ----

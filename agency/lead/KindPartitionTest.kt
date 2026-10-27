@@ -1,7 +1,7 @@
 package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.shared.journal.JournalEntry
-import com.geekinasuit.agency.shared.journal.JournalState
+import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
 import java.lang.reflect.Modifier
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -32,7 +32,7 @@ class KindPartitionTest {
     for (kind in declaredLeadKinds) {
       val sides = listOfNotNull(
         "host".takeIf { kind in HOST_KINDS },
-        "workflow".takeIf { kind in ticketWorkflow.substrateKinds },
+        "workflow".takeIf { kind in ticketWorkflow.fold.substrateKinds },
       )
       assertEquals("lead kind $kind is folded by: $sides", 1, sides.size)
     }
@@ -40,14 +40,14 @@ class KindPartitionTest {
 
   @Test
   fun theTicketWorkflowPartitionsWithTheHost() {
-    requireKindPartition(HOST_KINDS, ticketWorkflow)
+    requireKindPartition(HOST_KINDS, ticketWorkflow.fold)
   }
 
   @Test
   fun aWorkflowClaimingAHostKindIsRefused() {
     val e =
       assertThrows(IllegalArgumentException::class.java) {
-        requireKindPartition(HOST_KINDS, FakeWorkflow(kinds = setOf("w-kind", LeadKinds.GATE_OPENED)))
+        requireKindPartition(HOST_KINDS, FakeFold(kinds = setOf("w-kind", LeadKinds.GATE_OPENED)))
       }
     assertTrue(e.message!!, e.message!!.contains(LeadKinds.GATE_OPENED))
   }
@@ -59,7 +59,7 @@ class KindPartitionTest {
     for (scopeEnd in listOf(LeadKinds.RUN_STARTED, "unowned-kind")) {
       val e =
         assertThrows(IllegalArgumentException::class.java) {
-          requireKindPartition(HOST_KINDS, FakeWorkflow(kinds = setOf("w-kind"), scopeEnds = setOf(scopeEnd)))
+          requireKindPartition(HOST_KINDS, FakeFold(kinds = setOf("w-kind"), scopeEnds = setOf(scopeEnd)))
         }
       assertTrue(e.message!!, e.message!!.contains(scopeEnd))
     }
@@ -67,37 +67,88 @@ class KindPartitionTest {
 
   @Test
   fun aWorkflowOfItsOwnKindsIsAccepted() {
-    requireKindPartition(HOST_KINDS, FakeWorkflow(kinds = setOf("w-kind", "w-done"), scopeEnds = setOf("w-done")))
+    requireKindPartition(HOST_KINDS, FakeFold(kinds = setOf("w-kind", "w-done"), scopeEnds = setOf("w-done")))
   }
 
-  private class FakeWorkflow(kinds: Set<String>, scopeEnds: Set<String> = emptySet()) : Workflow<LeadState> {
+  @Test
+  fun theHostFoldsWithTheKindsItChecked() {
+    // A set whose `contains` disagrees with its elements: it lists only its own kind, so the
+    // partition check passes, but claims a host kind on lookup. Folding with the live set would let
+    // the workflow's provenance rule reject a legitimately cognition-authored host entry.
+    val lying =
+      object : AbstractSet<String>() {
+        private val listed = setOf("w-kind")
+        override val size = listed.size
+
+        override fun iterator() = listed.iterator()
+
+        override fun contains(element: String) = element == HostKinds.COGNITION_PROPOSED || element in listed
+      }
+    val turn =
+      JournalEntry(
+        seq = 1,
+        schemaVersion = 3,
+        kind = HostKinds.COGNITION_PROPOSED,
+        chainContext = "agency/lead/main/v3",
+        origin = ORIGIN_COGNITION,
+        keyEpoch = 0,
+        salt = "",
+        payloadCommitment = "",
+        payloadJson = """{"costUsd":"0.5"}""",
+        idempotencyKey = null,
+        prevHash = "",
+        hash = "",
+        sig = null,
+      )
+    val lead = foldLeadJournal(listOf(turn), LeadAuth.DENY_ALL, FakeFold(kinds = lying))
+    assertEquals("the turn is not rejected", emptyList<Pair<Long, String>>(), lead.misOriginedEntries)
+    assertEquals("the turn's spend is folded", 0.5, lead.cognitionSpendUsd, 0.0)
+  }
+
+  @Test
+  fun theHostEndsTheScopeOnTheKindsItChecked() {
+    // A scope-end set that lists only the workflow's own kind, so the partition check passes, but
+    // claims a host kind on lookup. Folding with the live set would let the workflow end the scope
+    // (clearing the host's scoped records) on a host entry.
+    val lying =
+      object : AbstractSet<String>() {
+        private val listed = setOf("w-done")
+        override val size = listed.size
+
+        override fun iterator() = listed.iterator()
+
+        override fun contains(element: String) = element == HostKinds.COGNITION_PROPOSED || element in listed
+      }
+    val turn =
+      JournalEntry(
+        seq = 1,
+        schemaVersion = 3,
+        kind = HostKinds.COGNITION_PROPOSED,
+        chainContext = "agency/lead/main/v3",
+        origin = ORIGIN_COGNITION,
+        keyEpoch = 0,
+        salt = "",
+        payloadCommitment = "",
+        payloadJson = """{"costUsd":"0.5"}""",
+        idempotencyKey = null,
+        prevHash = "",
+        hash = "",
+        sig = null,
+      )
+    val lead = foldLeadJournal(listOf(turn), LeadAuth.DENY_ALL, FakeFold(kinds = setOf("w-done"), scopeEnds = lying))
+    assertEquals("the turn's spend is folded, not cleared as a scope end", 0.5, lead.cognitionSpendUsd, 0.0)
+  }
+
+  private class FakeFold(kinds: Set<String>, scopeEnds: Set<String> = emptySet()) : WorkflowFold<LeadState, Unit> {
     override val substrateKinds = kinds
     override val scopeEndKinds = scopeEnds
-    override val gateKinds = emptySet<String>()
+    override val start = Unit
 
-    override fun fold(entries: List<JournalEntry>, auth: LeadAuth) = LeadState()
+    override fun expectedTaskRefs(w: Unit) = emptySet<String>()
 
-    override fun scopeKey(lead: LeadState): String? = null
+    override fun step(w: Unit, e: JournalEntry, outcome: HostOutcome) = Unit
 
-    override fun currentScopeKey(lead: LeadState): String? = null
-
-    override fun gateId(gateKind: String, scopeKey: String) = "$gateKind:$scopeKey"
-
-    override fun admitGateOpen(gateKind: String, payloadDigest: String, gateId: String, lead: LeadState) =
-      GateOpenDecision.Refuse("fake")
-
-    override fun gateArtifactPath(gateKind: String, lead: LeadState): String? = null
-
-    override fun recordedEvidence(gateKind: String, lead: LeadState): String? = null
-
-    override fun evidenceMismatch(gateKind: String, digest: String, lead: LeadState): String? = null
-
-    override fun admitPodSpawn(taskRef: String, lead: LeadState, turn: ProposalTurn, host: HostServices) = false
-
-    override fun redriveMessage(key: String, lead: LeadState): String? = null
-
-    override fun redriveDeclineReason(key: String): String? = null
-
-    override fun mechanicalStep(lead: LeadState, shared: JournalState, host: HostServices) = false
+    override fun assemble(host: HostState, w: Unit) =
+      LeadState(misOriginedEntries = host.misOriginedEntries, cognitionSpendUsd = host.cognitionSpendUsd)
   }
 }

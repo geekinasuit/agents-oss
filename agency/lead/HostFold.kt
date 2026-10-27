@@ -109,26 +109,56 @@ internal val HOST_KINDS: Set<String> =
   HOST_SUBSTRATE_KINDS + setOf(HostKinds.APPROVAL_RECORDED, HostKinds.COGNITION_PROPOSED, KIND_GATE_RELEASED)
 
 /**
- * Folds a lead's journal: each entry through the host's step ([hostStep]) and then the workflow's
- * ([workflowStep]), which sees what the host step did with the entry, and the two results assembled
- * into the lead's state ([assemble]). A failure is classified by the entry it failed on
- * ([LeadFoldException]).
- *
- * The loop, the order of the two steps and the failure's classification are the host's; the
- * workflow supplies its own state's start, step and assembly, and what [hostStep] asks of it.
+ * A workflow's half of the lead fold: the kinds it owns, its own state [W] and how each entry
+ * advances it, and how the lead's state [S] is assembled from the host's records and [W]. The host
+ * runs the loop ([foldLeadJournal]) and folds its own records under its own auth; the workflow
+ * reads them only through what each host step did ([HostOutcome]).
  */
-internal fun <W, S> foldLeadJournal(
+internal interface WorkflowFold<out S : HostView, W> {
+  /** The substrate-only kinds the workflow writes and folds. The host's provenance gate polices
+   * them alongside its own. */
+  val substrateKinds: Set<String>
+
+  /** The kinds among [substrateKinds] that end the workflow's scope. The host clears its scoped
+   * records on an entry of one. */
+  val scopeEndKinds: Set<String>
+
+  /** The workflow's state before any entry. */
+  val start: W
+
+  /** The pod task refs the workflow intends as of [w]. The host reads them to describe an orphaned
+   * spawn intent. */
+  fun expectedTaskRefs(w: W): Set<String>
+
+  /** [w] after [e], given what the host step did with [e]. */
+  fun step(w: W, e: JournalEntry, outcome: HostOutcome): W
+
+  /** The lead's state, from the host's records and the workflow's. */
+  fun assemble(host: HostState, w: W): S
+}
+
+/**
+ * Folds a lead's journal: each entry through the host's step ([hostStep]) and then [fold]'s
+ * ([WorkflowFold.step]), which sees what the host step did with the entry, and the two results
+ * assembled into the lead's state ([WorkflowFold.assemble]). A failure inside the loop is classified
+ * by the entry it failed on ([LeadFoldException]); one that is already a [LeadFoldException] passes
+ * through as thrown, and a failure in [WorkflowFold.assemble] is not classified.
+ *
+ * The loop, the order of the two steps, the scope-end test and the auth the host's records fold
+ * under are the host's. The host reads [fold]'s kind sets once, as
+ * copies, and checks those copies against its own kinds ([requireKindPartition]) before it folds
+ * with them, so the sets it checks are the sets it folds with.
+ */
+internal fun <S : HostView, W> foldLeadJournal(
   entries: List<JournalEntry>,
   auth: LeadAuth,
-  workflowKinds: Set<String>,
-  isScopeEnd: (JournalEntry) -> Boolean,
-  workflowStart: W,
-  expectedTaskRefs: (W) -> Set<String>,
-  workflowStep: (W, JournalEntry, HostOutcome) -> W,
-  assemble: (HostState, W) -> S,
+  fold: WorkflowFold<S, W>,
 ): S {
+  val workflowKinds = fold.substrateKinds.toSet()
+  val scopeEndKinds = fold.scopeEndKinds.toSet()
+  requireKindPartition(HOST_KINDS, workflowKinds, scopeEndKinds)
   var host = HostState()
-  var workflow = workflowStart
+  var workflow = fold.start
   for (e in entries) {
     try {
       val step =
@@ -137,10 +167,10 @@ internal fun <W, S> foldLeadJournal(
           e,
           auth,
           workflowKinds = workflowKinds,
-          isScopeEnd = isScopeEnd(e),
-          expectedTaskRefs = expectedTaskRefs(workflow),
+          isScopeEnd = e.kind in scopeEndKinds,
+          expectedTaskRefs = fold.expectedTaskRefs(workflow),
         )
-      workflow = workflowStep(workflow, e, step.outcome)
+      workflow = fold.step(workflow, e, step.outcome)
       host = step.state
     } catch (x: LeadFoldException) {
       throw x
@@ -148,7 +178,7 @@ internal fun <W, S> foldLeadJournal(
       throw LeadFoldException(e.seq, e.kind, x)
     }
   }
-  return assemble(host, workflow)
+  return fold.assemble(host, workflow)
 }
 
 /**

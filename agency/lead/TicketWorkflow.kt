@@ -81,9 +81,6 @@ internal val TICKET_WORKFLOW_SUBSTRATE_KINDS =
 /** The ticket workflow's scope-end kinds: a ticket is done. */
 internal val TICKET_WORKFLOW_SCOPE_END_KINDS = setOf(LeadKinds.TICKET_DONE)
 
-/** Whether [e] ends the ticket workflow's scope. The host clears its scoped records on it. */
-internal fun isTicketScopeEnd(e: JournalEntry): Boolean = e.kind in TICKET_WORKFLOW_SCOPE_END_KINDS
-
 /** Well-formed ticket refs: a ticket ref is untrusted input (a fixture line today, a real
  * ticket-index row later) that flows into task refs, gate ids, and effect keys. A conservative
  * charset — ':' and '/' excluded, so it can forge neither a task namespace nor a path — plus a
@@ -201,11 +198,8 @@ private const val COMMIT_EFFECT_PREFIX = "apply-commit:"
  * commit once both gates are approved on their evidence. Tickets come from [ticketSource].
  */
 internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow<LeadState> {
-  override val substrateKinds: Set<String> = TICKET_WORKFLOW_SUBSTRATE_KINDS
-  override val scopeEndKinds: Set<String> = TICKET_WORKFLOW_SCOPE_END_KINDS
+  override val fold: WorkflowFold<LeadState, TicketWorkflowState> = TicketWorkflowFold
   override val gateKinds: Set<String> = GateKinds.ALL
-
-  override fun fold(entries: List<JournalEntry>, auth: LeadAuth): LeadState = leadFold(entries, auth)
 
   /** The current ticket, when it is a ref the claim accepts. */
   override fun scopeKey(lead: LeadState): String? = lead.currentTicket?.takeIf { isClaimableTicketRef(it) }
