@@ -14,11 +14,10 @@ import com.geekinasuit.agency.shared.journal.JournalState
  * the one its gate waits on and no mail waits: the substrate sends the failed announce again
  * itself, and the gate still blocks the pipeline.
  *
- * The proposal vocabulary is deliberately narrow: cognition supplies JUDGMENT (when a
- * plan is ready to gate, what task a pod should run, what status to report, when to give
- * up and escalate); the substrate advances the MECHANICAL pipeline (claiming an offered
- * ticket, recording a finished pod's artifact, proposing the commit manifest, driving the
- * post-approval effect). Nothing cognition can output releases a gate: the fold's release
+ * The proposal vocabulary is deliberately narrow: cognition supplies JUDGMENT (when work
+ * is ready to gate, what task a pod should run, what status to report, when to give up and
+ * escalate); the substrate advances the MECHANICAL pipeline (the workflow's mechanical steps,
+ * and its effects once their gates are released). Nothing cognition can output releases a gate: the fold's release
  * check keys on origin == auth layer, and cognition-origin entries can never satisfy it.
  *
  * [lead] is the folded state of a lead running some workflow: the host reads it only through
@@ -77,8 +76,7 @@ sealed interface Proposal {
   /**
    * Open an authorization gate bound to the exact artifact digest the approver will see.
    * The digest here is a CLAIM, not a command: at execution the substrate validates it
-   * against its own recorded evidence for the gate kind (the plan sha, the manifest
-   * digest) and escalates instead of opening on any mismatch — cognition decides WHEN to
+   * against the evidence the workflow recorded for the gate kind and escalates instead of opening on any mismatch — cognition decides WHEN to
    * gate, never WHAT the approver is shown.
    */
   data class ProposeGateOpen(val gateKind: String, val payloadDigest: String) : Proposal

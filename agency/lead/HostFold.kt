@@ -510,7 +510,7 @@ private fun accruedCost(p: JsonObject): Double =
  * release of a re-opened gate stays distinguishable from the mark.
  *
  * On the re-open shapes several cells exercise: the daemon opens each gateId at most once
- * per ticket (the host's seen-gate guard), so a re-opened gate is a journal-level fold
+ * per scope (the host's seen-gate guard), so a re-opened gate is a journal-level fold
  * surface, not a transition the daemon currently produces. On a real payload change today
  * the gate stays open on the old digest and the voiding path that fires is an explicit
  * [HostKinds.NONCE_CONSUMED] — which the step-2 ceremony must remember to journal.

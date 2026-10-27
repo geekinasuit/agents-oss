@@ -6,7 +6,7 @@ import kotlinx.serialization.json.JsonObject
 
 /**
  * A workflow the lead host runs: the procedure that gives the host's machinery (gates, pods,
- * effects, escalation) its work. The ticket workflow is the first.
+ * effects, escalation) its work.
  *
  * The workflow declares the journal kinds it owns. The host folds every other lead kind, so the two
  * sets must not overlap ([requireKindPartition]): a kind in both would be folded twice, and a
@@ -35,9 +35,8 @@ internal interface Workflow<S : HostView> {
 
   /** The current scope's key as the fold holds it, whether or not it is well-formed, or null when
    * no scope is current. A proposal is executed only within a current scope. Unlike [scopeKey] it
-   * does not check the key's form. For a workflow whose fold refuses a malformed key, as the ticket
-   * workflow's claim does, the two agree on every state the fold produces; they differ only on a
-   * state built some other way. */
+   * does not check the key's form. For a workflow whose fold refuses a malformed key, the two agree
+   * on every state the fold produces; they differ only on a state built some other way. */
   fun currentScopeKey(lead: S): String?
 
   /** The id of the gate of [gateKind] in the scope keyed [scopeKey]. */
@@ -45,7 +44,9 @@ internal interface Workflow<S : HostView> {
 
   /** Whether the host may open [gateId], of [gateKind], on [payloadDigest], as cognition proposed:
    * the digest it opens on, or the reason it refuses. The host has already skipped a gate that is
-   * open, or that this turn has handled. */
+   * open, or that this turn has handled. The host checks no evidence itself, so a workflow must
+   * admit only the digest it recorded for [gateKind] ([recordedEvidence]), and refuse every
+   * other: what it admits is what the approver is shown. */
   fun admitGateOpen(gateKind: String, payloadDigest: String, gateId: String, lead: S): GateOpenDecision
 
   /** Whether the host may launch a pod for [taskRef], as cognition proposed, in [turn]. Refusals

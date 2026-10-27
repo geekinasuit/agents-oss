@@ -67,8 +67,8 @@ object CognitionSelection {
       else -> error("unknown cognition strategy '${name.take(40)}'")
     }
 
-  /** The daemon's own default, restated here so a choice that wants it says so. */
-  private const val DEFAULT_MAX_ATTEMPTS = 2
+  /** The daemon's own default, named here so a choice that wants it says so. */
+  private const val DEFAULT_MAX_ATTEMPTS = AgentHost.DEFAULT_MAX_COGNITION_ATTEMPTS
 
   /** The protocol every strategy chosen here speaks: a ticket lead's. */
   private val PROTOCOL = CognitionProtocol.composed

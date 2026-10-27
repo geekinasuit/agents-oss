@@ -10,8 +10,8 @@ typealias LeadDaemon = AgentHost<LeadState>
 
 /**
  * A lead running the ticket workflow on tickets from [ticketSource]. Every other parameter is
- * [AgentHost]'s, with its default restated here: a function cannot inherit another's defaults, so
- * the two must be kept in step.
+ * [AgentHost]'s. A function cannot inherit another's defaults, so each default here names the
+ * constant [AgentHost]'s constructor uses, and the two cannot drift.
  */
 fun LeadDaemon(
   store: JournalStore,
@@ -23,13 +23,13 @@ fun LeadDaemon(
   effects: EffectReceiver,
   leadAuth: LeadAuth,
   timers: TimerService,
-  faults: FaultInjector = FaultInjector.NONE,
-  gateOpenSink: GateOpenSink = NoOpGateOpenSink,
-  dedupEffects: Boolean = true,
-  capabilityDesc: String = "scripted/none",
-  leadVersion: String = "dev",
-  cognitionRetryBackoffMs: Long = 500,
-  maxCognitionAttempts: Int = 2,
+  faults: FaultInjector = AgentHost.DEFAULT_FAULTS,
+  gateOpenSink: GateOpenSink = AgentHost.DEFAULT_GATE_OPEN_SINK,
+  dedupEffects: Boolean = AgentHost.DEFAULT_DEDUP_EFFECTS,
+  capabilityDesc: String = AgentHost.DEFAULT_CAPABILITY_DESC,
+  leadVersion: String = AgentHost.DEFAULT_LEAD_VERSION,
+  cognitionRetryBackoffMs: Long = AgentHost.DEFAULT_COGNITION_RETRY_BACKOFF_MS,
+  maxCognitionAttempts: Int = AgentHost.DEFAULT_MAX_COGNITION_ATTEMPTS,
   boundReadDeadlineMs: Long = AgentHost.DEFAULT_BOUND_READ_DEADLINE_MS,
   maxParkedBoundReads: Int = AgentHost.DEFAULT_MAX_PARKED_BOUND_READS,
 ): LeadDaemon =
