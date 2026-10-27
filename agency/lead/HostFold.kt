@@ -161,7 +161,15 @@ internal fun <S : HostView, W> foldLeadJournal(
   entries: List<JournalEntry>,
   auth: LeadAuth,
   fold: WorkflowFold<S, W>,
-): S {
+): S = foldHostAndLead(entries, auth, fold).second
+
+/** [foldLeadJournal], returning the host's own records beside the lead's state the workflow
+ * assembles from them. The host decides from the first. */
+internal fun <S : HostView, W> foldHostAndLead(
+  entries: List<JournalEntry>,
+  auth: LeadAuth,
+  fold: WorkflowFold<S, W>,
+): Pair<HostState, S> {
   val workflowKinds = fold.substrateKinds.toSet()
   val scopeEndKinds = fold.scopeEndKinds.toSet()
   requireKindPartition(HOST_KINDS, workflowKinds, scopeEndKinds)
@@ -186,7 +194,7 @@ internal fun <S : HostView, W> foldLeadJournal(
       throw LeadFoldException(e.seq, e.kind, x)
     }
   }
-  return fold.assemble(host, workflow)
+  return host to fold.assemble(host, workflow)
 }
 
 /**

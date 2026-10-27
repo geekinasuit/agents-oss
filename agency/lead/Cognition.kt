@@ -20,8 +20,9 @@ import com.geekinasuit.agency.shared.journal.JournalState
  * and its effects once their gates are released). Nothing cognition can output releases a gate: the fold's release
  * check keys on origin == auth layer, and cognition-origin entries can never satisfy it.
  *
- * [lead] is the folded state of a lead running some workflow: the host reads it only through
- * [HostView], and the workflow's own code reads the rest.
+ * [lead] is the folded state of a lead running some workflow, as the workflow assembles it:
+ * cognition reads the host's records in it through [HostView], and the workflow's own code reads
+ * the rest. The host's own decisions do not read it; they read the records the host folded itself.
  */
 data class AgentWakeContext<out S : HostView>(
   val reason: WakeReason,
@@ -30,7 +31,9 @@ data class AgentWakeContext<out S : HostView>(
   val undeliveredMail: List<Pair<Long, String>>,
 )
 
-/** What the host's own code reads of a lead's folded state, whatever workflow the lead runs. */
+/** The host's records, whatever workflow the lead runs. The host folds them itself and decides from
+ * its own copy; a workflow's state also carries them, assembled from that copy, for cognition and
+ * the workflow to read. A host decision must read the host's copy, never a workflow's state. */
 interface HostView {
   val openGates: Map<String, OpenGate>
   val activePods: List<PodRecord>
