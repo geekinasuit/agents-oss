@@ -460,11 +460,25 @@ class AgentHost<S : HostView> internal constructor(
     }
   }
 
-  data class Folded<out T : HostView>(val entriesSize: Int, val shared: JournalState, val lead: T)
+  /**
+   * One fold of the journal: the shared journal's state, the lead's state as the workflow
+   * assembles it ([lead]), and the host's own records ([host]). The host decides on its gates,
+   * nonces, announces, pods and escalations from [host], which it folded itself; the workflow's
+   * [lead] carries the same records only for the workflow's and cognition's reads.
+   */
+  class Folded<out T : HostView> internal constructor(
+    val entriesSize: Int,
+    val shared: JournalState,
+    val lead: T,
+    internal val host: HostState,
+  )
 
   fun refold(): Folded<S> {
     val entries = store.readAll()
-    return Folded(entries.size, fold(entries), foldLeadJournal(entries, leadAuth, workflow.fold))
+    // The shared fold first: a journal it refuses is reported as its refusal, not the lead fold's.
+    val shared = fold(entries)
+    val (host, lead) = foldHostAndLead(entries, leadAuth, workflow.fold)
+    return Folded(entries.size, shared, lead, host)
   }
 
   // ---- adopt ----
@@ -474,10 +488,10 @@ class AgentHost<S : HostView> internal constructor(
     for (t in folded.shared.pendingTimers) {
       timers.arm(t) { id -> queue.put(WakeEvent.TimerDue(id)) }
     }
-    redrivePendingEffects(folded.shared, folded.lead)
+    redrivePendingEffects(folded.shared, folded.lead, folded.host)
     faults.at("after-redrive")
-    respawnActivePods(folded.lead)
-    abandonOrphanedSpawnIntents(folded.lead)
+    respawnActivePods(folded.host)
+    abandonOrphanedSpawnIntents(folded.host)
     store.append(
       HostKinds.RUN_STARTED,
       buildJsonObject {
@@ -508,7 +522,7 @@ class AgentHost<S : HostView> internal constructor(
    * escalated once ([HostView.declinedEffects]). It stays pending: once the question holds, the
    * workflow's step fires it.
    */
-  private fun redrivePendingEffects(shared: JournalState, lead: S) {
+  private fun redrivePendingEffects(shared: JournalState, lead: S, host: HostState) {
     for (key in shared.pendingEffectKeys) {
       val message = workflow.redriveMessage(key, lead)
       if (message != null) {
@@ -516,7 +530,7 @@ class AgentHost<S : HostView> internal constructor(
         continue
       }
       val digest = sha256HexBytes(key.toByteArray(Charsets.UTF_8))
-      if (digest in lead.declinedEffects) continue
+      if (digest in host.declinedEffects) continue
       val reason =
         workflow.redriveDeclineReason(key)
           ?: ("effect re-drive declined for a key of ${key.length} chars: it is not a key the lead " +
@@ -534,8 +548,8 @@ class AgentHost<S : HostView> internal constructor(
 
   /** Fake pods re-spawn, not resume — abandon the in-flight record visibly; the
    * playbook re-proposes from the missing evidence. Real re-attach (--resume) is later work. */
-  private fun respawnActivePods(lead: S) {
-    for (pod in lead.activePods) {
+  private fun respawnActivePods(host: HostState) {
+    for (pod in host.activePods) {
       store.append(
         HostKinds.POD_ABANDONED,
         buildJsonObject {
@@ -556,8 +570,8 @@ class AgentHost<S : HostView> internal constructor(
    * that window, regardless of pod realism (a record-integrity obligation: a fresh
    * re-fold must not report "nothing happened" when a spawn was in flight).
    */
-  private fun abandonOrphanedSpawnIntents(lead: S) {
-    for ((taskRef, _) in lead.pendingSpawnIntents) {
+  private fun abandonOrphanedSpawnIntents(host: HostState) {
+    for ((taskRef, _) in host.pendingSpawnIntents) {
       store.append(
         HostKinds.POD_SPAWN_ABANDONED,
         buildJsonObject {
@@ -599,7 +613,7 @@ class AgentHost<S : HostView> internal constructor(
     // a journal the lead did not write can wait forever.
     if (
       ev is WakeEvent.TimerDue &&
-        folded.lead.isRetryTimerOfAnOpenNonce(ev.timerId) &&
+        folded.host.isRetryTimerOfAnOpenNonce(ev.timerId) &&
         folded.shared.undeliveredMail.isEmpty()
     ) {
       return
@@ -626,7 +640,7 @@ class AgentHost<S : HostView> internal constructor(
       journalCognitionOutput(out)
     }
     if (out.proposals.isNotEmpty()) {
-      executeProposals(out, decision.folded.lead)
+      executeProposals(out, decision.folded.lead, decision.folded.host)
     }
     if (out.presentation.retiresMail) {
       markMailDelivered(MailRender.mailRenderedForRetirement(decision.folded.shared.undeliveredMail))
@@ -729,7 +743,7 @@ class AgentHost<S : HostView> internal constructor(
               "over the $MAX_BOUND_ARTIFACT_BYTES the lead reads back — abandoning the pod; the playbook " +
               "re-proposes"
           )
-          refold().lead.pods[c.podId]?.let { noteFailureAbandon(it.taskRef) }
+          refold().host.pods[c.podId]?.let { noteFailureAbandon(it.taskRef) }
           store.append(
             HostKinds.POD_ABANDONED,
             buildJsonObject {
@@ -783,7 +797,7 @@ class AgentHost<S : HostView> internal constructor(
                 "${e.message?.take(200) ?: e::class.simpleName} — abandoning the pod (no result " +
                 "without a durable bound copy); the playbook re-proposes"
             )
-            refold().lead.pods[c.podId]?.let { noteFailureAbandon(it.taskRef) }
+            refold().host.pods[c.podId]?.let { noteFailureAbandon(it.taskRef) }
             store.append(
               HostKinds.POD_ABANDONED,
               buildJsonObject {
@@ -818,7 +832,7 @@ class AgentHost<S : HostView> internal constructor(
         // the daemon's whole lifetime. Abandon it NOW, on the loop thread, from folded
         // state: the pod must exist and still be active (a completion, an earlier abandon,
         // or adopt may have won — all fine, the POD_EVENT row already records the fact).
-        val pod = refold().lead.pods[ev.podId]
+        val pod = refold().host.pods[ev.podId]
         if (pod != null && pod.active) {
           noteFailureAbandon(pod.taskRef)
           store.append(
@@ -838,6 +852,7 @@ class AgentHost<S : HostView> internal constructor(
   /** Advance everything that needs no judgment. Returns true if anything was appended. */
   private fun mechanicalPass(folded: Folded<S>): Boolean {
     val lead = folded.lead
+    val host = folded.host
     val shared = folded.shared
 
     // Recovery path for the gate-open mint. A ceremony gate-open is two appends, GATE_OPENED and
@@ -860,9 +875,9 @@ class AgentHost<S : HostView> internal constructor(
     // opened on a cognition digest claim that came from one, and the mint does not act on it.
     val scopeKey = workflow.scopeKey(lead)
     if (leadAuth.hasApprovers && scopeKey != null) {
-      for (gate in lead.openGates.values) {
+      for (gate in host.openGates.values) {
         if (gate.gateId != workflow.gateId(gate.gateKind, scopeKey)) continue
-        if (mintRefusal(gate, lead) != null) continue
+        if (mintRefusal(gate, lead, host) != null) continue
         mintNonce(gate.gateId, gate.payloadDigest)
         return true
       }
@@ -878,15 +893,15 @@ class AgentHost<S : HostView> internal constructor(
       // ([HostView.escalatedStalls]), so no later pass or restart escalates it again. The one
       // append is the escalation and its record, so no crash can fall between them.
       for (kind in workflow.gateKinds) {
-        val gate = lead.openGates[workflow.gateId(kind, scopeKey)] ?: continue
-        if (lead.openNonceFor(gate) != null || lead.approvedOnCurrentDigest(gate.gateId)) continue
-        if (gate.payloadDigest in lead.escalatedStalls[gate.gateId].orEmpty()) continue
+        val gate = host.openGates[workflow.gateId(kind, scopeKey)] ?: continue
+        if (host.openNonceFor(gate) != null || host.approvedOnCurrentDigest(gate.gateId)) continue
+        if (gate.payloadDigest in host.escalatedStalls[gate.gateId].orEmpty()) continue
         val refusal =
           if (gate.gateKind != kind) {
             "its recorded kind of ${gate.gateKind.length} chars is not the kind its id names"
           } else {
             if (workflow.recordedEvidence(kind, lead) == null) continue
-            mintRefusal(gate, lead) ?: continue
+            mintRefusal(gate, lead, host) ?: continue
           }
         escalateStall(gate, refusal)
         return true
@@ -904,10 +919,10 @@ class AgentHost<S : HostView> internal constructor(
     // reason quotes is one the lead derives.
     if (!leadAuth.hasApprovers && scopeKey != null) {
       for (kind in workflow.gateKinds) {
-        val gate = lead.openGates[workflow.gateId(kind, scopeKey)] ?: continue
-        if (lead.approvedOnCurrentDigest(gate.gateId)) continue
-        if (gate.payloadDigest in lead.escalatedStalls[gate.gateId].orEmpty()) continue
-        if (lead.issuedNonces.values.none { it.gateId == gate.gateId }) continue
+        val gate = host.openGates[workflow.gateId(kind, scopeKey)] ?: continue
+        if (host.approvedOnCurrentDigest(gate.gateId)) continue
+        if (gate.payloadDigest in host.escalatedStalls[gate.gateId].orEmpty()) continue
+        if (host.issuedNonces.values.none { it.gateId == gate.gateId }) continue
         escalateGate(
           gate,
           "gate-open stalled for ${gate.gateId}: a nonce was issued for it, and the auth in force has " +
@@ -934,9 +949,9 @@ class AgentHost<S : HostView> internal constructor(
     // evidence that no longer holds.
     if (scopeKey != null) {
       for (kind in workflow.gateKinds) {
-        val gate = lead.openGates[workflow.gateId(kind, scopeKey)] ?: continue
-        if (!lead.approvedOnCurrentDigest(gate.gateId)) continue
-        if (gate.payloadDigest in lead.escalatedStalls[gate.gateId].orEmpty()) continue
+        val gate = host.openGates[workflow.gateId(kind, scopeKey)] ?: continue
+        if (!host.approvedOnCurrentDigest(gate.gateId)) continue
+        if (gate.payloadDigest in host.escalatedStalls[gate.gateId].orEmpty()) continue
         if (workflow.recordedEvidence(kind, lead) == null) continue
         val mismatch = workflow.evidenceMismatch(kind, gate.payloadDigest, lead) ?: continue
         escalateGate(
@@ -956,10 +971,10 @@ class AgentHost<S : HostView> internal constructor(
     // reported failed, once the retry timer armed for that failure has fired, and arms that timer
     // itself when a crash fell between the failure's marker and its arming. Only a ceremony auth
     // mints a nonce, so this announces nothing on a journal no ceremony daemon has written to.
-    for (gate in lead.openGates.values) {
-      val nonce = lead.openNonceFor(gate) ?: continue
-      if (nonce.nonce in lead.notifiedNonces) continue
-      val failures = lead.failedAnnounces[nonce.nonce] ?: 0
+    for (gate in host.openGates.values) {
+      val nonce = host.openNonceFor(gate) ?: continue
+      if (nonce.nonce in host.notifiedNonces) continue
+      val failures = host.failedAnnounces[nonce.nonce] ?: 0
       if (failures > 0) {
         val timerId = announceRetryTimerId(nonce.nonce, failures)
         if (timerId !in shared.armedTimers) {
@@ -968,7 +983,7 @@ class AgentHost<S : HostView> internal constructor(
         }
         if (timerId !in shared.firedTimers) continue
       }
-      announceAndMark(gate.gateId, gate.gateKind, nonce.payloadDigest, nonce.nonce, lead)
+      announceAndMark(gate.gateId, gate.gateKind, nonce.payloadDigest, nonce.nonce, lead, host)
       return true
     }
 
@@ -1012,11 +1027,11 @@ class AgentHost<S : HostView> internal constructor(
    * be open on the evidence for its kind ([Workflow.evidenceMismatch]), and no nonce may have been issued on
    * that digest before: a voided one stays withdrawn, and a spent one's release already decided the
    * gate on that digest. */
-  private fun mintRefusal(gate: OpenGate, lead: S): String? {
+  private fun mintRefusal(gate: OpenGate, lead: S, host: HostState): String? {
     val mismatch = workflow.evidenceMismatch(gate.gateKind, gate.payloadDigest, lead)
     return when {
       mismatch != null -> mismatch
-      lead.issuedNonces.values.any { it.gateId == gate.gateId && it.payloadDigest == gate.payloadDigest } ->
+      host.issuedNonces.values.any { it.gateId == gate.gateId && it.payloadDigest == gate.payloadDigest } ->
         "a nonce was already issued on its digest"
       else -> null
     }
@@ -1090,8 +1105,9 @@ class AgentHost<S : HostView> internal constructor(
     payloadDigest: String,
     nonce: String,
     lead: S,
+    host: HostState,
   ) {
-    val attempt = (lead.failedAnnounces[nonce] ?: 0) + 1
+    val attempt = (host.failedAnnounces[nonce] ?: 0) + 1
     val resolved = resolveGateArtifact(gateKind, payloadDigest, lead)
     val outcome: AnnounceOutcome =
       when (resolved) {
@@ -1123,7 +1139,7 @@ class AgentHost<S : HostView> internal constructor(
     // Attempts that did not read the copy are counted apart, so they spend none of the attempts the
     // sink gets once the copy is read.
     val notRead = resolved is ArtifactResolution.NotRead
-    val notReadBefore = lead.notReadAnnounces[nonce] ?: 0
+    val notReadBefore = host.notReadAnnounces[nonce] ?: 0
     val sinkAttempt = attempt - notReadBefore
     val retry = retryableFailure != null && (notRead || sinkAttempt < MAX_ANNOUNCE_ATTEMPTS)
     // An outcome that leaves the gate unannounced for good is escalated: here, or above for an
@@ -1578,7 +1594,7 @@ class AgentHost<S : HostView> internal constructor(
    *  - duplicates WITHIN one output batch execute once (the snapshot guards alone cannot
    *    see intra-batch repeats).
    */
-  private fun executeProposals(out: CognitionOutput, leadAtDecision: S) {
+  private fun executeProposals(out: CognitionOutput, leadAtDecision: S, hostAtDecision: HostState) {
     val seenGateIds = mutableSetOf<String>()
     val turn = ProposalTurn()
     // Cardinality guard: a wake executes a bounded number of proposals,
@@ -1595,7 +1611,7 @@ class AgentHost<S : HostView> internal constructor(
         is Proposal.ProposeGateOpen -> {
           val scope = workflow.currentScopeKey(leadAtDecision) ?: continue
           val gateId = workflow.gateId(p.gateKind, scope)
-          if (gateId in leadAtDecision.openGates || !seenGateIds.add(gateId)) continue
+          if (gateId in hostAtDecision.openGates || !seenGateIds.add(gateId)) continue
           val expected =
             when (val decision = workflow.admitGateOpen(p.gateKind, p.payloadDigest, gateId, leadAtDecision)) {
               is GateOpenDecision.Refuse -> {
@@ -1631,7 +1647,7 @@ class AgentHost<S : HostView> internal constructor(
             // pipeline now blocks on the gate, which an operator unblocks only once told, so the
             // announce cannot wait. The mechanical-pass arm re-announces on restart if a crash lands
             // between the mint and the notify marker.
-            announceAndMark(gateId, p.gateKind, expected, nonce, leadAtDecision)
+            announceAndMark(gateId, p.gateKind, expected, nonce, leadAtDecision, hostAtDecision)
           }
         }
         is Proposal.ProposePodSpawn -> {
