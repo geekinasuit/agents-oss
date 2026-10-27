@@ -88,7 +88,7 @@ object CognitionProtocol {
   val SYSTEM_PROMPT: String
     get() = composed.systemPrompt
 
-  fun renderContext(context: WakeContext): String = composed.renderContext(context)
+  fun renderContext(context: AgentWakeContext<LeadState>): String = composed.renderContext(context)
 
   fun parseOutput(text: String, meta: Map<String, String>, presentation: ContextPresentation): CognitionOutput =
     composed.parseOutput(text, meta, presentation)

@@ -814,7 +814,7 @@ class AcpPodEngineTest {
 
   @Test
   fun aRefusingEventSinkStillKillsThePodAndStillDeliversTheCompletion() {
-    // In production the events seam is LeadDaemon.injectPodEvent — a SQLite append that is
+    // In production the events seam is AgentHost.injectPodEvent — a SQLite append that is
     // documented to throw ("accept means durable, so failure is refusal"). The engine used
     // to treat it as infallible at every site, so a journal hiccup could claim a pod and
     // never kill it, or win the completion CAS and never deliver the result.

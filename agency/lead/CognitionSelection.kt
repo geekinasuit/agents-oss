@@ -10,8 +10,8 @@ import java.io.File
  *
  * The two travel as one value because whether a retry can help is a property of the
  * strategy — deterministic sampling means attempt two is attempt one — while the cap is a
- * [LeadDaemon] constructor argument with a default. Handing back a bare
- * [CognitionStrategy] would leave every caller to remember the pairing, and the failure
+ * [ticketLead] argument with a default. Handing back a bare
+ * [AgentCognition] would leave every caller to remember the pairing, and the failure
  * mode of forgetting is invisible: the lead simply pays twice for the same answer.
  *
  * Being a value does not make it unbypassable — a caller can still construct a strategy
@@ -19,7 +19,7 @@ import java.io.File
  * a caller that goes through here gets it, and one that does not is making a visible choice.
  */
 data class CognitionChoice(
-  val strategy: CognitionStrategy,
+  val strategy: AgentCognition<LeadState>,
   val maxCognitionAttempts: Int,
 )
 

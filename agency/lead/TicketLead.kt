@@ -5,17 +5,15 @@ import com.geekinasuit.agency.shared.journal.EffectReceiver
 import com.geekinasuit.agency.shared.journal.JournalStore
 import java.io.File
 
-/** A lead running the ticket workflow: the host, with the ticket lead's state. */
-typealias LeadDaemon = AgentHost<LeadState>
-
 /**
- * A lead running the ticket workflow on tickets from [ticketSource]. Every other parameter is
- * [AgentHost]'s. A function cannot inherit another's defaults, so each default here names the
- * constant [AgentHost]'s constructor uses, and the two cannot drift.
+ * A lead running the ticket workflow on tickets from [ticketSource]: the host, with the ticket
+ * lead's state. Every other parameter is [AgentHost]'s. A function cannot inherit another's
+ * defaults, so each default here names the constant [AgentHost]'s constructor uses, and the two
+ * cannot drift.
  */
-fun LeadDaemon(
+fun ticketLead(
   store: JournalStore,
-  cognition: CognitionStrategy,
+  cognition: AgentCognition<LeadState>,
   podRunner: PodRunner,
   podSpec: PodSpec,
   ticketSource: TicketSource,
@@ -32,7 +30,7 @@ fun LeadDaemon(
   maxCognitionAttempts: Int = AgentHost.DEFAULT_MAX_COGNITION_ATTEMPTS,
   boundReadDeadlineMs: Long = AgentHost.DEFAULT_BOUND_READ_DEADLINE_MS,
   maxParkedBoundReads: Int = AgentHost.DEFAULT_MAX_PARKED_BOUND_READS,
-): LeadDaemon =
+): AgentHost<LeadState> =
   AgentHost(
     store = store,
     cognition = cognition,

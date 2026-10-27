@@ -49,7 +49,7 @@ class OpenAiCompatCognitionTest {
   }
 
   private fun wake() =
-    WakeContext(
+    AgentWakeContext(
       reason = WakeReason.Adopted,
       lead = LeadState(currentTicket = "TEST-7"),
       shared = JournalState(),
@@ -182,7 +182,7 @@ class OpenAiCompatCognitionTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition =
           OpenAiCompatCognition(

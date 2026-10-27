@@ -257,7 +257,7 @@ class AcpPodEngine(
       clearStaleArtifact()?.let { refusal ->
         // A hostile or unusable object at the lead-assigned path is POD WORK, not a
         // configuration fault: refusing terminally is what every other hostile
-        // shape at this path gets. Throwing here would reach LeadDaemon.handleWake, whose
+        // shape at this path gets. Throwing here would reach AgentHost.handleWake, whose
         // handler is deliberately fatal — and since the object is durable on disk, the next
         // process would do it again. spawn() keeps exactly ONE throwing contract: the spec
         // fence.

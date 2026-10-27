@@ -161,8 +161,8 @@ class GoldenJournalTest {
     }
   }
 
-  private fun daemon(dir: File, store: SqliteStore, auth: Auth, faults: FaultInjector): LeadDaemon =
-    LeadDaemon(
+  private fun daemon(dir: File, store: SqliteStore, auth: Auth, faults: FaultInjector): AgentHost<LeadState> =
+    ticketLead(
       store = store,
       cognition = ScriptedCognition(),
       podRunner = FakePodRunner(),

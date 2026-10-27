@@ -79,7 +79,7 @@ class WakeLoopTest {
     val ticketFile = File(dir, "ticket.txt").also { if (ticket != null) it.writeText(ticket + "\n") }
     val armed = mutableListOf<String>()
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = counting,
         podRunner = runner,
@@ -487,7 +487,7 @@ class WakeLoopTest {
       }
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = ScriptedCognition(),
         podRunner = faulty,
@@ -559,7 +559,7 @@ class WakeLoopTest {
     val runner = FakePodRunner(holdCompletions = true)
     File(dir, "ticket.txt").writeText("t1\n")
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = ScriptedCognition(),
         podRunner = runner,
@@ -657,7 +657,7 @@ class WakeLoopTest {
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     File(dir, "ticket.txt").writeText("t1\n")
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = ScriptedCognition(),
         podRunner = boom,
@@ -686,7 +686,7 @@ class WakeLoopTest {
   }
 
   /** Runs [daemon]'s loop on its own thread until the loop stops, and returns what it threw. */
-  private fun runLoopUntilItStops(daemon: LeadDaemon): Throwable? {
+  private fun runLoopUntilItStops(daemon: AgentHost<LeadState>): Throwable? {
     val thrown = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
     val loop = Thread { try { daemon.runLoop() } catch (t: Throwable) { thrown.set(t) } }
     loop.start()
@@ -696,9 +696,13 @@ class WakeLoopTest {
   }
 
   /** A daemon over [store] with a ticket to claim, no timers and no releases: enough to adopt. */
-  private fun adoptingDaemon(dir: File, store: JournalStore, faults: FaultInjector = FaultInjector.NONE): LeadDaemon {
+  private fun adoptingDaemon(
+    dir: File,
+    store: JournalStore,
+    faults: FaultInjector = FaultInjector.NONE,
+  ): AgentHost<LeadState> {
     File(dir, "ticket.txt").writeText("t1\n")
-    return LeadDaemon(
+    return ticketLead(
       store = store,
       cognition = ScriptedCognition(),
       podRunner = FakePodRunner(),
@@ -907,7 +911,7 @@ class WakeLoopTest {
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     File(dir, "ticket.txt").writeText("t1\n")
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = ScriptedCognition(),
         podRunner = uncosted,
@@ -963,7 +967,7 @@ class WakeLoopTest {
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     File(dir, "ticket.txt").writeText("t1\n")
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = ScriptedCognition(),
         podRunner = nanCost,

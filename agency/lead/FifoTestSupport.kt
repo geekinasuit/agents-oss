@@ -32,7 +32,7 @@ fun releaseFifo(path: String, deadlineMs: Long = 5_000): Boolean {
 
 /** The live threads the lead opens and reads bound copies on. */
 fun boundReadThreads(): List<Thread> =
-  Thread.getAllStackTraces().keys.filter { it.name == LeadDaemon.BOUND_READ_THREAD_NAME && it.isAlive }
+  Thread.getAllStackTraces().keys.filter { it.name == AgentHost.BOUND_READ_THREAD_NAME && it.isAlive }
 
 /** Waits up to [deadlineMs] for every bound-copy read thread to finish. Returns whether they did. */
 fun awaitNoBoundReadThreads(deadlineMs: Long = 5_000): Boolean {

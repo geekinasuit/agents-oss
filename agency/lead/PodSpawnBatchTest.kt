@@ -25,10 +25,12 @@ class PodSpawnBatchTest {
 
   /** A strategy whose turns are built from the context each wake presents. Idles once its turns
    * run out. */
-  private class TurnCognition(val turns: MutableList<(WakeContext) -> List<Proposal>>) : CognitionStrategy {
+  private class TurnCognition(
+    val turns: MutableList<(AgentWakeContext<LeadState>) -> List<Proposal>>
+  ) : AgentCognition<LeadState> {
     override val name = "turns"
 
-    override fun decide(context: WakeContext): CognitionOutput {
+    override fun decide(context: AgentWakeContext<LeadState>): CognitionOutput {
       val turn = turns.removeFirstOrNull() ?: return CognitionOutput(presentation = ContextPresentation.PRESENTED)
       return CognitionOutput(turn(context), "turn", presentation = ContextPresentation.PRESENTED)
     }
@@ -39,14 +41,14 @@ class PodSpawnBatchTest {
   /** Runs [turns] for ticket t1, one per wake, with pods that complete at once. Each of [drives]
    * adopts afresh, so a later drive's adopt wake runs the next turn. Fails unless
    * every turn ran. */
-  private fun run(vararg turns: (WakeContext) -> List<Proposal>, drives: Int = 1): Run {
+  private fun run(vararg turns: (AgentWakeContext<LeadState>) -> List<Proposal>, drives: Int = 1): Run {
     val dir = tmp.newFolder()
     File(dir, "ticket.txt").writeText("t1\n")
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val cognition = TurnCognition(turns.toMutableList())
     val runner = FakePodRunner(holdCompletions = false)
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = cognition,
         podRunner = runner,
@@ -76,7 +78,7 @@ class PodSpawnBatchTest {
     val cognition = TurnCognition(mutableListOf({ listOf(spawn("plan:t1")) }, { listOf(spawn("plan:t1")) }))
     val runner = FakePodRunner(holdCompletions = true)
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = cognition,
         podRunner = runner,
@@ -105,8 +107,8 @@ class PodSpawnBatchTest {
     val dir = tmp.newFolder()
     File(dir, "ticket.txt").writeText("t1\n")
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
-    fun daemon(cognition: CognitionStrategy, runner: FakePodRunner) =
-      LeadDaemon(
+    fun daemon(cognition: AgentCognition<LeadState>, runner: FakePodRunner) =
+      ticketLead(
         store = store,
         cognition = cognition,
         podRunner = runner,

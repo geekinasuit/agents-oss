@@ -48,13 +48,13 @@ class NonceMintTest {
     dir: File,
     store: SqliteStore,
     auth: LeadAuth,
-    cognition: CognitionStrategy = ScriptedCognition(),
+    cognition: AgentCognition<LeadState> = ScriptedCognition(),
     runner: PodRunner = FakePodRunner(),
     faults: FaultInjector = FaultInjector.NONE,
     sink: GateOpenSink = NoOpGateOpenSink,
-  ): LeadDaemon {
+  ): AgentHost<LeadState> {
     File(dir, "ticket.txt").also { if (!it.exists()) it.writeText("t1\n") }
-    return LeadDaemon(
+    return ticketLead(
       store = store,
       cognition = cognition,
       podRunner = runner,

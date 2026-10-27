@@ -41,12 +41,12 @@ class GuardsTest {
    * and the mail each call was offered, which is how a turn's view of the work queue is
    * observable from outside the daemon. */
   private class ProgrammedCognition(private val script: MutableList<CognitionOutput>) :
-    CognitionStrategy {
+    AgentCognition<LeadState> {
     override val name = "programmed"
     val spendSeen = mutableListOf<Double>()
     val mailSeen = mutableListOf<List<String>>()
 
-    override fun decide(context: WakeContext): CognitionOutput {
+    override fun decide(context: AgentWakeContext<LeadState>): CognitionOutput {
       spendSeen += context.lead.cognitionSpendUsd
       mailSeen += context.undeliveredMail.map { it.second }
       return if (script.isEmpty()) presentedOutput(reasoning = "idle") else script.removeAt(0)
@@ -78,7 +78,7 @@ class GuardsTest {
     val runner = FakePodRunner(holdCompletions = hold)
     val ticketFile = File(dir, "ticket.txt").also { if (ticket != null) it.writeText(ticket + "\n") }
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = cognition,
         podRunner = runner,
@@ -105,13 +105,13 @@ class GuardsTest {
   private fun leadDaemon(
     dir: File,
     store: SqliteStore,
-    cognition: CognitionStrategy,
+    cognition: AgentCognition<LeadState>,
     runner: PodRunner,
     auth: LeadAuth = LeadAuth.DENY_ALL,
     faults: FaultInjector = FaultInjector.NONE,
     dedupEffects: Boolean = true,
   ) =
-    LeadDaemon(
+    ticketLead(
       store = store,
       cognition = cognition,
       podRunner = runner,
@@ -432,7 +432,7 @@ class GuardsTest {
 
   private fun executeProposed(lead: LeadState, ticket: String): Boolean =
     ScriptedCognition()
-      .decide(WakeContext(WakeReason.Adopted, lead, JournalState(), emptyList()))
+      .decide(AgentWakeContext(WakeReason.Adopted, lead, JournalState(), emptyList()))
       .proposals
       .any { it is Proposal.ProposePodSpawn && it.taskRef == "execute:$ticket" }
 
@@ -1348,7 +1348,7 @@ class GuardsTest {
 
   /** Re-folds [d]'s journal while its loop runs until [cond] holds, and returns that fold. */
   private fun awaitFold(
-    d: LeadDaemon,
+    d: AgentHost<LeadState>,
     what: String,
     cond: (AgentHost.Folded<LeadState>) -> Boolean,
   ): AgentHost.Folded<LeadState> {
@@ -1592,7 +1592,7 @@ class GuardsTest {
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     File(dir, "ticket.txt").writeText("t1\n")
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = ScriptedCognition(),
         podRunner = lying,
@@ -1797,11 +1797,11 @@ class GuardsTest {
   /** A strategy that sees its context the way a model-backed one does — through
    * [CognitionProtocol.renderContext] — and idles. What it rendered is what a model would have
    * been shown. */
-  private class RenderingIdleCognition : CognitionStrategy {
+  private class RenderingIdleCognition : AgentCognition<LeadState> {
     override val name = "rendering-idle"
     val rendered = mutableListOf<String>()
 
-    override fun decide(context: WakeContext): CognitionOutput {
+    override fun decide(context: AgentWakeContext<LeadState>): CognitionOutput {
       rendered += CognitionProtocol.renderContext(context)
       // It rendered the whole context, as a model turn that succeeded was sent it.
       return CognitionOutput.idle(ContextPresentation.PRESENTED)
@@ -1810,10 +1810,10 @@ class GuardsTest {
 
   /** A strategy that answers without running a model turn, as a model-backed one does at its
    * spend cap: it escalates and never renders the context. */
-  private class EscalatesWithoutATurnCognition : CognitionStrategy {
+  private class EscalatesWithoutATurnCognition : AgentCognition<LeadState> {
     override val name = "escalates-without-a-turn"
 
-    override fun decide(context: WakeContext): CognitionOutput =
+    override fun decide(context: AgentWakeContext<LeadState>): CognitionOutput =
       CognitionOutput(
         listOf(Proposal.ProposeEscalate("budget exhausted; no turn was run")),
         presentation = ContextPresentation.NOT_PRESENTED,
@@ -2138,7 +2138,7 @@ class GuardsTest {
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     File(dir, "ticket.txt").writeText("t1\n")
     val daemon =
-      LeadDaemon(
+      ticketLead(
         store = store,
         cognition = ScriptedCognition(),
         podRunner = binaryPod,
