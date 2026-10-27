@@ -179,7 +179,7 @@ data class LeadState(
     get() = openGates.values.filter { it.gateId !in releasedGates }.sortedBy { it.openedSeq }
 
   override val activePods: List<PodRecord>
-    get() = pods.values.filter { it.active }.sortedBy { it.spawnedSeq }
+    get() = activePods(pods)
 
   fun gate(gateKind: String): OpenGate? = openGates.values.firstOrNull { it.gateKind == gateKind }
 
@@ -196,10 +196,8 @@ data class LeadState(
    * releasedDigests[gateId]`. Fail-closed: a gate not open is not approved. [pendingGates]
    * deliberately keeps the epoch-blind [releasedGates] read; "do not re-surface a gate released
    * at all this ticket" is a different question. */
-  override fun approvedOnCurrentDigest(gateId: String): Boolean {
-    val gate = openGates[gateId] ?: return false
-    return gate.payloadDigest in releasedDigests[gateId].orEmpty()
-  }
+  override fun approvedOnCurrentDigest(gateId: String): Boolean =
+    approvedOnCurrentDigest(openGates, releasedDigests, gateId)
 
   /** The digest recorded as the evidence a gate of [gateKind] binds to, in whatever form the
    * journal holds it: the plan artifact's for the plan gate, the commit manifest's for the commit
@@ -262,14 +260,7 @@ data class LeadState(
    * fold stale, and handing it to a notifier would be a silent liveness failure). Latest
    * by issue order if several are open (the release names its nonce explicitly, so
    * "latest" is a convenience for issuers, not an ambiguity at verification). */
-  override fun openNonceFor(gate: OpenGate): IssuedNonce? =
-    issuedNonces.values
-      .filter {
-        it.gateId == gate.gateId &&
-          it.payloadDigest == gate.payloadDigest &&
-          it.nonce !in consumedNonces
-      }
-      .maxByOrNull { it.issuedSeq }
+  override fun openNonceFor(gate: OpenGate): IssuedNonce? = openNonceFor(issuedNonces, consumedNonces, gate)
 
   /** Preimage-derived principals whose VERIFIED approval binds the gate AS IT STANDS — same
    * digest the gate is open on, same [nonce] — the set a quorum predicate is evaluated over.
