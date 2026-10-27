@@ -137,10 +137,10 @@ data class PodRecord(
  * an audit marker whose absence is itself a claim ("released under the ceremony"), so an
  * evicted entry would not lose the answer, it would invert it. [HostState.escalatedStalls] is
  * uncapped too: evicting an entry escalates its gate again, the repeat it exists to suppress. Those
- * seven share the same bound: the ticket, not a tail — TICKET_DONE clears them.
- * [HostState.declinedEffects] is uncapped for the same reason as the stall record, and is not
- * ticket-scoped: it holds one digest per distinct pending intent key adopt declined, since a
- * declined intent stays pending across tickets. Each entry costs its writer a journal row. All
+ * seven share the same bound: the workflow's scope, not a tail — the workflow's scope-end kind
+ * clears them. [HostState.declinedEffects] is uncapped for the same reason as the stall record, and
+ * is not scope-bound: it holds one digest per distinct pending intent key adopt declined, since a
+ * declined intent stays pending across scopes. Each entry costs its writer a journal row. All
  * their kinds are origin-gated, so only the substrate and the authorization layer can grow them: a
  * party positioned to flood them could already write worse. */
 internal const val ANOMALY_TAIL = 100

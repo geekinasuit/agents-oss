@@ -201,13 +201,14 @@ class ComposedCognitionProtocol<S : HostView>(private val workflow: WorkflowProt
    * Lenient extraction (first '{' to last '}'), strict interpretation.
    *
    * Strict means STRUCTURAL: a known proposal type, its required fields present and
-   * non-blank, a known gate kind, a taskRef of the plan:/execute: shape. Anything else is
+   * non-blank, and each field in the shape its parser requires (the workflow's parser for
+   * a workflow's types). Anything else is
    * the whole turn's [CognitionOutput.malformed] — one near-miss proposal invalidates the
    * output rather than being dropped from an otherwise-executed batch, because a model
    * that got one proposal structurally wrong has not demonstrated it meant the others.
    *
    * SEMANTIC validity is a separate boundary and stays where it is: whether a well-formed
-   * taskRef names the CURRENT ticket, and whether a digest matches substrate evidence, are
+   * taskRef names work in the CURRENT scope, and whether a digest matches substrate evidence, are
    * checked against folded state at execute time (AgentHost.executeProposals), which is
    * the only place that state is authoritative.
    *

@@ -51,10 +51,9 @@ import kotlinx.serialization.json.put
  * (see [injectPodCompletion]). Between wakes the loop BLOCKS on the queue: idle is
  * structural, and a model-backed strategy costs nothing while nothing happens.
  *
- * DIVISION OF LABOR: the substrate mechanically advances what needs no judgment —
- * claiming an offered ticket, recording a finished pod's artifact, proposing the commit
- * manifest from the execute result, driving the post-approval commit effect
- * exactly-once, marking mail delivered. Cognition supplies judgment as typed proposals
+ * DIVISION OF LABOR: the substrate mechanically advances what needs no judgment — the
+ * workflow's mechanical steps ([Workflow.mechanicalStep]), its effects fired exactly once,
+ * marking mail delivered. Cognition supplies judgment as typed proposals
  * (pod spawns, gate opens, status, escalation), journaled with origin = cognition before
  * execution. Gate releases enter only through the authorization seam ([AuthStub] until
  * the real ceremony) and are honored by the folds' provenance + digest checks, never by
@@ -99,7 +98,7 @@ class AgentHost<S : HostView> internal constructor(
    * that fires nothing, and fire timers with [injectTimerDue]; some pass one that records or fires
    * timers itself. */
   private val timers: TimerService,
-  private val faults: FaultInjector = FaultInjector.NONE,
+  private val faults: FaultInjector = DEFAULT_FAULTS,
   /** Where a ceremony gate-open is announced so an operator can authorize it ([GateOpenSink]).
    * Defaults to [NoOpGateOpenSink], which reaches no operator: a real sink, and the recipients and
    * relay it needs, are the deployment's wiring. A daemon whose sink reports
@@ -108,19 +107,19 @@ class AgentHost<S : HostView> internal constructor(
    * auth no nonce is minted, so this is consulted only for a nonce the journal already holds. The
    * capacity it declares ([GateOpenSink.maxArtifactBytes]) bounds how much of a gate's bound copy
    * the daemon reads to announce it. */
-  private val gateOpenSink: GateOpenSink = NoOpGateOpenSink,
-  private val dedupEffects: Boolean = true,
-  private val capabilityDesc: String = "scripted/none",
-  private val leadVersion: String = "dev",
+  private val gateOpenSink: GateOpenSink = DEFAULT_GATE_OPEN_SINK,
+  private val dedupEffects: Boolean = DEFAULT_DEDUP_EFFECTS,
+  private val capabilityDesc: String = DEFAULT_CAPABILITY_DESC,
+  private val leadVersion: String = DEFAULT_LEAD_VERSION,
   /** Backoff between malformed-output retries within one wake, multiplied by the attempt
    * number. Blocks the single loop thread by design — the wake is not finished, and a
    * second concurrent cognition call would break the single-writer rule. */
-  private val cognitionRetryBackoffMs: Long = 500,
+  private val cognitionRetryBackoffMs: Long = DEFAULT_COGNITION_RETRY_BACKOFF_MS,
   /** Cognition calls allowed per wake before the wake escalates and idles. Whether a
    * retry can help at all is a property of the STRATEGY, not of the substrate: a strategy
    * that samples deterministically re-emits the same near-miss, so retrying it only doubles
    * the bill. Such a strategy is wired with 1. */
-  private val maxCognitionAttempts: Int = 2,
+  private val maxCognitionAttempts: Int = DEFAULT_MAX_COGNITION_ATTEMPTS,
   /** How long the loop thread waits for a bound copy to be opened and read ([readBoundCopy]). A
    * copy the lead wrote, at most [MAX_BOUND_ARTIFACT_BYTES], reads in far less on a local disk, so
    * a read still unfinished then is taken as a disturbed copy. This is what a copy swapped for a
@@ -498,16 +497,16 @@ class AgentHost<S : HostView> internal constructor(
    * the lead would journal now, and decline every other. The receiver dedups on the idempotency
    * key (attempt 2 mirrors the journal fixture).
    *
-   * The lead journals one intent, the current ticket's commit effect, and only once
-   * the workflow's commit check holds ([Workflow.redriveMessage]). The re-drive exists to finish such an intent that a crash
-   * cut short, so it asks the same question, and fires the message the commit arm builds from the
-   * lead's own state, not the one the row carries. The commit arm would fire the same intent on the
-   * first wake; the re-drive fires it first, so the approved commit lands even when a later adopt
-   * step, or the first wake before the arm, faults, and a fault that persists there recurs on every
-   * start. The shared fold accepts an intent row of any origin and reads only its key, so a journal
+   * The lead journals an effect's intent only once the workflow would fire it
+   * ([Workflow.redriveMessage]). The re-drive exists to finish such an intent that a crash
+   * cut short, so it asks the same question, and fires the message the workflow builds from the
+   * lead's own state, not the one the row carries. The workflow would fire the same intent on the
+   * first wake; the re-drive fires it first, so the approved effect lands even when a later adopt
+   * step faults, or the first wake faults before the workflow's step that fires it. A fault that
+   * persists there recurs on every start. The shared fold accepts an intent row of any origin and reads only its key, so a journal
    * the lead did not write can hold any intent. One that fails the question is not fired, and is
    * escalated once ([HostView.declinedEffects]). It stays pending: once the question holds, the
-   * commit arm fires it.
+   * workflow's step fires it.
    */
   private fun redrivePendingEffects(shared: JournalState, lead: S) {
     for (key in shared.pendingEffectKeys) {
@@ -846,7 +845,7 @@ class AgentHost<S : HostView> internal constructor(
     // leaves a gate nothing else mints for: no release can clear it, and no operator is told of
     // it. A gate a DENY_ALL daemon opened is left the same way once the daemon restarts under a
     // ceremony auth, since DENY_ALL mints no nonce. This mints for such a gate on the terms in
-    // force now: a ceremony auth, the gate id the gate-open derives for the current ticket, and a
+    // force now: a ceremony auth, the gate id the gate-open derives for the current scope, and a
     // gate digest that is still the substrate's evidence for its kind. A gate issued a nonce on its
     // current digest at any point gets no other. A voided nonce stays withdrawn, since a second one
     // would re-authorize the payload the void withdrew. A spent nonce's gate was already released
@@ -855,10 +854,10 @@ class AgentHost<S : HostView> internal constructor(
     //
     // So the id and digest a nonce is bound to here are never blank, which the fold refuses, and
     // are in the forms the lead itself writes: the id is a kind [Workflow.recordedEvidence] knows
-    // and a ticket ref the claim accepts, and the digest is in the hex form the substrate records,
+    // and a scope key the workflow accepts ([Workflow.scopeKey]), and the digest is in the hex form the substrate records,
     // the only form for which [Workflow.evidenceMismatch] may return null.
     // A gate under any other id or digest came from a journal the lead did not write, or was
-    // opened for a claim that came from one, and the mint does not act on it.
+    // opened on a cognition digest claim that came from one, and the mint does not act on it.
     val scopeKey = workflow.scopeKey(lead)
     if (leadAuth.hasApprovers && scopeKey != null) {
       for (gate in lead.openGates.values) {
@@ -870,7 +869,7 @@ class AgentHost<S : HostView> internal constructor(
 
       // A gate the mint refuses stays open, with nothing to release it under this auth unless it
       // has a usable nonce or was released on its digest, and nothing announces it. Each stage of
-      // the current ticket waits on the gate under the id the gate-open derives for its kind, and
+      // the current scope waits on the gate under the id the gate-open derives for its kind, and
       // the gate-open skips an id already open, so a gate under that id blocks that stage whatever
       // kind it records. It is escalated once its refusal is settled: at once when its recorded
       // kind is not the kind its id names, which the mint never issues a nonce for, and otherwise
@@ -901,7 +900,7 @@ class AgentHost<S : HostView> internal constructor(
     // escalated anywhere else, and under a timer service that fires nothing a failed announce of it is
     // never sent again. So such a gate is escalated once per gate and digest, under the record the
     // stall escalation above keeps ([HostView.escalatedStalls]), whatever the timer service. Only a
-    // gate under an id the gate-open derives for the current ticket is escalated, so the id the
+    // gate under an id the gate-open derives for the current scope is escalated, so the id the
     // reason quotes is one the lead derives.
     if (!leadAuth.hasApprovers && scopeKey != null) {
       for (kind in workflow.gateKinds) {
@@ -977,8 +976,8 @@ class AgentHost<S : HostView> internal constructor(
   }
 
   /** Fire the effect keyed [key] with [message], and journal its done entry. With [dedupEffects]
-   * set, the receiver fires a key at most once. The fault point is named for the commit effect, the
-   * one effect the lead fires. */
+   * set, the receiver fires a key at most once. The fault point keeps the name of the ticket
+   * workflow's commit effect, its one effect, because tests and golden journals name it. */
   private fun fireEffect(key: String, message: String, attempt: Int) {
     val result = effects.fire(key, message, dedupEffects)
     faults.at("after-commit-effect")
@@ -1026,7 +1025,7 @@ class AgentHost<S : HostView> internal constructor(
   /** Escalate [gate] as stalled: open with no usable nonce, refused one for [refusal], and not
    * released on its digest. The refusal is the mint's ([mintRefusal]), or the gate's recorded kind
    * not being the kind its id names, for which the mint never issues one. The reason quotes the gate
-   * id, which equals the one the lead derives for the claimed ticket. */
+   * id, which equals the one the lead derives for the current scope. */
   private fun escalateStall(gate: OpenGate, refusal: String) =
     escalateGate(
       gate,
@@ -1294,8 +1293,8 @@ class AgentHost<S : HostView> internal constructor(
 
   /**
    * Read the artifact a ceremony gate is open on from its lead-owned bound copy, for inlining into
-   * the gate-open notice. The path is the immutable bound copy the fold recorded (plan artifact or
-   * commit manifest), NOT the pod's own path — the swap window bind-once closes. Unlike
+   * the gate-open notice. The path is the immutable bound copy the fold recorded for the gate,
+   * NOT the pod's own path — the swap window bind-once closes. Unlike
    * [verifiedBoundArtifact] this has NO side effects (no abandon, no escalate): at announce time an
    * unresolved artifact is a liveness matter [announceAndMark] handles, not a pod to abandon.
    *
@@ -1566,11 +1565,11 @@ class AgentHost<S : HostView> internal constructor(
    * Execute cognition's proposals — treating them as UNTRUSTED input, not commands.
    * Cognition supplies judgment (when to gate, what task to run); the substrate holds the
    * evidence and enforces it here:
-   *  - a gate opens only on the digest the workflow admits for it ([Workflow.admitGateOpen]):
-   *    for the ticket workflow, the digest the substrate recorded for that gate kind, so
-   *    cognition cannot re-bind approval to evidence that does not exist — a mismatch is
-   *    escalated visibly, never opened. The host opens, mints and announces on what the
-   *    workflow admits, and checks no evidence itself;
+   *  - a gate opens only on the digest the workflow admits for it ([Workflow.admitGateOpen]).
+   *    The host opens, mints and announces on what the workflow admits, and checks no
+   *    evidence itself. A workflow that admits only its recorded evidence for the gate kind
+   *    keeps cognition from re-binding approval to evidence that does not exist: the
+   *    workflow refuses a mismatch, and the host escalates it visibly;
    *  - a task ref must be well-formed and its artifact path must resolve inside the
    *    lead's artifacts directory (no traversal via model-controlled names);
    *  - a task whose evidence is already recorded is refused a fresh pod (re-proposing
@@ -1830,18 +1829,18 @@ class AgentHost<S : HostView> internal constructor(
    * [MAX_JOURNALED_STRING] chars.
    *
    * A reason this class writes never quotes text a sender chose that failed the check that would
-   * vouch for it: a ticket ref the claim refuses, a gate kind, digest or task ref of a proposal
+   * vouch for it: a scope key the workflow refuses, a gate kind, digest or task ref of a proposal
    * that the check on that value rejects, or a digest a pod runner reports that the snapshot's
    * hash contradicts. Nothing vouches for what such text holds, so the reason gives its length and
    * names the check instead. A proposal's own text is on the record already, in the
    * cognition-origin row journaled before the proposals execute.
    *
-   * A reason may quote what the lead wrote or accepted: a claimed ticket ref, the gate ids and
-   * task refs built from it, a digest or path the lead computed or recorded, and a pod's id as the
-   * lead's own pod runner reports it. A proposed task ref that passed its check equals one the
-   * lead builds from the claimed ticket, so a reason may quote it even when a later check refuses
-   * the spawn. Likewise an effect key in the commit effect's form, with a ticket ref the claim
-   * accepts, is one the lead builds, so a reason may quote it. Some reasons carry text as its author wrote it, cut to a bound: the reason
+   * A reason may quote what the lead wrote or accepted: a scope key the workflow accepted, the gate
+   * ids and task refs built from it, a digest or path the lead computed or recorded, and a pod's id
+   * as the lead's own pod runner reports it. A proposed task ref that passed its check equals one
+   * the lead builds from the current scope, so a reason may quote it even when a later check
+   * refuses the spawn. Likewise an effect key the workflow builds from an accepted scope key is one
+   * the lead builds, so a reason may quote it. Some reasons carry text as its author wrote it, cut to a bound: the reason
    * cognition gives when it proposes an escalation, and the detail a collaborator or an exception
    * reports, such as a sink's failure, a pod event's reason, or the message of a fault that stops
    * the loop.
@@ -1879,7 +1878,7 @@ class AgentHost<S : HostView> internal constructor(
     /**
      * The largest pod artifact the lead records, in bytes: 32 MiB, the most the ACP pod engine
      * reads of an artifact unless it is built with a larger cap. The lead reads a pod's bound copy
-     * back whole, its single loop thread waiting on the read, before the plan or commit record binds to it, so it
+     * back whole, its single loop thread waiting on the read, before the workflow's record binds to it, so it
      * refuses a completion whose snapshot is larger before it writes the copy. A bound copy larger
      * than this was therefore disturbed after it was written, and is refused unread. A pod runner
      * that delivers more gets those results refused, and the work proposed again.
@@ -1893,6 +1892,16 @@ class AgentHost<S : HostView> internal constructor(
 
     /** The default number of bound-copy reads that may stay blocked past their deadline. */
     const val DEFAULT_MAX_PARKED_BOUND_READS: Int = 4
+
+    // The constructor's other defaults, named so a factory that builds a host can use the same
+    // values rather than restate them.
+    val DEFAULT_FAULTS: FaultInjector = FaultInjector.NONE
+    val DEFAULT_GATE_OPEN_SINK: GateOpenSink = NoOpGateOpenSink
+    const val DEFAULT_DEDUP_EFFECTS: Boolean = true
+    const val DEFAULT_CAPABILITY_DESC: String = "scripted/none"
+    const val DEFAULT_LEAD_VERSION: String = "dev"
+    const val DEFAULT_COGNITION_RETRY_BACKOFF_MS: Long = 500
+    const val DEFAULT_MAX_COGNITION_ATTEMPTS: Int = 2
 
     /** The name of each thread a bound copy is opened and read on. */
     const val BOUND_READ_THREAD_NAME: String = "lead-bound-read"
