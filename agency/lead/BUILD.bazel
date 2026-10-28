@@ -232,7 +232,7 @@ kt_jvm_test(
     srcs = ["ThreadTimerServiceTest.kt"],
     test_class = "com.geekinasuit.agency.lead.ThreadTimerServiceTest",
     deps = [
-        ":lead",
+        ":host",
         "//agency/shared/journal",
         "@maven//:junit_junit",
     ],
@@ -365,7 +365,7 @@ kt_jvm_library(
     name = "fifo_test_support",
     testonly = True,
     srcs = ["FifoTestSupport.kt"],
-    deps = [":lead"],
+    deps = [":host"],
 )
 
 kt_jvm_test(
@@ -471,7 +471,7 @@ kt_jvm_test(
     srcs = ["EnginePodRunnerTest.kt"],
     test_class = "com.geekinasuit.agency.lead.EnginePodRunnerTest",
     deps = [
-        ":lead",
+        ":host",
         "//agency/pod",
         "//agency/pod:acp_client",
         "//agency/pod:acp_pod_engine",
@@ -600,7 +600,7 @@ kt_jvm_test(
     ],
     test_class = "com.geekinasuit.agency.lead.RealAdapterSmokeTest",
     deps = [
-        ":lead",
+        ":host",
         "//agency/pod",
         "//agency/pod:acp_client",
         "//agency/pod:acp_pod_engine",
