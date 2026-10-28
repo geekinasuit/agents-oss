@@ -267,10 +267,12 @@ kt_jvm_test(
     deps = [
         ":ceremony_test_support",
         "//agency/pod",
+        "//agency/shared/harness",
         "//agency/shared/journal",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+        "@maven//:org_json_json",
     ],
 )
 
@@ -309,14 +311,15 @@ java_test(
 # scripted walk, under both auths, for a pod in flight, for a mailbox past its bounds and for every
 # wake reason, against golden files generated before the cognition protocol split; and checks at
 # the wire (a stand-in claude, a loopback chat endpoint) that each strategy sends exactly those.
-# Goldens are runfiles, as golden_journal_test's are.
+# Goldens are runfiles, as golden_journal_test's are. associates (not deps) on :lead, since a
+# wake context is built with the host's HostState, which is internal to it.
 kt_jvm_library(
     name = "prompt_golden_test_lib",
     testonly = True,
     srcs = ["PromptGoldenTest.kt"],
+    associates = [":lead"],
     deps = [
         ":ceremony_test_support",
-        ":lead",
         "//agency/pod",
         "//agency/shared/harness",
         "//agency/shared/harness:fake_openai_endpoint",
@@ -368,15 +371,17 @@ kt_jvm_library(
     deps = [":host"],
 )
 
+# associates (not deps) on :lead, since a wake context is built with the host's HostState, which
+# is internal to it.
 kt_jvm_test(
     name = "guards_test",
     size = "small",
     srcs = ["GuardsTest.kt"],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.GuardsTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
         ":ceremony_test_support",
-        ":lead",
         "//agency/pod",
         "//agency/shared/journal",
         "@maven//:junit_junit",
@@ -480,13 +485,15 @@ kt_jvm_test(
     ],
 )
 
+# associates (not deps) on :lead, since a wake context is built with the host's HostState, which
+# is internal to it.
 kt_jvm_test(
     name = "cognition_parsing_test",
     size = "small",
     srcs = ["CognitionParsingTest.kt"],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.CognitionParsingTest",
     deps = [
-        ":lead",
         "//agency/shared/journal",
         "@maven//:junit_junit",
     ],
@@ -522,14 +529,15 @@ kt_jvm_test(
 )
 
 # Hermetic: the Claude cognition strategy's presentation answers (spend cap, failed turn,
-# parsed turn) against a stand-in claude executable. No claude CLI required.
+# parsed turn) against a stand-in claude executable. No claude CLI required. associates (not deps)
+# on :lead, since a wake context is built with the host's HostState, which is internal to it.
 kt_jvm_test(
     name = "claude_cognition_test",
     size = "small",
     srcs = ["ClaudeCognitionTest.kt"],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.ClaudeCognitionTest",
     deps = [
-        ":lead",
         "//agency/shared/harness",
         "//agency/shared/journal",
         "@maven//:junit_junit",
@@ -538,15 +546,16 @@ kt_jvm_test(
 
 # Hermetic: the Ollama cognition strategy end to end against a loopback stand-in
 # endpoint — typed proposals out of a captured real reply, malformed classification, and
-# the transport-failure path. No Ollama required.
+# the transport-failure path. No Ollama required. associates (not deps) on :lead, since a wake
+# context is built with the host's HostState, which is internal to it.
 kt_jvm_test(
     name = "openai_compat_cognition_test",
     size = "small",
     srcs = ["OpenAiCompatCognitionTest.kt"],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.OpenAiCompatCognitionTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
-        ":lead",
         "//agency/pod",
         "//agency/shared/harness",
         "//agency/shared/harness:fake_openai_endpoint",

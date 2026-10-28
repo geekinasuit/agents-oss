@@ -2,18 +2,23 @@ package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.pod.PodSpec
 import com.geekinasuit.agency.pod.sha256HexBytes
+import com.geekinasuit.agency.shared.harness.ClaudeHarness
 import com.geekinasuit.agency.shared.journal.EffectReceiver
 import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.JournalState
+import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Rule
 import org.junit.Test
@@ -21,7 +26,9 @@ import org.junit.rules.TemporaryFolder
 
 /**
  * The host running a workflow that is not the ticket workflow, on the host's library alone: one
- * gate, opened on evidence the workflow records, with no ticket walk.
+ * gate, opened on evidence the workflow records, with no ticket walk. The lead's state carries none
+ * of the host's records, so every host and cognition decision here reads the records the host
+ * folded itself.
  *
  * The scenario, in drives over one journal:
  * 1. Under a ceremony auth, a crash between the gate-open and its mint.
@@ -47,7 +54,7 @@ class HostOnlyDriverTest {
   @Test
   fun theHostOpensMintsAndAnnouncesAGateForAWorkflowThatIsNotTheTicketWorkflow() {
     for (ending in Ending.entries) {
-      val run = run(lie = false, ending)
+      val run = run(ending)
       assertEquals("$ending: one gate opened", 1, run.kinds.count { it == HostKinds.GATE_OPENED })
       assertEquals("$ending: one nonce, minted by the recovery", 1, run.kinds.count { it == HostKinds.NONCE_ISSUED })
       assertEquals("$ending: the announce sent until it was delivered", 3, run.announces)
@@ -61,13 +68,43 @@ class HostOnlyDriverTest {
   }
 
   @Test
-  fun theHostDecidesTheSameWhenTheWorkflowsStateMisreportsEveryHostRecord() {
-    // The workflow's own logic reads only its own fields, so a lie about the host's records changes
-    // nothing the workflow decides. Each record a host decision in the scenario reads differs from
-    // its lie somewhere in the scenario, so a decision that read the lie would differ: the gate
-    // opened again, the mint or the announce skipped or repeated, a pod or intent left alone, an
-    // escalation repeated or dropped. The class KDoc names the decisions the scenario does not reach.
-    for (ending in Ending.entries) assertEquals("$ending", run(lie = false, ending), run(lie = true, ending))
+  fun theBudgetGuardStopsATurnOnTheHostsSpendWhenTheWorkflowsStateCarriesNone() {
+    // The journal's spend is past the cap, and the workflow's state carries no spend at all. The
+    // guard reads the spend and the escalations the host folded, so across two drives it escalates
+    // once and runs no turn.
+    val dir = tmp.newFolder()
+    val ran = File(dir, "ran")
+    val claude =
+      File(dir, "fake-claude").apply {
+        writeText("#!/bin/sh\n: > '${ran.absolutePath}'\nexit 1\n")
+        setExecutable(true)
+      }
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    store.append(
+      HostKinds.COGNITION_PROPOSED,
+      buildJsonObject {
+        put("costUsd", "1.5")
+        put("strategy", "claude")
+        put("reasoning", "an earlier turn")
+        put("proposals", buildJsonArray {})
+      },
+      ORIGIN_COGNITION,
+    )
+    val cognition =
+      ClaudeCognition(
+        harness = ClaudeHarness(claude.absolutePath),
+        workDir = dir,
+        protocol = ComposedCognitionProtocol(GateProtocol),
+        maxTotalUsd = 1.0,
+        timeoutSec = 30,
+      )
+    val evidence = File(dir, "evidence.txt").apply { writeText("x\n") }
+    repeat(2) { host(dir, store, evidence, cognition = cognition).driveUntilQuiescent() }
+    val escalations = escalations(store.readAll())
+    store.close()
+
+    assertFalse("no turn is run past the cap", ran.exists())
+    assertEquals(1, escalations.count { it.startsWith("cognition budget exhausted") })
   }
 
   /** How the scenario ends after its shared drives. Two endings, since a gate escalated on a digest
@@ -79,7 +116,7 @@ class HostOnlyDriverTest {
 
   private data class Run(val kinds: List<String>, val escalations: List<String>, val announces: Int)
 
-  private fun run(lie: Boolean, ending: Ending): Run {
+  private fun run(ending: Ending): Run {
     val dir = tmp.newFolder()
     val evidence = File(dir, "evidence.txt").apply { writeText("approve this\n") }
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
@@ -91,7 +128,7 @@ class HostOnlyDriverTest {
     val crash = FaultInjector { if (it == "after-gate-opened-$GATE_KIND") throw RuntimeException("crash before the mint") }
     val ceremony = ceremonyAuth()
     assertThrows(RuntimeException::class.java) {
-      host(dir, store, evidence, lie, sink, crash, ceremony).driveUntilQuiescent()
+      host(dir, store, evidence, sink, crash, ceremony).driveUntilQuiescent()
     }
     store.append(HostKinds.POD_SPAWN_INTENDED, buildJsonObject { put("taskRef", "orphan") }, ORIGIN_SUBSTRATE)
     store.append(
@@ -105,11 +142,11 @@ class HostOnlyDriverTest {
       ORIGIN_SUBSTRATE,
     )
     store.append("effect-intent", buildJsonObject { put("key", "unknown-effect") }, ORIGIN_SUBSTRATE, "unknown-effect")
-    host(dir, store, evidence, lie, sink, FaultInjector.NONE, ceremony).driveUntilQuiescent()
-    host(dir, store, evidence, lie, sink, FaultInjector.NONE, ceremony).driveUntilQuiescent()
+    host(dir, store, evidence, sink, FaultInjector.NONE, ceremony).driveUntilQuiescent()
+    host(dir, store, evidence, sink, FaultInjector.NONE, ceremony).driveUntilQuiescent()
     when (ending) {
       Ending.NO_APPROVERS -> repeat(2) {
-        host(dir, store, evidence, lie, sink, FaultInjector.NONE, LeadAuth.DENY_ALL).driveUntilQuiescent()
+        host(dir, store, evidence, sink, FaultInjector.NONE, LeadAuth.DENY_ALL).driveUntilQuiescent()
       }
       Ending.RELEASED_OFF_EVIDENCE -> {
         val issued =
@@ -127,33 +164,34 @@ class HostOnlyDriverTest {
           },
           ORIGIN_SUBSTRATE,
         )
-        repeat(2) { host(dir, store, evidence, lie, sink, FaultInjector.NONE, ceremony).driveUntilQuiescent() }
+        repeat(2) { host(dir, store, evidence, sink, FaultInjector.NONE, ceremony).driveUntilQuiescent() }
       }
     }
     val entries = store.readAll()
     store.close()
-    val escalations =
-      entries
-        .filter { it.kind == HostKinds.ESCALATED }
-        .map { Json.parseToJsonElement(it.payloadJson).jsonObject.getValue("reason").jsonPrimitive.content }
-    return Run(entries.map { it.kind }, escalations, announces)
+    return Run(entries.map { it.kind }, escalations(entries), announces)
   }
+
+  private fun escalations(entries: List<JournalEntry>) =
+    entries
+      .filter { it.kind == HostKinds.ESCALATED }
+      .map { Json.parseToJsonElement(it.payloadJson).jsonObject.getValue("reason").jsonPrimitive.content }
 
   private fun host(
     dir: File,
     store: SqliteStore,
     evidence: File,
-    lie: Boolean,
-    sink: GateOpenSink,
-    faults: FaultInjector,
-    auth: LeadAuth,
+    sink: GateOpenSink = GateOpenSink { AnnounceOutcome.Announced("delivered") },
+    faults: FaultInjector = FaultInjector.NONE,
+    auth: LeadAuth = LeadAuth.DENY_ALL,
+    cognition: AgentCognition<GateLead> = ProposeTheGate,
   ): AgentHost<GateLead> =
     AgentHost(
       store = store,
-      cognition = ProposeTheGate,
+      cognition = cognition,
       podRunner = FakePodRunner(),
       podSpec = PodSpec.fixture(),
-      workflow = GateWorkflow(lie, evidence),
+      workflow = GateWorkflow(evidence),
       workdir = dir,
       effects = EffectReceiver(dir.absolutePath),
       leadAuth = auth,
@@ -165,37 +203,10 @@ class HostOnlyDriverTest {
   /** The workflow's own state: the scope it opened, and the evidence it recorded for the gate. */
   private data class GateWorkflowState(val scope: String? = null, val evidence: String? = null)
 
-  /** A lead's state for [GateWorkflow]: the host's records, misreported when [lie] is set, and the
-   * workflow's own. */
-  private class GateLead(private val host: HostState, val w: GateWorkflowState, private val lie: Boolean) :
-    HostView {
-    override val openGates: Map<String, OpenGate> = if (lie) emptyMap() else host.openGates
-    override val activePods: List<PodRecord> = if (lie) emptyList() else host.activePods
-    override val staleReleases: List<Pair<Long, String>> = if (lie) emptyList() else host.staleReleases
-    override val escalations: List<String> = if (lie) emptyList() else host.escalations
-    override val cognitionSpendUsd: Double = if (lie) 0.0 else host.cognitionSpendUsd
-    override val pods: Map<String, PodRecord> = if (lie) emptyMap() else host.pods
-    override val pendingSpawnIntents: Map<String, Long> = if (lie) emptyMap() else host.pendingSpawnIntents
-    override val declinedEffects: Set<String> = if (lie) emptySet() else host.declinedEffects
-    override val escalatedStalls: Map<String, Set<String>> = if (lie) emptyMap() else host.escalatedStalls
-    override val issuedNonces: Map<String, IssuedNonce> = if (lie) emptyMap() else host.issuedNonces
-    override val notifiedNonces: Set<String> = if (lie) host.issuedNonces.keys else host.notifiedNonces
-    override val failedAnnounces: Map<String, Int> = if (lie) emptyMap() else host.failedAnnounces
-    override val notReadAnnounces: Map<String, Int> = if (lie) emptyMap() else host.notReadAnnounces
+  /** A lead's state for [GateWorkflow]: the workflow's own, and none of the host's records. */
+  private class GateLead(val w: GateWorkflowState)
 
-    override fun approvedOnCurrentDigest(gateId: String): Boolean = host.approvedOnCurrentDigest(gateId) != lie
-
-    override fun openNonceFor(gate: OpenGate): IssuedNonce? {
-      val truth = host.openNonceFor(gate)
-      return when {
-        !lie -> truth
-        truth != null -> null
-        else -> IssuedNonce("forged", gate.gateId, gate.payloadDigest, 0)
-      }
-    }
-  }
-
-  private class GateFold(private val lie: Boolean) : WorkflowFold<GateLead, GateWorkflowState> {
+  private object GateFold : WorkflowFold<GateLead, GateWorkflowState> {
     override val substrateKinds = setOf(SCOPE_OPENED)
     override val scopeEndKinds = emptySet<String>()
     override val start = GateWorkflowState()
@@ -208,13 +219,13 @@ class HostOnlyDriverTest {
       return GateWorkflowState(p.getValue("scope").jsonPrimitive.content, p.getValue("evidence").jsonPrimitive.content)
     }
 
-    override fun assemble(host: HostState, w: GateWorkflowState) = GateLead(host, w, lie)
+    override fun assemble(host: HostState, w: GateWorkflowState) = GateLead(w)
   }
 
   /** One scope, one gate: the workflow records the evidence file's digest, and the gate opens only on
    * it. Its own logic reads only its own state. */
-  private class GateWorkflow(lie: Boolean, private val evidence: File) : Workflow<GateLead> {
-    override val fold = GateFold(lie)
+  private class GateWorkflow(private val evidence: File) : Workflow<GateLead> {
+    override val fold = GateFold
     override val gateKinds = setOf(GATE_KIND)
 
     override fun scopeKey(lead: GateLead) = lead.w.scope
@@ -271,6 +282,20 @@ class HostOnlyDriverTest {
         presentation = ContextPresentation.PRESENTED,
       )
     }
+  }
+
+  /** [GateWorkflow]'s part of the cognition protocol: no proposals of its own, no lines of state. */
+  private object GateProtocol : WorkflowProtocol<GateLead> {
+    override val proposalShapes = emptyList<String>()
+    override val rules = ""
+    override val proposalTypes = emptySet<String>()
+
+    override fun renderLines(lead: GateLead) = emptyList<String>()
+
+    override fun gateReadsApproved(lead: GateLead, gate: OpenGate) = false
+
+    override fun parseProposal(type: String, p: JSONObject): ProposalParse =
+      ProposalParse.Malformed(MalformedReasons.UNKNOWN_TYPE)
   }
 
   private companion object {

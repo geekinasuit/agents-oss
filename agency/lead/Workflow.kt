@@ -13,7 +13,7 @@ import kotlinx.serialization.json.JsonObject
  * would be folded twice, and a scope-end kind the host also folds would skip the host's own arm for
  * it.
  */
-internal interface Workflow<S : HostView> {
+internal interface Workflow<S> {
   /** The workflow's half of the lead fold. The host runs the loop ([foldLeadJournal]). */
   val fold: WorkflowFold<S, *>
 

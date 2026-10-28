@@ -47,7 +47,7 @@ class GuardsTest {
     val mailSeen = mutableListOf<List<String>>()
 
     override fun decide(context: AgentWakeContext<LeadState>): CognitionOutput {
-      spendSeen += context.lead.cognitionSpendUsd
+      spendSeen += context.host.cognitionSpendUsd
       mailSeen += context.undeliveredMail.map { it.second }
       return if (script.isEmpty()) presentedOutput(reasoning = "idle") else script.removeAt(0)
     }
@@ -432,7 +432,9 @@ class GuardsTest {
 
   private fun executeProposed(lead: LeadState, ticket: String): Boolean =
     ScriptedCognition()
-      .decide(AgentWakeContext(WakeReason.Adopted, lead, JournalState(), emptyList()))
+      .decide(
+        AgentWakeContext(WakeReason.Adopted, lead, HostState(openGates = lead.openGates), JournalState(), emptyList())
+      )
       .proposals
       .any { it is Proposal.ProposePodSpawn && it.taskRef == "execute:$ticket" }
 

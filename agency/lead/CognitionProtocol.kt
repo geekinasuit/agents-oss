@@ -71,7 +71,7 @@ object MailRender {
  * of the system prompt, and its lines of the rendered state. [ComposedCognitionProtocol] composes
  * it with the host's part.
  */
-interface WorkflowProtocol<S : HostView> {
+interface WorkflowProtocol<S> {
   /** The shapes of this workflow's proposals, which the system prompt lists ahead of the host's. */
   val proposalShapes: List<String>
 
@@ -111,7 +111,7 @@ interface WorkflowProtocol<S : HostView> {
  * This class holds the host's part and composes it with [workflow]'s. It refuses a workflow that
  * claims a type the host parses, which the host's arms would otherwise shadow.
  */
-class ComposedCognitionProtocol<S : HostView>(private val workflow: WorkflowProtocol<S>) {
+class ComposedCognitionProtocol<S>(private val workflow: WorkflowProtocol<S>) {
   init {
     val shared = workflow.proposalTypes intersect HOST_TYPES
     require(shared.isEmpty()) { "the workflow claims proposal types the host parses: ${shared.sorted()}" }
@@ -155,12 +155,13 @@ class ComposedCognitionProtocol<S : HostView>(private val workflow: WorkflowProt
    */
   fun renderContext(context: AgentWakeContext<S>): String {
     val lead = context.lead
+    val host = context.host
     val sb = StringBuilder()
     sb.appendLine("WAKE: ${renderReason(context.reason)}")
     for (line in workflow.renderLines(lead)) sb.appendLine(line)
     sb.appendLine(
       "openGates: " +
-        lead.openGates.values
+        host.openGates.values
           .joinToString(", ") {
             "${it.gateId}(digest=${it.payloadDigest}, approved=${workflow.gateReadsApproved(lead, it)})"
           }
@@ -168,9 +169,9 @@ class ComposedCognitionProtocol<S : HostView>(private val workflow: WorkflowProt
     )
     sb.appendLine(
       "activePods: " +
-        lead.activePods.joinToString(", ") { "${it.podId}:${it.taskRef}" }.ifEmpty { "none" }
+        host.activePods.joinToString(", ") { "${it.podId}:${it.taskRef}" }.ifEmpty { "none" }
     )
-    sb.appendLine("staleReleases: ${lead.staleReleases.size}  escalations: ${lead.escalations.size}")
+    sb.appendLine("staleReleases: ${host.staleReleases.size}  escalations: ${host.escalations.size}")
     sb.appendLine("undeliveredMail:")
     // Mail is untrusted content rendered into the model prompt: bound
     // both the count and per-message length so a huge or prompt-injected mailbox cannot

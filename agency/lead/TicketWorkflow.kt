@@ -504,22 +504,23 @@ class ScriptedCognition : AgentCognition<LeadState> {
 
   override fun decide(context: AgentWakeContext<LeadState>): CognitionOutput {
     val lead = context.lead
+    val host = context.host
     val ticket = lead.currentTicket ?: return IDLE
 
     // A stale release is escalated once. The check looks for that escalation only, so an escalation
     // of another kind, such as a gate-open no sink announced, does not silence it. The escalations
     // are a capped tail: once enough later ones push this one out, it is raised again.
-    if (lead.staleReleases.isNotEmpty() && STALE_RELEASE_REASON !in lead.escalations) {
+    if (host.staleReleases.isNotEmpty() && STALE_RELEASE_REASON !in host.escalations) {
       return decided(
         listOf(Proposal.ProposeEscalate(STALE_RELEASE_REASON)),
         "a release did not match the gate as opened; a human should look",
       )
     }
 
-    val planGate = lead.openGates[gateIdFor(GateKinds.PLAN_APPROVAL, ticket)]
-    val commitGate = lead.openGates[gateIdFor(GateKinds.COMMIT_APPROVAL, ticket)]
+    val planGate = host.openGates[gateIdFor(GateKinds.PLAN_APPROVAL, ticket)]
+    val commitGate = host.openGates[gateIdFor(GateKinds.COMMIT_APPROVAL, ticket)]
     val planApproved = lead.approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)
-    fun activePodFor(taskRef: String) = lead.activePods.any { it.taskRef == taskRef }
+    fun activePodFor(taskRef: String) = host.activePods.any { it.taskRef == taskRef }
 
     return when {
       lead.planArtifactSha == null && !activePodFor("plan:$ticket") ->

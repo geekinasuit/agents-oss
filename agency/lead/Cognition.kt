@@ -20,20 +20,21 @@ import com.geekinasuit.agency.shared.journal.JournalState
  * and its effects once their gates are released). Nothing cognition can output releases a gate: the fold's release
  * check keys on origin == auth layer, and cognition-origin entries can never satisfy it.
  *
- * [lead] is the folded state of a lead running some workflow, as the workflow assembles it:
- * cognition reads the host's records in it through [HostView], and the workflow's own code reads
- * the rest. The host's own decisions do not read it; they read the records the host folded itself.
+ * [lead] is the folded state of a lead running some workflow, as the workflow assembles it, and
+ * only the workflow's code reads it. [host] is the host's records, as the host folded them itself:
+ * cognition reads them there, as the host's own decisions do.
  */
-data class AgentWakeContext<out S : HostView>(
+data class AgentWakeContext<out S>(
   val reason: WakeReason,
   val lead: S,
+  val host: HostView,
   val shared: JournalState,
   val undeliveredMail: List<Pair<Long, String>>,
 )
 
-/** The host's records, whatever workflow the lead runs. The host folds them itself and decides from
- * its own copy; a workflow's state also carries them, assembled from that copy, for cognition and
- * the workflow to read. A host decision must read the host's copy, never a workflow's state. */
+/** The host's records, whatever workflow the lead runs, as the host folded them. The host decides
+ * from them, and cognition reads them ([AgentWakeContext.host]). A workflow's state is not a
+ * [HostView], so neither can read them from a workflow's state. */
 interface HostView {
   val openGates: Map<String, OpenGate>
   val activePods: List<PodRecord>
@@ -161,7 +162,7 @@ data class CognitionOutput(
   }
 }
 
-interface AgentCognition<in S : HostView> {
+interface AgentCognition<in S> {
   val name: String
 
   fun decide(context: AgentWakeContext<S>): CognitionOutput
@@ -169,7 +170,7 @@ interface AgentCognition<in S : HostView> {
 
 /** Test wrapper: counts [decide] calls — the zero-spend-while-idle assertion's probe. Its
  * output, presentation included, is the wrapped strategy's own. */
-class CountingCognition<S : HostView>(private val inner: AgentCognition<S>) : AgentCognition<S> {
+class CountingCognition<S>(private val inner: AgentCognition<S>) : AgentCognition<S> {
   @Volatile var calls: Int = 0
     private set
 

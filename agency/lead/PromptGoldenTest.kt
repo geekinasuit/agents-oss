@@ -172,6 +172,9 @@ class PromptGoldenTest {
         staleReleases = listOf(11L to planGate),
         escalations = listOf("an escalation"),
       )
+    // The host's records for [gated], as a fold would hold them beside it.
+    val gatedHost =
+      HostState(openGates = gated.openGates, staleReleases = gated.staleReleases, escalations = gated.escalations)
     val approved =
       LeadState(
         currentTicket = "t1",
@@ -193,8 +196,14 @@ class PromptGoldenTest {
         WakeReason.PodDisposed("pod-z1", "wall-clock-kill"),
         WakeReason.GateReleased(planGate),
       )
-      .map { AgentWakeContext(it, gated, JournalState(), emptyList()) } +
-      AgentWakeContext(WakeReason.Adopted, approved, JournalState(), emptyList())
+      .map { AgentWakeContext(it, gated, gatedHost, JournalState(), emptyList()) } +
+      AgentWakeContext(
+        WakeReason.Adopted,
+        approved,
+        HostState(openGates = approved.openGates),
+        JournalState(),
+        emptyList(),
+      )
   }
 
   @Test
