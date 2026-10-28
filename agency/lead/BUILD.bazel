@@ -246,9 +246,29 @@ kt_jvm_library(
     testonly = True,
     srcs = ["CeremonyTestSupport.kt"],
     deps = [
-        ":lead",
+        ":host",
         "//agency/shared/auth",
         "//agency/shared/journal",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# The host running a workflow that is not the ticket workflow. It depends on :host and never on
+# :lead, so it shows the host opens, mints and announces a gate with no ticket code on its classpath.
+# associates (not deps) on :host, since the Workflow and fold contract is internal to it.
+kt_jvm_test(
+    name = "host_only_driver_test",
+    size = "small",
+    srcs = ["HostOnlyDriverTest.kt"],
+    associates = [":host"],
+    test_class = "com.geekinasuit.agency.lead.HostOnlyDriverTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":ceremony_test_support",
+        "//agency/pod",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],

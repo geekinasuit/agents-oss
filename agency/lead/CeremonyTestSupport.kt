@@ -36,7 +36,7 @@ fun ceremonyAuth(): LeadAuth =
 fun SqliteStore.approveAndRelease(gateId: String, digest: String, nonce: String) {
   val publicKey = "pk-operator"
   append(
-    LeadKinds.APPROVAL_RECORDED,
+    HostKinds.APPROVAL_RECORDED,
     buildJsonObject {
       put("gateId", gateId)
       put("principalId", "operator")
