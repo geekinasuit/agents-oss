@@ -23,7 +23,7 @@ import java.io.File
  * Model selection comes from the capability descriptor; the wake-loop
  * blocking guarantee — zero turns while nothing happens — lives in the daemon, not here.
  */
-class ClaudeCognition<S : HostView>(
+class ClaudeCognition<S>(
   private val harness: ClaudeHarness = ClaudeHarness(),
   private val model: String = ClaudeHarness.MODEL,
   private val workDir: File,
@@ -52,15 +52,15 @@ class ClaudeCognition<S : HostView>(
    * undelivered.
    */
   override fun decide(context: AgentWakeContext<S>): CognitionOutput {
-    if (context.lead.cognitionSpendUsd >= maxTotalUsd) {
-      val alreadyRaised = context.lead.escalations.any { it.startsWith("cognition budget") }
+    if (context.host.cognitionSpendUsd >= maxTotalUsd) {
+      val alreadyRaised = context.host.escalations.any { it.startsWith("cognition budget") }
       return if (alreadyRaised) CognitionOutput.idle(ContextPresentation.NOT_PRESENTED)
       else
         CognitionOutput(
           listOf(
             Proposal.ProposeEscalate(
               "cognition budget exhausted: journal-derived spend " +
-                "${context.lead.cognitionSpendUsd} USD >= cap $maxTotalUsd USD; idling until raised"
+                "${context.host.cognitionSpendUsd} USD >= cap $maxTotalUsd USD; idling until raised"
             )
           ),
           reasoning = "cumulative spend cap reached before this wake; no turn was run",

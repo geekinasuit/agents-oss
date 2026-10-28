@@ -52,6 +52,7 @@ class OpenAiCompatCognitionTest {
     AgentWakeContext(
       reason = WakeReason.Adopted,
       lead = LeadState(currentTicket = "TEST-7"),
+      host = HostState(),
       shared = JournalState(),
       undeliveredMail = emptyList(),
     )

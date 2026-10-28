@@ -45,10 +45,13 @@ class ClaudeCognitionTest {
       timeoutSec = 30,
     )
 
-  private fun wake(lead: LeadState) =
+  /** A wake whose host records are [host], beside a workflow state that reports no spend and no
+   * escalations whatever [host] holds. */
+  private fun wake(host: HostState = HostState()) =
     AgentWakeContext(
       reason = WakeReason.MailArrived("please review"),
-      lead = lead,
+      lead = LeadState(),
+      host = host,
       shared = JournalState(),
       undeliveredMail = listOf(1L to "please review"),
     )
@@ -57,7 +60,7 @@ class ClaudeCognitionTest {
   fun atTheSpendCapTheEscalationRunsNoTurnAndPresentsNothing() {
     val dir = tmp.newFolder()
     val fake = FakeClaude(dir, SUCCESS_ENVELOPE, exit = 0)
-    val out = cognition(fake, dir, maxTotalUsd = 1.0).decide(wake(LeadState(cognitionSpendUsd = 1.5)))
+    val out = cognition(fake, dir, maxTotalUsd = 1.0).decide(wake(HostState(cognitionSpendUsd = 1.5)))
 
     assertFalse("no harness call is made at the cap", fake.ran.exists())
     assertTrue(
@@ -70,12 +73,12 @@ class ClaudeCognitionTest {
   fun atTheSpendCapALaterIdleRunsNoTurnAndPresentsNothing() {
     val dir = tmp.newFolder()
     val fake = FakeClaude(dir, SUCCESS_ENVELOPE, exit = 0)
-    val lead =
-      LeadState(
+    val host =
+      HostState(
         cognitionSpendUsd = 1.5,
         escalations = listOf("cognition budget exhausted: already raised"),
       )
-    val out = cognition(fake, dir, maxTotalUsd = 1.0).decide(wake(lead))
+    val out = cognition(fake, dir, maxTotalUsd = 1.0).decide(wake(host))
 
     assertFalse("no harness call is made at the cap", fake.ran.exists())
     assertTrue("the escalation is not raised twice", out.proposals.isEmpty())
@@ -86,7 +89,7 @@ class ClaudeCognitionTest {
   fun aFailedTurnPresentsNothing() {
     val dir = tmp.newFolder()
     val fake = FakeClaude(dir, "not an envelope", exit = 1)
-    val out = cognition(fake, dir).decide(wake(LeadState()))
+    val out = cognition(fake, dir).decide(wake())
 
     assertTrue("the harness was run", fake.ran.exists())
     assertNull("a failed turn is not a malformed one", out.malformed)
@@ -102,7 +105,7 @@ class ClaudeCognitionTest {
     // bare exit check is not the failure test. The result is prose, as an error's is.
     val dir = tmp.newFolder()
     val fake = FakeClaude(dir, ERROR_ENVELOPE, exit = 0)
-    val out = cognition(fake, dir).decide(wake(LeadState()))
+    val out = cognition(fake, dir).decide(wake())
 
     assertTrue("the harness was run", fake.ran.exists())
     assertEquals(ContextPresentation.NOT_PRESENTED, out.presentation)
@@ -116,7 +119,7 @@ class ClaudeCognitionTest {
   fun aSuccessfulParsedTurnWasPresentedTheContext() {
     val dir = tmp.newFolder()
     val fake = FakeClaude(dir, SUCCESS_ENVELOPE, exit = 0)
-    val out = cognition(fake, dir).decide(wake(LeadState()))
+    val out = cognition(fake, dir).decide(wake())
 
     assertTrue("the harness was run", fake.ran.exists())
     assertNull(out.malformed)

@@ -18,7 +18,7 @@ import com.geekinasuit.agency.shared.harness.OpenAiCompatHarness
  * turns at all. That is also why this strategy writes no `costUsd` into
  * [CognitionOutput.meta] — see [decide].
  */
-class OpenAiCompatCognition<S : HostView>(
+class OpenAiCompatCognition<S>(
   private val harness: OpenAiCompatHarness,
   /** The protocol the lead speaks; required, so no strategy can default to one workflow's. */
   private val protocol: ComposedCognitionProtocol<S>,

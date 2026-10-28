@@ -80,6 +80,7 @@ class WorkflowProtocolTest {
         AgentWakeContext(
           WakeReason.Adopted,
           LeadState(currentTicket = "t9", openGates = mapOf("g1" to gate)),
+          HostState(openGates = mapOf("g1" to gate)),
           JournalState(),
           emptyList(),
         )

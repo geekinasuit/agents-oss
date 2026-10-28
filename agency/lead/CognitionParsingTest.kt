@@ -268,6 +268,7 @@ class CognitionParsingTest {
       AgentWakeContext(
         reason = WakeReason.MailArrived("please review"),
         lead = lead,
+        host = HostState(),
         shared = JournalState(),
         undeliveredMail = listOf(1L to "please review"),
       )
@@ -369,9 +370,10 @@ class CognitionParsingTest {
     )
   }
 
+  /** The render of [lead], with the host holding the gates [lead] lists, as a fold copies them. */
   private fun render(lead: LeadState) =
     CognitionProtocol.renderContext(
-      AgentWakeContext(WakeReason.Adopted, lead, JournalState(), emptyList())
+      AgentWakeContext(WakeReason.Adopted, lead, HostState(openGates = lead.openGates), JournalState(), emptyList())
     )
 }
 

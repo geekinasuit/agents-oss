@@ -59,7 +59,7 @@ import kotlinx.serialization.json.put
  * the real ceremony) and are honored by the folds' provenance + digest checks, never by
  * this class's control flow.
  */
-class AgentHost<S : HostView> internal constructor(
+class AgentHost<S> internal constructor(
   private val store: JournalStore,
   private val cognition: AgentCognition<S>,
   private val podRunner: PodRunner,
@@ -463,10 +463,10 @@ class AgentHost<S : HostView> internal constructor(
   /**
    * One fold of the journal: the shared journal's state, the lead's state as the workflow
    * assembles it ([lead]), and the host's own records ([host]). The host decides on its gates,
-   * nonces, announces, pods and escalations from [host], which it folded itself; the workflow's
-   * [lead] carries the same records only for the workflow's and cognition's reads.
+   * nonces, announces, pods and escalations from [host], which it folded itself, and hands it to
+   * cognition beside [lead] ([AgentWakeContext.host]). Only the workflow's code reads [lead].
    */
-  class Folded<out T : HostView> internal constructor(
+  class Folded<out T> internal constructor(
     val entriesSize: Int,
     val shared: JournalState,
     val lead: T,
@@ -672,7 +672,7 @@ class AgentHost<S : HostView> internal constructor(
   private fun decideWithRetry(reason: WakeReason, initial: Folded<S>): Decision? {
     var folded = initial
     for (attempt in 1..maxCognitionAttempts) {
-      val wc = AgentWakeContext(reason, folded.lead, folded.shared, folded.shared.undeliveredMail)
+      val wc = AgentWakeContext(reason, folded.lead, folded.host, folded.shared, folded.shared.undeliveredMail)
       val out = cognition.decide(wc)
       if (out.malformed == null) return Decision(out, folded)
       journalMalformedCognition(out, attempt)

@@ -74,7 +74,7 @@ data class LeadState(
   val planArtifactSha: String? = null,
   val commitManifestPath: String? = null,
   val commitManifestDigest: String? = null,
-  override val openGates: Map<String, OpenGate> = emptyMap(),
+  val openGates: Map<String, OpenGate> = emptyMap(),
   val releasedGates: Set<String> = emptySet(),
   /** For each gate, the payload digests it has ALREADY been released on — the epoch-precise
    * single-release guard. [releasedGates] answers "released at all this ticket?" (gate-keyed,
@@ -94,10 +94,10 @@ data class LeadState(
    * keeps its old mark, and the mark's seq says which release it describes (never the
    * current one). */
   val nonceLessReleases: Map<String, Long> = emptyMap(),
-  override val staleReleases: List<Pair<Long, String>> = emptyList(), // (seq, open gate's id, or "an unknown gate id of N chars") — auth origin, but digest mismatch, unknown gate, or nonce indiscipline (consumed/unknown/misbound/absent-where-required)
+  val staleReleases: List<Pair<Long, String>> = emptyList(), // (seq, open gate's id, or "an unknown gate id of N chars") — auth origin, but digest mismatch, unknown gate, or nonce indiscipline (consumed/unknown/misbound/absent-where-required)
   /** Every nonce issued this ticket, by value — consumed ones stay listed ([consumedNonces]
    * marks them) so a re-issue of a spent value is detectable as the anomaly it is. */
-  override val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
+  val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
   val consumedNonces: Set<String> = emptySet(),
   /** Nonces whose gate-open announce is final ([LeadKinds.GATE_OPEN_NOTIFIED] without `retry`):
    * announced, not announced because no sink is wired or the artifact could not be inlined, or
@@ -106,18 +106,18 @@ data class LeadState(
    * afresh, while a final one is never announced again. The notify arm reads this to stop; a
    * marker that says the announce will be sent again counts in [failedAnnounces] instead.
    * Ticket-scoped: [LeadKinds.TICKET_DONE] clears it, as it does [issuedNonces]. */
-  override val notifiedNonces: Set<String> = emptySet(),
+  val notifiedNonces: Set<String> = emptySet(),
   /** Nonce → how many of its announces failed with a failure the sink reported, each marked to be
    * sent again ([LeadKinds.GATE_OPEN_NOTIFIED] with `retry`). The notify arm reads it to find the
    * timer the next attempt waits on, and the daemon to number that attempt, so a failing sink is
    * called once per attempt, never once per pass. [notifiedNonces] takes precedence: a nonce in it
    * is not sent again whatever this holds. Ticket-scoped: [LeadKinds.TICKET_DONE] clears it. */
-  override val failedAnnounces: Map<String, Int> = emptyMap(),
+  val failedAnnounces: Map<String, Int> = emptyMap(),
   /** Nonce → how many of the attempts in [failedAnnounces] were not attempts at all: the bound copy
    * was not read, for a cause outside it (a marker with `notRead`). The daemon counts only the
    * rest toward the bound on a failing sink's attempts. Ticket-scoped: [LeadKinds.TICKET_DONE]
    * clears it. */
-  override val notReadAnnounces: Map<String, Int> = emptyMap(),
+  val notReadAnnounces: Map<String, Int> = emptyMap(),
   /** gateId → approvals that RE-VERIFIED at fold time (signature over preimage, key in the
    * allow-list, committed binding agreeing with the flat copies). The set a release's quorum
    * is evaluated over — an approval that did not verify never lands here, so the flat
@@ -132,11 +132,11 @@ data class LeadState(
    * [LeadKinds.TICKET_DONE] — the one approval-derived view bounded by a tail rather than
    * correctness, because an unverified approval contributes nothing a release depends on. */
   val unverifiedApprovals: List<Pair<Long, String>> = emptyList(),
-  override val pods: Map<String, PodRecord> = emptyMap(),
-  override val pendingSpawnIntents: Map<String, Long> = emptyMap(), // taskRef → intent seq: spawn journaled, POD_SPAWNED not yet
+  val pods: Map<String, PodRecord> = emptyMap(),
+  val pendingSpawnIntents: Map<String, Long> = emptyMap(), // taskRef → intent seq: spawn journaled, POD_SPAWNED not yet
   val misOriginedEntries: List<Pair<Long, String>> = emptyList(), // (seq, kind): substrate-authored kind with a non-substrate origin — never honored
   val statusTail: List<String> = emptyList(),
-  override val escalations: List<String> = emptyList(),
+  val escalations: List<String> = emptyList(),
   /** Gate id → the digests the gate was escalated on this ticket as holding up the stage it guards.
    * A gate is escalated on a digest in four cases: it is open on the digest under a ceremony auth
    * with no usable nonce, one the mint issues none for, and not released on it; it is open on the
@@ -149,7 +149,7 @@ data class LeadState(
    * record are one append. The daemon reads it to escalate each gate and digest once, across
    * restarts, which the capped [escalations] tail cannot promise. Ticket-scoped:
    * [LeadKinds.TICKET_DONE] clears it. */
-  override val escalatedStalls: Map<String, Set<String>> = emptyMap(),
+  val escalatedStalls: Map<String, Set<String>> = emptyMap(),
   /** The pending effect intents adopt declined to re-fire and escalated, each as the SHA-256 of its
    * key's UTF-8 text: a key comes from the journal, of any length, so the record holds a digest of
    * fixed size. Read from the digest an [LeadKinds.ESCALATED] row names beside its reason. The
@@ -166,19 +166,20 @@ data class LeadState(
    * `effect-done` row of any origin already takes an intent out of adopt's view. Adopt never fires
    * such an intent. The lead's own commit intent is still fired by the commit arm, which records its
    * ticket done only once the effect receiver has seen its key. */
-  override val declinedEffects: Set<String> = emptySet(),
+  val declinedEffects: Set<String> = emptySet(),
   /** (seq, reason) for turns whose output was unusable — the degradation signal, kept apart
    * from [escalations] so a degrading model is countable rather than merely noisy. */
   val malformedCognition: List<Pair<Long, String>> = emptyList(),
   val doneTickets: List<String> = emptyList(),
   /** Journal-derived total model spend: the sum of costUsd across journaled cognition
-   * decisions. The budget guard reads THIS, not an in-memory counter — restarts keep it. */
-  override val cognitionSpendUsd: Double = 0.0,
-) : HostView {
+   * decisions, copied from the host's records. The budget guard does not read this copy: it reads
+   * the host's own ([AgentWakeContext.host]). */
+  val cognitionSpendUsd: Double = 0.0,
+) {
   val pendingGates: List<OpenGate>
     get() = openGates.values.filter { it.gateId !in releasedGates }.sortedBy { it.openedSeq }
 
-  override val activePods: List<PodRecord>
+  val activePods: List<PodRecord>
     get() = activePods(pods)
 
   fun gate(gateKind: String): OpenGate? = openGates.values.firstOrNull { it.gateKind == gateKind }
@@ -196,7 +197,7 @@ data class LeadState(
    * releasedDigests[gateId]`. Fail-closed: a gate not open is not approved. [pendingGates]
    * deliberately keeps the epoch-blind [releasedGates] read; "do not re-surface a gate released
    * at all this ticket" is a different question. */
-  override fun approvedOnCurrentDigest(gateId: String): Boolean =
+  fun approvedOnCurrentDigest(gateId: String): Boolean =
     approvedOnCurrentDigest(openGates, releasedDigests, gateId)
 
   /** The digest recorded as the evidence a gate of [gateKind] binds to, in whatever form the
@@ -260,7 +261,7 @@ data class LeadState(
    * fold stale, and handing it to a notifier would be a silent liveness failure). Latest
    * by issue order if several are open (the release names its nonce explicitly, so
    * "latest" is a convenience for issuers, not an ambiguity at verification). */
-  override fun openNonceFor(gate: OpenGate): IssuedNonce? = openNonceFor(issuedNonces, consumedNonces, gate)
+  fun openNonceFor(gate: OpenGate): IssuedNonce? = openNonceFor(issuedNonces, consumedNonces, gate)
 
   /** Preimage-derived principals whose VERIFIED approval binds the gate AS IT STANDS — same
    * digest the gate is open on, same [nonce] — the set a quorum predicate is evaluated over.

@@ -122,7 +122,7 @@ internal val HOST_KINDS: Set<String> =
  * runs the loop ([foldLeadJournal]) and folds its own records under its own auth; the workflow
  * reads them only through what each host step did ([HostOutcome]).
  */
-internal interface WorkflowFold<out S : HostView, W> {
+internal interface WorkflowFold<out S, W> {
   /** The substrate-only kinds the workflow writes and folds. The host's provenance gate polices
    * them alongside its own. */
   val substrateKinds: Set<String>
@@ -157,7 +157,7 @@ internal interface WorkflowFold<out S : HostView, W> {
  * copies, and checks those copies against its own kinds ([requireKindPartition]) before it folds
  * with them, so the sets it checks are the sets it folds with.
  */
-internal fun <S : HostView, W> foldLeadJournal(
+internal fun <S, W> foldLeadJournal(
   entries: List<JournalEntry>,
   auth: LeadAuth,
   fold: WorkflowFold<S, W>,
@@ -165,7 +165,7 @@ internal fun <S : HostView, W> foldLeadJournal(
 
 /** [foldLeadJournal], returning the host's own records beside the lead's state the workflow
  * assembles from them. The host decides from the first. */
-internal fun <S : HostView, W> foldHostAndLead(
+internal fun <S, W> foldHostAndLead(
   entries: List<JournalEntry>,
   auth: LeadAuth,
   fold: WorkflowFold<S, W>,
