@@ -234,7 +234,13 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
    * is appended once per taskRef. Loop-thread only. */
   private val redundantSpawnEscalated = mutableSetOf<String>()
 
-  override fun admitPodSpawn(taskRef: String, lead: LeadState, turn: ProposalTurn, host: HostServices): Boolean {
+  override fun admitPodSpawn(
+    taskRef: String,
+    lead: LeadState,
+    records: HostView,
+    turn: ProposalTurn,
+    host: HostServices,
+  ): Boolean {
     val ticket = lead.currentTicket ?: return false
     // Bind the spawn to the CURRENT ticket and a known kind:
     // cognition decides WHEN to run a pod, never an arbitrary task namespace. The only
@@ -263,12 +269,12 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
     // names the gate: the plan may already have been approved on its recorded digest before
     // the gate was re-opened, so asking for its approval would point the operator at the wrong
     // fault. That refusal is escalated once per gate and digest, under the record the
-    // mechanical pass keeps ([LeadState.escalatedStalls]), so a strategy that proposes the
+    // mechanical pass keeps ([HostView.escalatedStalls]), so a strategy that proposes the
     // executor on every wake does not escalate on every wake. The mechanical pass has already
     // escalated such a gate once it is released on that digest. Until a plan is recorded, the
     // gate's digest may yet be the plan's, and the refusal asks for the plan's approval.
-    if (taskRef == "execute:$ticket" && !lead.approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)) {
-      val planGate = lead.openGates[gateIdFor(GateKinds.PLAN_APPROVAL, ticket)]
+    if (taskRef == "execute:$ticket" && !lead.approvedOnEvidence(records, GateKinds.PLAN_APPROVAL, ticket)) {
+      val planGate = records.openGates[gateIdFor(GateKinds.PLAN_APPROVAL, ticket)]
       val planRecorded = lead.recordedEvidence(GateKinds.PLAN_APPROVAL) != null
       val offEvidence =
         if (planGate == null || !planRecorded) null
@@ -280,7 +286,7 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
             "execution runs"
         )
       } else if (
-        planGate.payloadDigest !in lead.escalatedStalls[planGate.gateId].orEmpty() &&
+        planGate.payloadDigest !in records.escalatedStalls[planGate.gateId].orEmpty() &&
           turn.escalatedOffEvidence.add(planGate.gateId)
       ) {
         host.escalateGate(
@@ -292,7 +298,7 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
       }
       return false
     }
-    if (lead.activePods.any { it.taskRef == taskRef }) return false
+    if (records.activePods.any { it.taskRef == taskRef }) return false
     if (!turn.seenTaskRefs.add(taskRef)) return false
     // Success-side twin of the host's failure cap: a task whose EVIDENCE is already
     // recorded gets no fresh pod. Successful completions never count toward that cap
@@ -344,9 +350,9 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
 
   /** The current ticket's commit effect, once both its gates are approved on their evidence
    * ([LeadState.approvedToCommit]): the one intent the lead journals, and only then. */
-  override fun redriveMessage(key: String, lead: LeadState): String? {
+  override fun redriveMessage(key: String, lead: LeadState, records: HostView): String? {
     val ticket = lead.currentTicket ?: return null
-    return if (key == commitEffectKey(ticket) && lead.approvedToCommit(ticket)) commitEffectMessage(ticket, lead)
+    return if (key == commitEffectKey(ticket) && lead.approvedToCommit(records, ticket)) commitEffectMessage(ticket, lead)
     else null
   }
 
@@ -367,7 +373,7 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
   private fun commitEffectMessage(ticket: String, lead: LeadState) =
     "apply-commit ticket=$ticket manifest=${lead.commitManifestDigest}"
 
-  override fun mechanicalStep(lead: LeadState, shared: JournalState, host: HostServices): Boolean {
+  override fun mechanicalStep(lead: LeadState, records: HostView, shared: JournalState, host: HostServices): Boolean {
     // Claim an offered ticket when idle. The done-filter repeats here even though the
     // source receives the same set: the source is a seam an adopter implements, and a
     // completed ticket must stay completed regardless of what any implementation re-offers.
@@ -410,7 +416,7 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
     // A missing or integrity-failed bound copy abandons the pod, and the evidence-based
     // playbook re-proposes the work.
     if (lead.planArtifactSha == null) {
-      val planner = lead.podFor("plan:$ticket")
+      val planner = podFor(records.pods, "plan:$ticket")
       if (planner?.resultDigest != null) {
         val verified = host.verifiedBoundArtifact(planner) ?: return true // pod abandoned
         host.append(
@@ -426,9 +432,9 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
     }
 
     // Propose the commit from a finished execute pod's manifest — same bound-copy rule.
-    val planApproved = lead.approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)
+    val planApproved = lead.approvedOnEvidence(records, GateKinds.PLAN_APPROVAL, ticket)
     if (planApproved && lead.commitManifestDigest == null) {
-      val executor = lead.podFor("execute:$ticket")
+      val executor = podFor(records.pods, "execute:$ticket")
       if (executor?.resultDigest != null) {
         val verified = host.verifiedBoundArtifact(executor) ?: return true // pod abandoned
         host.append(
@@ -449,7 +455,7 @@ internal class TicketWorkflow(private val ticketSource: TicketSource) : Workflow
     // manifest ([LeadState.approvedToCommit]) — so a release for a gate that opened out of
     // order, or on a digest the substrate never recorded, can never fire an effect on
     // evidence nobody approved.
-    if (lead.approvedToCommit(ticket)) {
+    if (lead.approvedToCommit(records, ticket)) {
       val effectKey = commitEffectKey(ticket)
       val message = commitEffectMessage(ticket, lead)
       if (effectKey !in shared.intents) {
@@ -519,7 +525,7 @@ class ScriptedCognition : AgentCognition<LeadState> {
 
     val planGate = host.openGates[gateIdFor(GateKinds.PLAN_APPROVAL, ticket)]
     val commitGate = host.openGates[gateIdFor(GateKinds.COMMIT_APPROVAL, ticket)]
-    val planApproved = lead.approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)
+    val planApproved = lead.approvedOnEvidence(host, GateKinds.PLAN_APPROVAL, ticket)
     fun activePodFor(taskRef: String) = host.activePods.any { it.taskRef == taskRef }
 
     return when {

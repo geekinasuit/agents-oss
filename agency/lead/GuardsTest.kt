@@ -433,7 +433,17 @@ class GuardsTest {
   private fun executeProposed(lead: LeadState, ticket: String): Boolean =
     ScriptedCognition()
       .decide(
-        AgentWakeContext(WakeReason.Adopted, lead, HostState(openGates = lead.openGates), JournalState(), emptyList())
+        AgentWakeContext(
+          WakeReason.Adopted,
+          lead,
+          HostState(
+            openGates = lead.openGates,
+            releasedGates = lead.releasedGates,
+            releasedDigests = lead.releasedDigests,
+          ),
+          JournalState(),
+          emptyList(),
+        )
       )
       .proposals
       .any { it is Proposal.ProposePodSpawn && it.taskRef == "execute:$ticket" }
@@ -1465,6 +1475,52 @@ class GuardsTest {
       EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
     )
     assertEquals("nothing is escalated", emptyList<String>(), f.lead.escalations)
+    store.close()
+  }
+
+  // Bounded: a workflow that finds the executor pod in its state's copies records no manifest, and
+  // the drive then never goes quiet.
+  @Test(timeout = 20_000)
+  fun theTicketWorkflowDecidesOnTheHostsRecordsNotItsStatesCopiesOfThem() {
+    val dir = tmp.newFolder()
+    // The walk above, under a workflow whose state carries none of the host's records: every copy
+    // is empty. The executor's admission, the manifest's recording and the commit effect each need
+    // the plan or commit gate approved on its evidence, and read from the copies none of them is.
+    // The workflow reads the host's own records, so the ticket still reaches done.
+    val blind =
+      object : WorkflowFold<LeadState, TicketWorkflowState> by TicketWorkflowFold {
+        override fun assemble(host: HostState, w: TicketWorkflowState): LeadState =
+          TicketWorkflowFold.assemble(HostState(), w)
+      }
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    File(dir, "ticket.txt").writeText("t1\n")
+    val ticketWorkflow = TicketWorkflow(FileTicketSource(File(dir, "ticket.txt")))
+    val d =
+      AgentHost(
+        store = store,
+        cognition = ScriptedCognition(),
+        podRunner = FakePodRunner(),
+        podSpec = PodSpec.fixture(),
+        workflow = object : Workflow<LeadState> by ticketWorkflow { override val fold = blind },
+        workdir = dir,
+        effects = EffectReceiver(dir.absolutePath),
+        leadAuth = LeadAuth.DENY_ALL,
+        timers = TimerService { _, _ -> },
+      )
+    val f1 = d.driveUntilQuiescent()
+    assertTrue("the workflow's state carries no gate", f1.lead.openGates.isEmpty())
+    d.injectAuthRelease(gateIdFor(GateKinds.PLAN_APPROVAL, "t1"), f1.lead.planArtifactSha!!)
+    val f2 = d.driveUntilQuiescent()
+    assertTrue("the executor ran: a manifest is recorded", f2.lead.commitManifestDigest != null)
+    d.injectAuthRelease(gateIdFor(GateKinds.COMMIT_APPROVAL, "t1"), f2.lead.commitManifestDigest!!)
+    val f = d.driveUntilQuiescent()
+    assertEquals("t1 is done", listOf("t1"), f.lead.doneTickets)
+    assertEquals(
+      "the commit effect fired once",
+      1,
+      EffectReceiver(dir.absolutePath).lineCountFor("apply-commit:t1"),
+    )
+    assertEquals("nothing is escalated", emptyList<String>(), f.host.escalations)
     store.close()
   }
 

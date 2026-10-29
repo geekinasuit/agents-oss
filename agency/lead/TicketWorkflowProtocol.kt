@@ -40,12 +40,14 @@ internal object TicketWorkflowProtocol : WorkflowProtocol<LeadState> {
   /**
    * A gate reads approved when it is one a stage of the current ticket waits on, and it is
    * released on the digest it is open on, which is the substrate's evidence for its kind
-   * ([LeadState.approvedOnEvidence]). The daemon asks the same of each gate before it acts; the
-   * commit effect also asks it of the plan gate.
+   * ([LeadState.approvedOnEvidence], over [records]). The daemon asks the same of each gate before
+   * it acts; the commit effect also asks it of the plan gate.
    */
-  override fun gateReadsApproved(lead: LeadState, gate: OpenGate): Boolean {
+  override fun gateReadsApproved(lead: LeadState, records: HostView, gate: OpenGate): Boolean {
     val ticket = lead.currentTicket ?: return false
-    return GateKinds.ALL.any { kind -> gateIdFor(kind, ticket) == gate.gateId && lead.approvedOnEvidence(kind, ticket) }
+    return GateKinds.ALL.any { kind ->
+      gateIdFor(kind, ticket) == gate.gateId && lead.approvedOnEvidence(records, kind, ticket)
+    }
   }
 
   override fun parseProposal(type: String, p: JSONObject): ProposalParse =

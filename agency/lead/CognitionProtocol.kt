@@ -84,8 +84,8 @@ interface WorkflowProtocol<S> {
   /** This workflow's lines of the rendered state, shown after the wake reason. */
   fun renderLines(lead: S): List<String>
 
-  /** Whether [gate] reads approved in the rendered state. */
-  fun gateReadsApproved(lead: S, gate: OpenGate): Boolean
+  /** Whether [gate] reads approved in the rendered state, by [records], the host's own. */
+  fun gateReadsApproved(lead: S, records: HostView, gate: OpenGate): Boolean
 
   /**
    * Parses [p], a proposal of [type], one of [proposalTypes]. A near-miss is returned as
@@ -163,7 +163,7 @@ class ComposedCognitionProtocol<S>(private val workflow: WorkflowProtocol<S>) {
       "openGates: " +
         host.openGates.values
           .joinToString(", ") {
-            "${it.gateId}(digest=${it.payloadDigest}, approved=${workflow.gateReadsApproved(lead, it)})"
+            "${it.gateId}(digest=${it.payloadDigest}, approved=${workflow.gateReadsApproved(lead, host, it)})"
           }
           .ifEmpty { "none" }
     )

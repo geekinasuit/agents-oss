@@ -55,7 +55,7 @@ class WorkflowProtocolTest {
 
         override fun renderLines(lead: LeadState) = listOf("stub: ${lead.currentTicket}")
 
-        override fun gateReadsApproved(lead: LeadState, gate: OpenGate) = true
+        override fun gateReadsApproved(lead: LeadState, records: HostView, gate: OpenGate) = true
 
         override fun parseProposal(type: String, p: JSONObject): ProposalParse =
           ProposalParse.Ok(Proposal.ProposeStatus("from the stub"))
@@ -98,7 +98,7 @@ class WorkflowProtocolTest {
 
       override fun renderLines(lead: LeadState) = emptyList<String>()
 
-      override fun gateReadsApproved(lead: LeadState, gate: OpenGate) = false
+      override fun gateReadsApproved(lead: LeadState, records: HostView, gate: OpenGate) = false
 
       override fun parseProposal(type: String, p: JSONObject): ProposalParse = ProposalParse.Malformed("unused")
     }

@@ -524,7 +524,7 @@ class AgentHost<S> internal constructor(
    */
   private fun redrivePendingEffects(shared: JournalState, lead: S, host: HostState) {
     for (key in shared.pendingEffectKeys) {
-      val message = workflow.redriveMessage(key, lead)
+      val message = workflow.redriveMessage(key, lead, host)
       if (message != null) {
         fireEffect(key, message, attempt = 2)
         continue
@@ -987,7 +987,7 @@ class AgentHost<S> internal constructor(
       return true
     }
 
-    return workflow.mechanicalStep(lead, shared, hostServices)
+    return workflow.mechanicalStep(lead, host, shared, hostServices)
   }
 
   /** Fire the effect keyed [key] with [message], and journal its done entry. With [dedupEffects]
@@ -1651,7 +1651,7 @@ class AgentHost<S> internal constructor(
           }
         }
         is Proposal.ProposePodSpawn -> {
-          if (!workflow.admitPodSpawn(p.taskRef, leadAtDecision, turn, hostServices)) continue
+          if (!workflow.admitPodSpawn(p.taskRef, leadAtDecision, hostAtDecision, turn, hostServices)) continue
           spawnPod(p.taskRef, podSpec)
         }
         is Proposal.ProposeStatus ->
