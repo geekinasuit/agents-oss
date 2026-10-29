@@ -91,7 +91,7 @@ private const val MAX_TICKET_REF_LEN = 128
 /** Whether the claim accepts [ref]: in [TICKET_REF_RE]'s charset and at most [MAX_TICKET_REF_LEN]
  * chars. The claim journals only a ref that passes, as a JSON string. The fold refuses a
  * substrate-origin claim of any other ref, and records a claim of any other origin in
- * [LeadState.misOriginedEntries] before it reads the ref. The claim and the fold check this one
+ * [HostState.misOriginedEntries] before it reads the ref. The claim and the fold check this one
  * predicate, since a fold stricter than the claim would refuse a journal the lead wrote itself.
  * Widening the predicate keeps every journal already written foldable. Tightening it makes the
  * fold refuse claims already journaled, so it needs a migration of those journals. */

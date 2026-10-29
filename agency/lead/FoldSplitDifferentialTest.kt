@@ -29,9 +29,9 @@ import org.junit.Test
 /**
  * The host/workflow split of the lead fold must not change what any journal folds to. This folds a
  * generated corpus with [legacyLeadFold] (the fold as it stood before the split, frozen in
- * LegacyLeadFold.kt) and with [leadFold], under both [LeadAuth.DENY_ALL] and [ceremonyAuth], and
- * asserts that each journal folds to the same [LeadState] under both, or fails under both with the
- * same exception type and message.
+ * LegacyLeadFold.kt) and with the split fold ([splitFold]), under both [LeadAuth.DENY_ALL] and
+ * [ceremonyAuth], and asserts that each journal folds to the same [LegacyLeadState] under both, or
+ * fails under both with the same exception type and message.
  *
  * The corpus is seeded, so a failure reproduces. Half the journals start from a legal ticket walk
  * (claim to done, both gates released under the ceremony) and splice random entries into it; the
@@ -62,7 +62,7 @@ class FoldSplitDifferentialTest {
     val claim = entry(121, LeadKinds.TICKET_CLAIMED, ORIGIN_COGNITION, obj("ticketRef" to "T1"))
     for ((authName, auth) in AUTHS) {
       assertSameFold("forged claim under $authName", forged + claim, auth)
-      val s = leadFold(forged + claim, auth)
+      val s = splitFold(forged + claim, auth)
       assertEquals(null, s.currentTicket)
       assertEquals(TicketPhase.IDLE, s.phase)
     }
@@ -118,7 +118,7 @@ class FoldSplitDifferentialTest {
         entry(i + 1L, k, o, p)
       }
     for ((authName, auth) in AUTHS) assertSameFold("approval on another digest under $authName", journal, auth)
-    val s = leadFold(journal, ceremonyAuth())
+    val s = splitFold(journal, ceremonyAuth())
     assertTrue("the plan gate is not released", plan !in s.releasedGates)
     assertEquals(TicketPhase.PLAN_GATED, s.phase)
   }
@@ -127,9 +127,9 @@ class FoldSplitDifferentialTest {
   fun theLegalWalkReachesDoneUnderTheCeremony() {
     val walk = legalWalk("T1").mapIndexed { i, (k, o, p) -> entry(i + 1L, k, o, p) }
     assertSameFold("legal walk", walk, ceremonyAuth())
-    val beforeDone = leadFold(walk.dropLast(1), ceremonyAuth())
+    val beforeDone = splitFold(walk.dropLast(1), ceremonyAuth())
     assertEquals(TicketPhase.COMMIT_APPROVED, beforeDone.phase)
-    assertEquals(listOf("T1"), leadFold(walk, ceremonyAuth()).doneTickets)
+    assertEquals(listOf("T1"), splitFold(walk, ceremonyAuth()).doneTickets)
   }
 
   @Test
@@ -145,7 +145,7 @@ class FoldSplitDifferentialTest {
       for ((authName, auth) in AUTHS) {
         val s =
           try {
-            leadFold(journal, auth)
+            splitFold(journal, auth)
           } catch (_: LeadFoldException) {
             failures++
             continue
@@ -172,7 +172,7 @@ class FoldSplitDifferentialTest {
 
   private fun assertSameFold(label: String, journal: List<JournalEntry>, auth: LeadAuth) {
     val legacy = runCatching { legacyLeadFold(journal, auth) }
-    val split = runCatching { leadFold(journal, auth) }
+    val split = runCatching { splitFold(journal, auth) }
     when {
       legacy.isSuccess && split.isSuccess -> assertEquals(label, legacy.getOrThrow(), split.getOrThrow())
       legacy.isFailure && split.isFailure -> {
@@ -187,6 +187,43 @@ class FoldSplitDifferentialTest {
             "split ${if (split.isSuccess) "folded" else "failed (${split.exceptionOrNull()})"}"
         )
     }
+  }
+
+  /** The split fold's two halves, the host's records and the ticket lead's state, in the pre-split
+   * shape the oracle folds to. */
+  private fun splitFold(journal: List<JournalEntry>, auth: LeadAuth): LegacyLeadState {
+    val (h, w) = foldHostAndLead(journal, auth, TicketWorkflowFold)
+    return LegacyLeadState(
+      runsStarted = h.runsStarted,
+      currentTicket = w.currentTicket,
+      phase = w.phase,
+      planArtifactPath = w.planArtifactPath,
+      planArtifactSha = w.planArtifactSha,
+      commitManifestPath = w.commitManifestPath,
+      commitManifestDigest = w.commitManifestDigest,
+      openGates = h.openGates,
+      releasedGates = h.releasedGates,
+      releasedDigests = h.releasedDigests,
+      nonceLessReleases = h.nonceLessReleases,
+      staleReleases = h.staleReleases,
+      issuedNonces = h.issuedNonces,
+      consumedNonces = h.consumedNonces,
+      notifiedNonces = h.notifiedNonces,
+      failedAnnounces = h.failedAnnounces,
+      notReadAnnounces = h.notReadAnnounces,
+      verifiedApprovals = h.verifiedApprovals,
+      unverifiedApprovals = h.unverifiedApprovals,
+      pods = h.pods,
+      pendingSpawnIntents = h.pendingSpawnIntents,
+      misOriginedEntries = h.misOriginedEntries,
+      statusTail = h.statusTail,
+      escalations = h.escalations,
+      escalatedStalls = h.escalatedStalls,
+      declinedEffects = h.declinedEffects,
+      malformedCognition = h.malformedCognition,
+      doneTickets = w.doneTickets,
+      cognitionSpendUsd = h.cognitionSpendUsd,
+    )
   }
 
   private companion object {
