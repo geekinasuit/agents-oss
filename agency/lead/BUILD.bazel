@@ -349,6 +349,7 @@ java_test(
 
 # Folds a seeded corpus of journals with the pre-split fold (LegacyLeadFold.kt, frozen verbatim)
 # and with the host/workflow split fold, and asserts they agree on every one, failures included.
+# associates (not deps) on :lead, since it reads the host's records, which are internal to it.
 kt_jvm_test(
     name = "fold_split_differential_test",
     size = "small",
@@ -356,10 +357,10 @@ kt_jvm_test(
         "FoldSplitDifferentialTest.kt",
         "LegacyLeadFold.kt",
     ],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.FoldSplitDifferentialTest",
     deps = [
         ":ceremony_test_support",
-        ":lead",
         "//agency/shared/auth",
         "//agency/shared/journal",
         "@maven//:junit_junit",

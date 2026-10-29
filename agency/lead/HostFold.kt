@@ -27,42 +27,156 @@ internal data class HostState(
   val runsStarted: Int = 0,
   override val openGates: Map<String, OpenGate> = emptyMap(),
   val releasedGates: Set<String> = emptySet(),
+  /** For each gate, the payload digests it has ALREADY been released on — the epoch-precise
+   * single-release guard. [releasedGates] answers "released at all this scope?" (gate-keyed,
+   * epoch-blind); this answers "released on THIS digest?", the question that stops a decided
+   * gate being cleared a second time by a fresh, valid, never-consumed nonce minted for the
+   * same digest, while still admitting the legitimate re-release of a gate re-opened on a NEW
+   * digest (a distinct authorization surface). A Set per gate, not one digest, so a digest
+   * revisited across re-opens is still caught. Correctness-bearing (evicting an entry
+   * re-enables a re-release), so it sits outside [ANOMALY_TAIL] and is bounded by the scope: the
+   * workflow's scope end clears it, as it does [nonceLessReleases]. */
   val releasedDigests: Map<String, Set<String>> = emptyMap(),
+  /** Gates released by the nonce-less pre-ceremony path, keyed to the seq of the RELEASE
+   * the mark describes — the disposition marker that keeps "was this release under the
+   * ceremony?" answerable from derived state, matching how every other classification
+   * this fold makes stays legible after the fact. Keyed by seq so the journal-level
+   * re-open shape stays unambiguous: a re-opened gate later released under the ceremony
+   * keeps its old mark, and the mark's seq says which release it describes (never the
+   * current one). */
   val nonceLessReleases: Map<String, Long> = emptyMap(),
+  // (seq, open gate's id, or "an unknown gate id of N chars") — auth origin, but digest mismatch,
+  // unknown gate, or nonce indiscipline (consumed/unknown/misbound/absent-where-required)
   override val staleReleases: List<Pair<Long, String>> = emptyList(),
+  /** Every nonce issued this scope, by value — consumed ones stay listed ([consumedNonces]
+   * marks them) so a re-issue of a spent value is detectable as the anomaly it is. */
   override val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
   val consumedNonces: Set<String> = emptySet(),
+  /** Nonces whose gate-open announce is final ([HostKinds.GATE_OPEN_NOTIFIED] without `retry`):
+   * announced, not announced because no sink is wired or the artifact could not be inlined, or
+   * failed on its last attempt. Keyed by the NONCE, not the gate: a nonce is single-use and bound
+   * to one (gate, digest), so a gate re-opened on a new digest mints a NEW nonce and is announced
+   * afresh, while a final one is never announced again. The notify arm reads this to stop; a
+   * marker that says the announce will be sent again counts in [failedAnnounces] instead.
+   * Scoped: the workflow's scope end clears it, as it does [issuedNonces]. */
   override val notifiedNonces: Set<String> = emptySet(),
+  /** Nonce → how many of its announces failed with a failure the sink reported, each marked to be
+   * sent again ([HostKinds.GATE_OPEN_NOTIFIED] with `retry`). The notify arm reads it to find the
+   * timer the next attempt waits on, and the daemon to number that attempt, so a failing sink is
+   * called once per attempt, never once per pass. [notifiedNonces] takes precedence: a nonce in it
+   * is not sent again whatever this holds. Scoped: the workflow's scope end clears it. */
   override val failedAnnounces: Map<String, Int> = emptyMap(),
+  /** Nonce → how many of the attempts in [failedAnnounces] were not attempts at all: the bound copy
+   * was not read, for a cause outside it (a marker with `notRead`). The daemon counts only the
+   * rest toward the bound on a failing sink's attempts. Scoped: the workflow's scope end clears
+   * it. */
   override val notReadAnnounces: Map<String, Int> = emptyMap(),
+  /** gateId → approvals that RE-VERIFIED at fold time (signature over preimage, key in the
+   * allow-list, committed binding agreeing with the flat copies). The set a release's quorum
+   * is evaluated over — an approval that did not verify never lands here, so the flat
+   * `principalId` a record claimed can no longer stuff a quorum. Auth-layer-authored entries
+   * only; dedup is by the PREIMAGE-DERIVED (principal, nonce, digest), so re-delivery of the
+   * same approval is idempotent while a re-approval under a fresh nonce accumulates. */
   val verifiedApprovals: Map<String, List<VerifiedApproval>> = emptyMap(),
+  /** (seq, reason) for approval entries that did NOT verify — no evidence, no signed
+   * preimage, a preimage that did not parse, a signature that did not check out, a signer not
+   * in the allow-list, or a committed field disagreeing with a flat copy. Kept VISIBLE
+   * (never silently dropped), capped like the other anomaly tails, and cleared at the workflow's
+   * scope end — the one approval-derived view bounded by a tail rather than correctness, because
+   * an unverified approval contributes nothing a release depends on. */
   val unverifiedApprovals: List<Pair<Long, String>> = emptyList(),
   override val pods: Map<String, PodRecord> = emptyMap(),
-  override val pendingSpawnIntents: Map<String, Long> = emptyMap(),
-  val misOriginedEntries: List<Pair<Long, String>> = emptyList(),
+  override val pendingSpawnIntents: Map<String, Long> = emptyMap(), // taskRef → intent seq: spawn journaled, POD_SPAWNED not yet
+  val misOriginedEntries: List<Pair<Long, String>> = emptyList(), // (seq, kind): substrate-authored kind with a non-substrate origin — never honored
   val statusTail: List<String> = emptyList(),
   override val escalations: List<String> = emptyList(),
+  /** Gate id → the digests the gate was escalated on this scope as holding up the stage it guards.
+   * A gate is escalated on a digest in four cases: it is open on the digest under a ceremony auth
+   * with no usable nonce, one the mint issues none for, and not released on it; it is open on the
+   * digest under an auth with no approvers, holds an issued nonce, and is not released on it, so no
+   * release can clear it; it is released on the digest, and the digest is not the substrate's
+   * evidence for its kind; or it is the plan gate, open on a digest that is not the recorded plan,
+   * when an execute pod is proposed. The record keeps the gate and digest, not the case, so a gate
+   * escalated on a digest for one case is not escalated on it again for another. Read from the
+   * gate and digest an [HostKinds.ESCALATED] row names beside its reason, so the escalation and its
+   * record are one append. The daemon reads it to escalate each gate and digest once, across
+   * restarts, which the capped [escalations] tail cannot promise. Scoped: the workflow's scope end
+   * clears it. */
   override val escalatedStalls: Map<String, Set<String>> = emptyMap(),
+  /** The pending effect intents adopt declined to re-fire and escalated, each as the SHA-256 of its
+   * key's UTF-8 text: a key comes from the journal, of any length, so the record holds a digest of
+   * fixed size. Read from the digest an [HostKinds.ESCALATED] row names beside its reason. The
+   * daemon reads it to escalate each declined intent once, across restarts. Not scoped: a declined
+   * intent stays pending, and every adopt meets it again, whichever scope is current.
+   *
+   * No field of a row is evidence the lead wrote it. An escalation row with the substrate's origin
+   * that the lead did not write can name an intent's digest before adopt declines the intent, and
+   * adopt then does not escalate it: the intent stays pending, unfired and unnamed.
+   * [escalatedStalls] is silenced the same way. An escalation row with any other origin is never
+   * honored. This record does not try to be stronger than the journal: a writer that can use the
+   * substrate's origin can already append any substrate row, a scope end among them, and the
+   * shared fold reads `effect-intent` and `effect-done` rows without their origin, so an
+   * `effect-done` row of any origin already takes an intent out of adopt's view. Adopt never fires
+   * such an intent. The lead's own commit intent is still fired by the commit arm, which records its
+   * ticket done only once the effect receiver has seen its key. */
   override val declinedEffects: Set<String> = emptySet(),
+  /** (seq, reason) for turns whose output was unusable — the degradation signal, kept apart
+   * from [escalations] so a degrading model is countable rather than merely noisy. */
   val malformedCognition: List<Pair<Long, String>> = emptyList(),
+  /** Journal-derived total model spend: the sum of costUsd across journaled cognition decisions.
+   * The budget guard reads it. */
   override val cognitionSpendUsd: Double = 0.0,
 ) : HostView {
   override val activePods: List<PodRecord>
     get() = activePods(pods)
 
+  /** Whether [gateId] is approved ON THE DIGEST IT IS CURRENTLY OPEN ON — the epoch-precise
+   * approval question every release CONSUMER must ask. [releasedGates] answers only "released
+   * at all this scope?" (gate-keyed, epoch-blind), which a gate re-opened on a NEW digest — a
+   * distinct authorization surface — answers stale-true; deciding whether to ACT on an approval
+   * (advance the pipeline, launch the executor, drive the commit effect) must instead confirm
+   * the digest the gate is open on NOW was the one released. Acting also needs that digest to
+   * be the evidence the substrate recorded for the gate's kind, which this does not check: a
+   * gate open and released on any other digest approves nothing the substrate recorded, so
+   * whatever decides on an approval asks the workflow's approved-on-evidence question
+   * ([LeadState.approvedOnEvidence] for the ticket workflow), which checks both. The read-side
+   * mirror of [foldRelease]'s single-release guard — both test `payloadDigest in
+   * releasedDigests[gateId]`. Fail-closed: a gate not open is not approved. [pendingGates]
+   * deliberately keeps the epoch-blind [releasedGates] read; "do not re-surface a gate released
+   * at all this scope" is a different question. */
   override fun approvedOnCurrentDigest(gateId: String): Boolean =
     approvedOnCurrentDigest(openGates, releasedDigests, gateId)
 
+  /** The gate's currently-usable nonce: issued for THIS gate, bound to the digest the
+   * gate is CURRENTLY open on, and not consumed — the same clauses [foldRelease] honors,
+   * so a nonce returned here is releasable as it stands (the digest filter matches
+   * [boundApprovers]', for the same reason: a nonce bound to a superseded digest can only
+   * fold stale, and handing it to a notifier would be a silent liveness failure). Latest
+   * by issue order if several are open (the release names its nonce explicitly, so
+   * "latest" is a convenience for issuers, not an ambiguity at verification). */
   override fun openNonceFor(gate: OpenGate): IssuedNonce? = openNonceFor(issuedNonces, consumedNonces, gate)
 
   /** The open gates not released at all this scope, by opening order. */
   val pendingGates: List<OpenGate>
     get() = openGates.values.filter { it.gateId !in releasedGates }.sortedBy { it.openedSeq }
 
-  /** The latest non-abandoned pod for [taskRef], or null. */
+  /**
+   * The latest NON-abandoned pod for a task ref, or null. Abandoned pods are excluded
+   * deliberately: an abandoned pod is no longer evidence — its
+   * artifact was missing, or it was dropped on restart. Including it caused a boot-loop
+   * when a result was recorded but the file was absent (verify → abandon → the mechanical
+   * pass re-selected the SAME record → re-verify → re-abandon, until the fixpoint guard
+   * threw and a fresh adopt re-folded into the same crash). Filtering here means an
+   * abandoned pod stops being selectable, the mechanical pass reaches its fixpoint, and the
+   * evidence-based playbook re-proposes a fresh pod. It also closes the late-completion path
+   * (a delayed result for an abandoned pod can no longer drive plan/commit recording).
+   */
   fun podFor(taskRef: String): PodRecord? = podFor(pods, taskRef)
 
-  /** The verified approvers bound to [gate] as it stands, under [nonce]. */
+  /** Preimage-derived principals whose VERIFIED approval binds the gate AS IT STANDS — same
+   * digest the gate is open on, same [nonce] — the set a quorum predicate is evaluated over.
+   * Verified approvals bound to a superseded digest or a different nonce are present in
+   * [verifiedApprovals] but excluded here; approvals that never verified are absent entirely. */
   fun boundApprovers(gate: OpenGate, nonce: String): Set<String> = boundApprovers(verifiedApprovals, gate, nonce)
 }
 
@@ -726,7 +840,7 @@ private fun foldApproval(s: HostState, e: JournalEntry, p: JsonObject, auth: Lea
 internal fun activePods(pods: Map<String, PodRecord>): List<PodRecord> =
   pods.values.filter { it.active }.sortedBy { it.spawnedSeq }
 
-/** The latest non-abandoned pod for [taskRef], or null. See [LeadState.podFor] for why abandoned
+/** The latest non-abandoned pod for [taskRef], or null. See [HostState.podFor] for why abandoned
  * pods are excluded. */
 internal fun podFor(pods: Map<String, PodRecord>, taskRef: String): PodRecord? =
   pods.values.filter { it.taskRef == taskRef && it.abandonedReason == null }.maxByOrNull { it.spawnedSeq }

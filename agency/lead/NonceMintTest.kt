@@ -22,7 +22,7 @@ import org.junit.rules.TemporaryFolder
  * The gate-open nonce mint (2a.4 step A): the substrate mints a single-use nonce the moment
  * it journals a gate-open, but ONLY under a ceremony auth. The predicate is
  * [LeadAuth.hasApprovers] — the same one the release fold reads to refuse a nonce-less
- * release ([LeadState.foldRelease]); one predicate, read at both the write and the fold. A
+ * release (foldRelease, HostFold.kt); one predicate, read at both the write and the fold. A
  * gate-open that a crash cut short before its mint is minted at the next wake, on the same
  * terms, and so is a gate a DENY_ALL daemon opened, once the daemon restarts under a ceremony
  * auth. The honest [ScriptedCognition] walk drives a real plan-gate-open, so these cells

@@ -16,33 +16,70 @@ import kotlinx.serialization.json.JsonPrimitive
 // TEST ORACLE: the lead fold as it stood before the host/workflow split, frozen verbatim from
 // LeadState.kt so FoldSplitDifferentialTest can check that the split fold reaches the same state,
 // or the same failure, on every journal. Only the entry point is renamed (leadFold →
-// legacyLeadFold). What the oracle still shares with production is code this PR does not change:
-// the state and record types (LeadState and its field types, LeadKinds, LeadAuth),
-// MalformedReasons, ORPHANED_SPAWN_REASON and LeadFoldException. Two pieces of logic are private
-// copies, not shared: the internal isClaimableTicketRef, invisible from this test target, kept
-// without its KDoc; and LeadState.boundApprovers, whose body moved into HostFold.kt, called as
-// legacyBoundApprovers. Everything else is byte-for-byte the pre-split text. Delete this file
-// once the split has shipped and the differential test has no further use.
+// legacyLeadFold). What the oracle still shares with production is code the split does not
+// change: the record types (LeadState's field types, LeadKinds, LeadAuth), MalformedReasons,
+// ORPHANED_SPAWN_REASON and LeadFoldException. Its state type is a frozen copy: LeadState no
+// longer carries the host's records (#290), so the pre-split shape lives on here as
+// LegacyLeadState, and the oracle's text names that type where it named LeadState. Two pieces of
+// logic are private copies, not shared: the internal isClaimableTicketRef, invisible from this
+// test target, kept without its KDoc; and the old LeadState.boundApprovers, whose body moved into
+// HostFold.kt, called as legacyBoundApprovers; two KDoc links to that member now name
+// legacyBoundApprovers or describe it in prose. Everything else is byte-for-byte the pre-split
+// text. Delete this file once the differential test has no further use.
+
+/** LeadState as it stood before the host's records left it (#290): the oracle's state type. Field
+ * for field the pre-split shape, without its KDoc; [HostState] documents the host's fields. */
+data class LegacyLeadState(
+  val runsStarted: Int = 0,
+  val currentTicket: String? = null,
+  val phase: TicketPhase = TicketPhase.IDLE,
+  val planArtifactPath: String? = null,
+  val planArtifactSha: String? = null,
+  val commitManifestPath: String? = null,
+  val commitManifestDigest: String? = null,
+  val openGates: Map<String, OpenGate> = emptyMap(),
+  val releasedGates: Set<String> = emptySet(),
+  val releasedDigests: Map<String, Set<String>> = emptyMap(),
+  val nonceLessReleases: Map<String, Long> = emptyMap(),
+  val staleReleases: List<Pair<Long, String>> = emptyList(),
+  val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
+  val consumedNonces: Set<String> = emptySet(),
+  val notifiedNonces: Set<String> = emptySet(),
+  val failedAnnounces: Map<String, Int> = emptyMap(),
+  val notReadAnnounces: Map<String, Int> = emptyMap(),
+  val verifiedApprovals: Map<String, List<VerifiedApproval>> = emptyMap(),
+  val unverifiedApprovals: List<Pair<Long, String>> = emptyList(),
+  val pods: Map<String, PodRecord> = emptyMap(),
+  val pendingSpawnIntents: Map<String, Long> = emptyMap(),
+  val misOriginedEntries: List<Pair<Long, String>> = emptyList(),
+  val statusTail: List<String> = emptyList(),
+  val escalations: List<String> = emptyList(),
+  val escalatedStalls: Map<String, Set<String>> = emptyMap(),
+  val declinedEffects: Set<String> = emptySet(),
+  val malformedCognition: List<Pair<Long, String>> = emptyList(),
+  val doneTickets: List<String> = emptyList(),
+  val cognitionSpendUsd: Double = 0.0,
+)
 
 /** Bounded-view cap for cognition-controllable / anomaly lists: the
  * journal remains the complete record; these FOLD VIEWS keep only a tail so a hostile or
  * buggy strategy cannot grow re-fold memory without bound. Higher than [statusTail]'s 20 —
  * these carry security-relevant tails (escalations, stale releases, mis-origined entries).
  *
- * The nonce/approval records ([LeadState.issuedNonces], [LeadState.consumedNonces],
- * [LeadState.verifiedApprovals], [LeadState.notifiedNonces], [LeadState.failedAnnounces]) sit
+ * The nonce/approval records ([LegacyLeadState.issuedNonces], [LegacyLeadState.consumedNonces],
+ * [LegacyLeadState.verifiedApprovals], [LegacyLeadState.notifiedNonces], [LegacyLeadState.failedAnnounces]) sit
  * DELIBERATELY outside this cap: they are correctness-bearing records, not views. Evicting a
  * consumed nonce re-enables the replay it exists to reject; evicting an issued nonce or a verified
  * approval silently voids a live authorization; evicting a notified nonce re-enables the duplicate
  * gate-open announce its marker exists to suppress; evicting a failed-announce count restarts that
- * nonce's attempts, undoing their bound. ([LeadState.unverifiedApprovals] IS capped by this
+ * nonce's attempts, undoing their bound. ([LegacyLeadState.unverifiedApprovals] IS capped by this
  * tail — an approval that did not verify contributes nothing a release depends on, so it is a
- * view, not a record.) [LeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
+ * view, not a record.) [LegacyLeadState.nonceLessReleases] is uncapped for a DIFFERENT reason — it is
  * an audit marker whose absence is itself a claim ("released under the ceremony"), so an
- * evicted entry would not lose the answer, it would invert it. [LeadState.escalatedStalls] is
+ * evicted entry would not lose the answer, it would invert it. [LegacyLeadState.escalatedStalls] is
  * uncapped too: evicting an entry escalates its gate again, the repeat it exists to suppress. Those
  * seven share the same bound: the ticket, not a tail — TICKET_DONE clears them.
- * [LeadState.declinedEffects] is uncapped for the same reason as the stall record, and is not
+ * [LegacyLeadState.declinedEffects] is uncapped for the same reason as the stall record, and is not
  * ticket-scoped: it holds one digest per distinct pending intent key adopt declined, since a
  * declined intent stays pending across tickets. Each entry costs its writer a journal row. All
  * their kinds are origin-gated, so only the substrate and the authorization layer can grow them: a
@@ -54,7 +91,7 @@ private const val ANOMALY_TAIL = 100
  * COGNITION_PROPOSED is excluded (legitimately cognition-origin); GATE_RELEASED is not a
  * lead kind — its auth-origin check lives in foldRelease. State-inert kinds
  * (POD_EVENT — no fold arm consumes them) are still listed: "never honored" is vacuous
- * for them, but a forged row must land in [LeadState.misOriginedEntries] rather than
+ * for them, but a forged row must land in [LegacyLeadState.misOriginedEntries] rather than
  * fold invisibly — the audit half of the origin gate applies to every substrate-only kind,
  * not just the state-carrying ones. */
 private val SUBSTRATE_AUTHORED_KINDS =
@@ -102,7 +139,7 @@ private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
  * VERIFIED approvers ([foldRelease]), so the same journal can fold to a DIFFERENT verdict
  * under a different [LeadAuth]: revoke a principal from the allow-list (or install a
  * stricter quorum) and re-fold, and a gate that reached quorum before may no longer — its
- * release folds stale, the gate drops out of [LeadState.releasedGates], and the phase never
+ * release folds stale, the gate drops out of [LegacyLeadState.releasedGates], and the phase never
  * reaches the approved state it did under the old auth. That is deliberate — authorization
  * is not frozen into the journal at write time; it is re-decided on the allow-list and
  * quorum in force at recovery. [auth] is required, with no default: which principals and
@@ -110,8 +147,8 @@ private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
  * would be the footgun this parameter exists to refuse. A substrate not yet wired for the
  * ceremony passes [LeadAuth.DENY_ALL] explicitly.
  */
-fun legacyLeadFold(entries: List<JournalEntry>, auth: LeadAuth): LeadState {
-  var s = LeadState()
+fun legacyLeadFold(entries: List<JournalEntry>, auth: LeadAuth): LegacyLeadState {
+  var s = LegacyLeadState()
   for (e in entries) {
     s =
       try {
@@ -125,7 +162,7 @@ fun legacyLeadFold(entries: List<JournalEntry>, auth: LeadAuth): LeadState {
   return s
 }
 
-private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
+private fun foldOne(s0: LegacyLeadState, e: JournalEntry, auth: LeadAuth): LegacyLeadState {
   val s = s0
   // Provenance teeth, symmetric with the release check: the substrate
   // is the sole author of these state-carrying kinds. An entry of such a kind bearing any
@@ -211,7 +248,7 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
       LeadKinds.ESCALATED -> {
         val escalated = s.copy(escalations = (s.escalations + p.str("reason")).takeLast(ANOMALY_TAIL))
         // An escalation of a gate that holds up its stage names the gate and its digest beside the
-        // reason ([LeadState.escalatedStalls]). Only two JSON strings are recorded: a row with any
+        // reason ([LegacyLeadState.escalatedStalls]). Only two JSON strings are recorded: a row with any
         // other value there is still an escalation, and at worst its gate is escalated again, never
         // silenced. Any digest counts, blank or not, since it is the one the gate is open on.
         val gateId = p.jsonStringOrNull("stalledGateId")
@@ -440,7 +477,7 @@ private fun foldOne(s0: LeadState, e: JournalEntry, auth: LeadAuth): LeadState {
  * value must never enter the total the budget cap reads — NaN makes every `spend >= cap`
  * comparison false, so the cap would never trip and wake-driven spend would be unbounded,
  * and a negative value would understate spend. Only a finite, non-negative cost accrues, so
- * [LeadState.cognitionSpendUsd] stays finite and monotonic non-decreasing.
+ * [LegacyLeadState.cognitionSpendUsd] stays finite and monotonic non-decreasing.
  */
 private fun accruedCost(p: kotlinx.serialization.json.JsonObject): Double =
   p.strOrNull("costUsd")?.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 } ?: 0.0
@@ -451,10 +488,10 @@ private fun accruedCost(p: kotlinx.serialization.json.JsonObject): Double =
  * nonce (ceremony) path — a quorum of VERIFIED approvers is satisfied. Wrong origin is the
  * shared fold's visible rejection (re-asserted here by simply not honoring); everything else
  * auth-origin-but-unfaithful (or quorum-unmet) is retained visibly as
- * [LeadState.staleReleases].
+ * [LegacyLeadState.staleReleases].
  *
  * QUORUM (2b): once a release names a faithful nonce, the gate clears only if
- * [quorumSatisfied] holds over [LeadState.boundApprovers] — the preimage-derived principals
+ * [quorumSatisfied] holds over [legacyBoundApprovers] — the preimage-derived principals
  * whose VERIFIED approval binds this gate at this nonce and digest — against [auth]'s quorum
  * tree. An unverified approval never enters that set (see [foldApproval]), so the flat
  * `principalId` a record claimed cannot fill a quorum. Quorum sits INSIDE the nonce branch,
@@ -490,14 +527,14 @@ private fun accruedCost(p: kotlinx.serialization.json.JsonObject): Double =
  * hold the ceremony-auth refusal; the per-gate clause's own stale-fold is exercised by
  * `nullNonceFieldOnAReleaseReadsAsAbsent` under DENY_ALL.
  *
- * Nonce-less honors (reachable on a DENY_ALL fold only) are marked in [LeadState.nonceLessReleases], keyed by gate to
+ * Nonce-less honors (reachable on a DENY_ALL fold only) are marked in [LegacyLeadState.nonceLessReleases], keyed by gate to
  * the FIRST honoring release's seq, so the disposition stays legible after the fact — the
  * honor is itself single-use per gate, mirroring the consumed-nonce rule: a second
  * nonce-less release of a marked gate folds stale rather than silently re-honoring and
  * retargeting the mark. That also means a re-opened gate cannot be honored nonce-less a
  * second time within a ticket (the guard reads the mark, which [LeadKinds.TICKET_DONE]
  * clears with the rest of the per-ticket state) — deliberate conservatism on a stub
- * path, and visible in [LeadState.staleReleases] rather than silent. A later ceremony
+ * path, and visible in [LegacyLeadState.staleReleases] rather than silent. A later ceremony
  * release of a re-opened gate stays distinguishable from the mark.
  *
  * On the re-open shapes several cells exercise: the daemon opens each gateId at most once
@@ -507,11 +544,11 @@ private fun accruedCost(p: kotlinx.serialization.json.JsonObject): Double =
  * [LeadKinds.NONCE_CONSUMED] — which the step-2 ceremony must remember to journal.
  */
 private fun foldRelease(
-  s: LeadState,
+  s: LegacyLeadState,
   e: JournalEntry,
   p: kotlinx.serialization.json.JsonObject,
   auth: LeadAuth,
-): LeadState {
+): LegacyLeadState {
   if (e.origin != ORIGIN_AUTH_LAYER) return s // forged provenance: never honored here; shared fold records the rejection
   val gateId = p.str("gateId")
   val digest = p.strOrNull("payloadDigest")
@@ -520,7 +557,7 @@ private fun foldRelease(
   // An open gate's id is one the lead opened; a release naming no open gate carries an id the
   // fold has checked nothing about, so it is recorded by its length.
   val recordedId = if (gate == null) "an unknown gate id of ${gateId.length} chars" else gateId
-  fun stale(): LeadState =
+  fun stale(): LegacyLeadState =
     s.copy(staleReleases = (s.staleReleases + (e.seq to recordedId)).takeLast(ANOMALY_TAIL))
   if (gate == null || digest != gate.payloadDigest) return stale()
   // Single-release per (gate, digest): a gate already released on THIS digest is decided, so
@@ -585,9 +622,9 @@ private fun foldRelease(
  * flat columns (top-level and evidence) are lookup indices held to agreement, never trusted —
  * so the flat `principalId` a record claims can never by itself put an approver in a quorum.
  *
- * A verified approval lands in [LeadState.verifiedApprovals] under its COMMITTED gate, keyed
+ * A verified approval lands in [LegacyLeadState.verifiedApprovals] under its COMMITTED gate, keyed
  * by the preimage-derived principal, deduped on (principal, nonce, digest). Anything that
- * fails a step lands in [LeadState.unverifiedApprovals] with a reason and contributes
+ * fails a step lands in [LegacyLeadState.unverifiedApprovals] with a reason and contributes
  * nothing — a null/absent preimage included (fail-closed: unverifiable, never a pass). The
  * refusal names WHICH layer disagreed, so a split-source attempt is legible after the fact.
  *
@@ -597,17 +634,17 @@ private fun foldRelease(
  * never a fold crash — an approval that cannot be verified must not be able to brick recovery.
  */
 private fun foldApproval(
-  s: LeadState,
+  s: LegacyLeadState,
   e: JournalEntry,
   p: kotlinx.serialization.json.JsonObject,
   auth: LeadAuth,
-): LeadState {
+): LegacyLeadState {
   val claimedGate = p.str("gateId")
   val claimedPrincipal = p.str("principalId")
   val claimedNonce = p.str("nonce")
   val claimedDigest = p.str("payloadDigest")
 
-  fun unverified(reason: String): LeadState =
+  fun unverified(reason: String): LegacyLeadState =
     s.copy(
       unverifiedApprovals =
         (s.unverifiedApprovals + (e.seq to "approval at seq=${e.seq} $reason")).takeLast(ANOMALY_TAIL)
@@ -712,9 +749,9 @@ private fun kotlinx.serialization.json.JsonObject.marksTrue(k: String): Boolean 
   return !el.isString && el.content == "true"
 }
 
-/** Pre-split body of [LeadState.boundApprovers], copied so the oracle does not share the
+/** Pre-split body of the old LeadState.boundApprovers, copied so the oracle does not share the
  * filter with the fold under test. */
-private fun legacyBoundApprovers(s: LeadState, gate: OpenGate, nonce: String): Set<String> =
+private fun legacyBoundApprovers(s: LegacyLeadState, gate: OpenGate, nonce: String): Set<String> =
   s.verifiedApprovals[gate.gateId]
     .orEmpty()
     .filter { it.nonce == nonce && it.payloadDigest == gate.payloadDigest }
