@@ -90,7 +90,7 @@ class ClaudeCognitionSmokeTest {
 
     // Structural: nothing the model did released a gate — the fold's provenance check
     // is indifferent to model output.
-    assertTrue(folded.lead.releasedGates.isEmpty())
+    assertTrue(folded.host.releasedGates.isEmpty())
     assertTrue(folded.shared.gateReleases.isEmpty())
     store.close()
   }

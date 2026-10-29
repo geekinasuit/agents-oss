@@ -295,7 +295,7 @@ class LeadScenarioTest {
     // The sweep's own entry, folded from the journal it wrote: the fold quotes it in full only
     // when the sweep wrote the lead's reason for this ticket's plan intent.
     val escalations =
-      SqliteStore(dir, componentId = "lead").use { leadFold(it.readAll(), LeadAuth.DENY_ALL).escalations }
+      SqliteStore(dir, componentId = "lead").use { leadHostFold(it.readAll(), LeadAuth.DENY_ALL).escalations }
     assertTrue(
       "the orphaned spawn intent must surface as the lead's own quoted text: $escalations",
       escalations.any {

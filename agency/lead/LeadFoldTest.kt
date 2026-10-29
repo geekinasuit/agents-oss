@@ -40,6 +40,8 @@ class LeadFoldTest {
   // quorum does not gate, so DENY_ALL is the right auth: the fold behaves exactly as before.
   private fun JournalStore.lead(): LeadState = leadFold(readAll(), LeadAuth.DENY_ALL)
 
+  private fun JournalStore.host(): HostState = leadHostFold(readAll(), LeadAuth.DENY_ALL)
+
   // -- small append helpers --------------------------------------------------------------
 
   private fun JournalStore.claim(t: String) =
@@ -286,11 +288,11 @@ class LeadFoldTest {
     val planGate = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
     s.gateOpened(planGate, GateKinds.PLAN_APPROVAL, "aa11")
     assertEquals(TicketPhase.PLAN_GATED, s.lead().phase)
-    assertEquals(listOf(planGate), s.lead().pendingGates.map { it.gateId })
+    assertEquals(listOf(planGate), s.host().pendingGates.map { it.gateId })
 
     s.release(planGate, "aa11", ORIGIN_AUTH_LAYER)
     assertEquals(TicketPhase.PLAN_APPROVED, s.lead().phase)
-    assertTrue(s.lead().pendingGates.isEmpty())
+    assertTrue(s.host().pendingGates.isEmpty())
 
     s.podSpawned("p2", "execute:t1")
     assertEquals(TicketPhase.EXECUTING, s.lead().phase)
@@ -337,8 +339,9 @@ class LeadFoldTest {
     s.release(gate, "aa11", ORIGIN_SUBSTRATE)
 
     val lead = s.lead()
-    assertTrue(lead.releasedGates.isEmpty())
-    assertEquals(listOf(gate), lead.pendingGates.map { it.gateId })
+    val host = s.host()
+    assertTrue(host.releasedGates.isEmpty())
+    assertEquals(listOf(gate), host.pendingGates.map { it.gateId })
     assertEquals(TicketPhase.PLAN_GATED, lead.phase) // never advanced
 
     val shared = fold(s.readAll())
@@ -357,9 +360,10 @@ class LeadFoldTest {
     // Authorization origin, but not the digest the gate was opened on.
     s.release(gate, "ffff", ORIGIN_AUTH_LAYER)
     var lead = s.lead()
-    assertTrue(lead.releasedGates.isEmpty())
+    var host = s.host()
+    assertTrue(host.releasedGates.isEmpty())
     // The gate is open, so its id is the lead's and is kept.
-    assertEquals(listOf(gate), lead.staleReleases.map { it.second })
+    assertEquals(listOf(gate), host.staleReleases.map { it.second })
     assertEquals(TicketPhase.PLAN_GATED, lead.phase)
 
     // The shared fold HONORS it (provenance is its only check) — the digest binding is
@@ -368,7 +372,8 @@ class LeadFoldTest {
 
     s.release(gate, "aa11", ORIGIN_AUTH_LAYER)
     lead = s.lead()
-    assertEquals(setOf(gate), lead.releasedGates)
+    host = s.host()
+    assertEquals(setOf(gate), host.releasedGates)
     assertEquals(TicketPhase.PLAN_APPROVED, lead.phase)
     s.close()
   }
@@ -378,10 +383,10 @@ class LeadFoldTest {
     val s = newStore()
     s.claim("t1")
     val release = s.release(MARKER, "aa11", ORIGIN_AUTH_LAYER)
-    val lead = s.lead()
-    assertTrue(lead.releasedGates.isEmpty())
+    val host = s.host()
+    assertTrue(host.releasedGates.isEmpty())
     // No gate is open under that id, so the id is the entry's own and is recorded by its length.
-    assertEquals(listOf(release.seq to "an unknown gate id of ${MARKER.length} chars"), lead.staleReleases)
+    assertEquals(listOf(release.seq to "an unknown gate id of ${MARKER.length} chars"), host.staleReleases)
     s.close()
   }
 
@@ -395,9 +400,9 @@ class LeadFoldTest {
     s.gateOpened(gate, GateKinds.PLAN_APPROVAL, "aa11")
     s.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
     val release = s.release(gate, "aa11", ORIGIN_AUTH_LAYER)
-    val lead = s.lead()
-    assertTrue(lead.releasedGates.isEmpty())
-    assertEquals(listOf(release.seq to "an unknown gate id of ${gate.length} chars"), lead.staleReleases)
+    val host = s.host()
+    assertTrue(host.releasedGates.isEmpty())
+    assertEquals(listOf(release.seq to "an unknown gate id of ${gate.length} chars"), host.staleReleases)
     s.close()
   }
 
@@ -406,8 +411,8 @@ class LeadFoldTest {
     val s = newStore()
     s.claim("t1")
     s.podSpawned("p1", "plan:t1")
-    assertEquals(1, s.lead().activePods.size)
-    assertEquals("sess-p1", s.lead().pods["p1"]!!.sessionId) // journaled at spawn
+    assertEquals(1, s.host().activePods.size)
+    assertEquals("sess-p1", s.host().pods["p1"]!!.sessionId) // journaled at spawn
 
     s.append(
       LeadKinds.POD_ABANDONED,
@@ -417,14 +422,14 @@ class LeadFoldTest {
       },
       ORIGIN_SUBSTRATE,
     )
-    assertTrue(s.lead().activePods.isEmpty())
-    assertEquals("lead-restart", s.lead().pods["p1"]!!.abandonedReason)
+    assertTrue(s.host().activePods.isEmpty())
+    assertEquals("lead-restart", s.host().pods["p1"]!!.abandonedReason)
 
     s.podSpawned("p2", "plan:t1")
     s.podResult("p2", "cc33")
-    val lead = s.lead()
-    assertTrue(lead.activePods.isEmpty())
-    assertEquals("cc33", lead.podFor("plan:t1")!!.resultDigest) // latest spawn wins
+    val host = s.host()
+    assertTrue(host.activePods.isEmpty())
+    assertEquals("cc33", host.podFor("plan:t1")!!.resultDigest) // latest spawn wins
     s.close()
   }
 
@@ -445,7 +450,7 @@ class LeadFoldTest {
       },
       ORIGIN_SUBSTRATE,
     )
-    val pod = s.lead().pods["p1"]!!
+    val pod = s.host().pods["p1"]!!
     assertEquals("aa11", pod.resultDigest)
     assertNull("absent cost is unmeasured (null), not zero", pod.costUsd)
     s.close()
@@ -468,7 +473,7 @@ class LeadFoldTest {
       },
       ORIGIN_SUBSTRATE,
     )
-    assertEquals("/lead/artifacts-bound/p1", s.lead().pods["p1"]!!.boundPath)
+    assertEquals("/lead/artifacts-bound/p1", s.host().pods["p1"]!!.boundPath)
 
     // …and a pre-bind-once row (no boundPath) folds as NULL — missing evidence the
     // consumer abandons on, never a license to fall back to the pod's own artifactPath.
@@ -482,7 +487,7 @@ class LeadFoldTest {
       },
       ORIGIN_SUBSTRATE,
     )
-    assertNull(s.lead().pods["p2"]!!.boundPath)
+    assertNull(s.host().pods["p2"]!!.boundPath)
     s.close()
   }
 
@@ -520,11 +525,11 @@ class LeadFoldTest {
     val s = newStore()
     s.claim("t1")
     s.podResult("ghost", "dd44")
-    val lead = s.lead()
-    assertTrue(lead.pods.isEmpty()) // still dropped: no spawn record to attach to
+    val host = s.host()
+    assertTrue(host.pods.isEmpty()) // still dropped: no spawn record to attach to
     // …but never silently (AGENCY-021): the drop is the backstop for
     // the pod-completion accept-exemption, so it surfaces like every other anomaly.
-    assertTrue(lead.escalations.any { it.contains("unknown pod id") })
+    assertTrue(host.escalations.any { it.contains("unknown pod id") })
     s.close()
   }
 
@@ -533,7 +538,7 @@ class LeadFoldTest {
     val s = newStore()
     s.claim("t1")
     s.podResult(MARKER, "dd44")
-    val text = s.lead().escalations.single()
+    val text = s.host().escalations.single()
     assertTrue(
       text,
       Regex(
@@ -557,7 +562,7 @@ class LeadFoldTest {
       },
       ORIGIN_SUBSTRATE,
     )
-    val text = s.lead().escalations.single()
+    val text = s.host().escalations.single()
     assertTrue(
       text,
       Regex("pod-abandoned at seq=\\d+ for an unknown pod id of ${MARKER.length} chars — dropped \\(no spawn record\\)")
@@ -572,7 +577,7 @@ class LeadFoldTest {
     for (i in 1..25) {
       s.append(LeadKinds.STATUS_WRITTEN, buildJsonObject { put("status", "s$i") }, ORIGIN_SUBSTRATE)
     }
-    val tail = s.lead().statusTail
+    val tail = s.host().statusTail
     assertEquals(20, tail.size)
     assertEquals("s6", tail.first())
     assertEquals("s25", tail.last())
@@ -595,10 +600,11 @@ class LeadFoldTest {
       ORIGIN_COGNITION,
     )
     val lead = s.lead()
-    assertTrue("no gate may open from a non-substrate origin", lead.openGates.isEmpty())
+    val host = s.host()
+    assertTrue("no gate may open from a non-substrate origin", host.openGates.isEmpty())
     assertEquals(TicketPhase.CLAIMED, lead.phase) // never advanced to PLAN_GATED
-    assertEquals(1, lead.misOriginedEntries.size)
-    assertEquals(LeadKinds.GATE_OPENED, lead.misOriginedEntries.single().second)
+    assertEquals(1, host.misOriginedEntries.size)
+    assertEquals(LeadKinds.GATE_OPENED, host.misOriginedEntries.single().second)
     s.close()
   }
 
@@ -615,13 +621,13 @@ class LeadFoldTest {
       },
       ORIGIN_SUBSTRATE,
     )
-    val lead = s.lead()
+    val host = s.host()
     // Countable as its own class of event: a model degrading by emitting near-misses is only
     // measurable if those turns do not blend into the escalations a working model asks for.
-    assertEquals(listOf(MalformedReasons.UNKNOWN_TYPE), lead.malformedCognition.map { it.second })
-    assertTrue(lead.escalations.isEmpty())
+    assertEquals(listOf(MalformedReasons.UNKNOWN_TYPE), host.malformedCognition.map { it.second })
+    assertTrue(host.escalations.isEmpty())
     // The turn was billed even though it decided nothing — the cap must see that spend.
-    assertEquals(0.04, lead.cognitionSpendUsd, 1e-9)
+    assertEquals(0.04, host.cognitionSpendUsd, 1e-9)
     s.close()
   }
 
@@ -643,7 +649,7 @@ class LeadFoldTest {
       }
     assertEquals(
       seqs.zip(cases.map { "a reason of ${it.length} chars" }),
-      s.lead().malformedCognition,
+      s.host().malformedCognition,
     )
     s.close()
   }
@@ -662,10 +668,10 @@ class LeadFoldTest {
       },
       ORIGIN_COGNITION,
     )
-    val lead = s.lead()
-    assertTrue(lead.malformedCognition.isEmpty())
-    assertEquals(0.0, lead.cognitionSpendUsd, 1e-9)
-    assertEquals(LeadKinds.COGNITION_MALFORMED, lead.misOriginedEntries.single().second)
+    val host = s.host()
+    assertTrue(host.malformedCognition.isEmpty())
+    assertEquals(0.0, host.cognitionSpendUsd, 1e-9)
+    assertEquals(LeadKinds.COGNITION_MALFORMED, host.misOriginedEntries.single().second)
     s.close()
   }
 
@@ -680,7 +686,7 @@ class LeadFoldTest {
       buildJsonObject { put("event", "permission-ask") },
       ORIGIN_SUBSTRATE,
     )
-    assertTrue(s.lead().misOriginedEntries.isEmpty())
+    assertTrue(s.host().misOriginedEntries.isEmpty())
     // A pod event is OUR observation of an untrusted process — a cognition-origin one is a
     // strategy narrating supervision it never performed. The row is inert in both cases;
     // what the gate changes is visibility: the forgery lands in the audit rather than
@@ -690,8 +696,8 @@ class LeadFoldTest {
       buildJsonObject { put("event", "restart-exhausted") },
       ORIGIN_COGNITION,
     )
-    val lead = s.lead()
-    assertEquals(LeadKinds.POD_EVENT, lead.misOriginedEntries.single().second)
+    val host = s.host()
+    assertEquals(LeadKinds.POD_EVENT, host.misOriginedEntries.single().second)
     s.close()
   }
 
@@ -704,16 +710,17 @@ class LeadFoldTest {
     s.release(gate, "aa11", ORIGIN_AUTH_LAYER)
     s.podSpawned("p1", "plan:t1")
     s.podResult("p1", "aa11")
-    var lead = s.lead()
-    assertTrue(lead.openGates.isNotEmpty() && lead.releasedGates.isNotEmpty() && lead.pods.isNotEmpty())
+    var host = s.host()
+    assertTrue(host.openGates.isNotEmpty() && host.releasedGates.isNotEmpty() && host.pods.isNotEmpty())
 
     // TICKET_DONE clears all ticket-scoped state: no cross-ticket
     // residue, no unbounded growth; only the durable doneTickets record persists.
     s.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
-    lead = s.lead()
-    assertTrue("gates cleared", lead.openGates.isEmpty())
-    assertTrue("releases cleared", lead.releasedGates.isEmpty())
-    assertTrue("pods cleared", lead.pods.isEmpty())
+    val lead = s.lead()
+    host = s.host()
+    assertTrue("gates cleared", host.openGates.isEmpty())
+    assertTrue("releases cleared", host.releasedGates.isEmpty())
+    assertTrue("pods cleared", host.pods.isEmpty())
     assertEquals(listOf("t1"), lead.doneTickets)
     s.close()
   }
@@ -724,7 +731,7 @@ class LeadFoldTest {
     for (i in 1..150) {
       s.append(LeadKinds.ESCALATED, buildJsonObject { put("reason", "e$i") }, ORIGIN_SUBSTRATE)
     }
-    val esc = s.lead().escalations
+    val esc = s.host().escalations
     assertEquals(100, esc.size) // ANOMALY_TAIL
     assertEquals("e51", esc.first())
     assertEquals("e150", esc.last())
@@ -784,18 +791,18 @@ class LeadFoldTest {
       },
       ORIGIN_SUBSTRATE,
     )
-    var lead = s.lead()
-    assertEquals(mapOf(gate to setOf("aa11", "")), lead.escalatedStalls)
+    var host = s.host()
+    assertEquals(mapOf(gate to setOf("aa11", "")), host.escalatedStalls)
     assertEquals(
       "the row of another origin is kept visible",
       listOf(LeadKinds.ESCALATED),
-      lead.misOriginedEntries.map { it.second },
+      host.misOriginedEntries.map { it.second },
     )
-    assertEquals("each substrate row is still an escalation", 6, lead.escalations.size)
+    assertEquals("each substrate row is still an escalation", 6, host.escalations.size)
 
     s.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
-    lead = s.lead()
-    assertTrue("the ticket's end clears the record", lead.escalatedStalls.isEmpty())
+    host = s.host()
+    assertTrue("the ticket's end clears the record", host.escalatedStalls.isEmpty())
     s.close()
   }
 
@@ -811,9 +818,9 @@ class LeadFoldTest {
       },
       ORIGIN_SUBSTRATE,
     )
-    assertEquals(setOf("plan:t1"), s.lead().pendingSpawnIntents.keys) // intent recorded
+    assertEquals(setOf("plan:t1"), s.host().pendingSpawnIntents.keys) // intent recorded
     s.podSpawned("p1", "plan:t1")
-    assertTrue("POD_SPAWNED fulfills the intent", s.lead().pendingSpawnIntents.isEmpty())
+    assertTrue("POD_SPAWNED fulfills the intent", s.host().pendingSpawnIntents.isEmpty())
     s.close()
   }
 
@@ -830,12 +837,12 @@ class LeadFoldTest {
       ORIGIN_SUBSTRATE,
     )
     val abandon = s.spawnAbandoned("plan:t1", ORPHANED_SPAWN_REASON)
-    val lead = s.lead()
-    assertTrue("intent cleared", lead.pendingSpawnIntents.isEmpty())
+    val host = s.host()
+    assertTrue("intent cleared", host.pendingSpawnIntents.isEmpty())
     assertEquals(
       "the lead's own orphan entry is quoted in full",
       listOf("spawn-intent orphaned at seq=${abandon.seq} for plan:t1: $ORPHANED_SPAWN_REASON"),
-      lead.escalations,
+      host.escalations,
     )
     s.close()
   }
@@ -852,7 +859,7 @@ class LeadFoldTest {
         "spawn-intent orphaned at seq=${abandon.seq} for an unknown task ref of 7 chars: " +
           ORPHANED_SPAWN_REASON
       ),
-      s.lead().escalations,
+      s.host().escalations,
     )
     s.close()
   }
@@ -877,7 +884,7 @@ class LeadFoldTest {
         "spawn-intent orphaned at seq=${abandon.seq} for an unknown task ref of ${MARKER.length} chars: " +
           ORPHANED_SPAWN_REASON
       ),
-      s.lead().escalations,
+      s.host().escalations,
     )
     s.close()
   }
@@ -897,7 +904,7 @@ class LeadFoldTest {
     val abandon = s.spawnAbandoned("plan:t1", MARKER)
     assertEquals(
       listOf("spawn-intent orphaned at seq=${abandon.seq} for plan:t1: a reason of ${MARKER.length} chars"),
-      s.lead().escalations,
+      s.host().escalations,
     )
     s.close()
   }

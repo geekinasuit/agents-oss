@@ -112,7 +112,7 @@ class BoundArtifactTest {
   /** Asserts that [abandoned]'s pod was abandoned for [reason], that the playbook then proposed the
    * plan again, and that the plan is recorded from the new pod's own bound copy. */
   private fun assertThePlanWasProposedAgain(f: AgentHost.Folded<LeadState>, store: SqliteStore, abandoned: Result, reason: String) {
-    assertEquals("the pod was abandoned", reason, f.lead.pods[abandoned.podId]?.abandonedReason)
+    assertEquals("the pod was abandoned", reason, f.host.pods[abandoned.podId]?.abandonedReason)
     assertEquals("the playbook proposed the plan again", 2, spawns(store))
     val next = results(store).single { it.podId != abandoned.podId }
     assertEquals("the plan is the new pod's bound copy", next.boundPath, f.lead.planArtifactPath)
@@ -256,7 +256,7 @@ class BoundArtifactTest {
     assertTrue("the escalation names the bound path: $escalation", escalation.contains("at ${result.boundPath}"))
     assertTrue(
       "the pod was abandoned for the fault",
-      f.lead.pods[result.podId]?.abandonedReason.orEmpty().startsWith("bound-artifact-disturbed: read fault: "),
+      f.host.pods[result.podId]?.abandonedReason.orEmpty().startsWith("bound-artifact-disturbed: read fault: "),
     )
     assertEquals("the playbook proposed the plan again", 2, spawns(store))
     assertEquals(TicketPhase.PLAN_GATED, f.lead.phase)
@@ -295,7 +295,7 @@ class BoundArtifactTest {
     assertEquals(
       "the execute pod was abandoned",
       "bound-artifact-disturbed: not a regular file",
-      f.lead.pods[executed.podId]?.abandonedReason,
+      f.host.pods[executed.podId]?.abandonedReason,
     )
     val next = results(store).single { it.podId != planner.podId && it.podId != executed.podId }
     assertEquals("the commit is the new execute pod's bound copy", next.boundPath, f.lead.commitManifestPath)
@@ -454,7 +454,7 @@ class BoundArtifactTest {
       assertEquals(
         "the swapped copy's pod was abandoned when its read did not finish",
         "bound-artifact-disturbed: read did not finish within $shortDeadlineMs ms",
-        f.lead.pods[result.podId]?.abandonedReason,
+        f.host.pods[result.podId]?.abandonedReason,
       )
       val replacements = results(store).filter { it.podId != result.podId }
       assertTrue("a replacement pod's result was recorded", replacements.isNotEmpty())
@@ -462,7 +462,7 @@ class BoundArtifactTest {
         assertEquals(
           "a replacement pod's copy was not read",
           "bound-artifact-unread: blocked reads of the bound store are at the bound of 1",
-          f.lead.pods[r.podId]?.abandonedReason,
+          f.host.pods[r.podId]?.abandonedReason,
         )
       }
       assertTrue(
@@ -525,7 +525,7 @@ class BoundArtifactTest {
     )
     assertTrue("no result names the pod", results(store).none { it.podId == "pod-first" })
     assertFalse("its copy was never written", File(dir, "artifacts-bound/pod-first").exists())
-    assertEquals("the pod was abandoned", "snapshot-too-large", f.lead.pods["pod-first"]?.abandonedReason)
+    assertEquals("the pod was abandoned", "snapshot-too-large", f.host.pods["pod-first"]?.abandonedReason)
     assertEquals("the playbook proposed the plan again", 2, spawns(store))
     assertEquals("the plan is the new pod's bound copy", results(store).single().boundPath, f.lead.planArtifactPath)
     store.close()

@@ -36,7 +36,7 @@ class PodSpawnBatchTest {
     }
   }
 
-  private class Run(val store: SqliteStore, val lead: LeadState, val runner: FakePodRunner)
+  private class Run(val store: SqliteStore, val lead: LeadState, val host: HostState, val runner: FakePodRunner)
 
   /** Runs [turns] for ticket t1, one per wake, with pods that complete at once. Each of [drives]
    * adopts afresh, so a later drive's adopt wake runs the next turn. Fails unless
@@ -59,10 +59,10 @@ class PodSpawnBatchTest {
         leadAuth = LeadAuth.DENY_ALL,
         timers = TimerService.NOOP,
       )
-    var lead = daemon.driveUntilQuiescent().lead
-    repeat(drives - 1) { lead = daemon.driveUntilQuiescent().lead }
+    var folded = daemon.driveUntilQuiescent()
+    repeat(drives - 1) { folded = daemon.driveUntilQuiescent() }
     assertEquals("turns left unrun", 0, cognition.turns.size)
-    return Run(store, lead, runner)
+    return Run(store, folded.lead, folded.host, runner)
   }
 
   private fun spawn(taskRef: String) = Proposal.ProposePodSpawn(taskRef)
@@ -90,11 +90,11 @@ class PodSpawnBatchTest {
         timers = TimerService.NOOP,
       )
     daemon.injectMail("a second wake")
-    val lead = daemon.driveUntilQuiescent().lead
+    val host = daemon.driveUntilQuiescent().host
     assertEquals("turns left unrun", 0, cognition.turns.size)
     assertEquals(listOf("plan:t1"), runner.spawnedTaskRefs)
-    assertEquals(1, lead.activePods.size)
-    assertEquals(emptyList<String>(), lead.escalations)
+    assertEquals(1, host.activePods.size)
+    assertEquals(emptyList<String>(), host.escalations)
     store.close()
   }
 
@@ -147,17 +147,17 @@ class PodSpawnBatchTest {
     val hostile = daemon(cognition, runner)
     hostile.injectAuthRelease(planGate, plan) // the first wake: the plan is approved, the executor spawns
     hostile.injectMail("a second wake") // the second: the executor is in flight, the gate re-opened
-    val lead = hostile.driveUntilQuiescent().lead
+    val host = hostile.driveUntilQuiescent().host
     assertEquals("turns left unrun", 0, cognition.turns.size)
     assertEquals(listOf("execute:t1"), runner.spawnedTaskRefs)
-    assertEquals(1, lead.activePods.size)
+    assertEquals(1, host.activePods.size)
     assertEquals(
       listOf(
         "pod-spawn rejected: execute pod for 't1' proposed while $planGate is open off its " +
           "evidence: its digest of 64 chars is not the recorded evidence ${plan.take(16)} — no " +
           "approval on that digest lets the executor run"
       ),
-      lead.escalations,
+      host.escalations,
     )
     store.close()
   }
@@ -169,7 +169,7 @@ class PodSpawnBatchTest {
       "pod-spawn rejected: execute pod for 't1' proposed before the plan-approval gate is " +
         "approved on the recorded plan — the plan must be approved before execution runs"
     assertEquals(emptyList<String>(), r.runner.spawnedTaskRefs)
-    assertEquals(listOf(refusal, refusal), r.lead.escalations)
+    assertEquals(listOf(refusal, refusal), r.host.escalations)
     r.store.close()
   }
 
@@ -178,7 +178,7 @@ class PodSpawnBatchTest {
     val r = run({ listOf(spawn("plan:other"), spawn("plan:other")) })
     val refusal = "pod-spawn rejected: a proposed taskRef of 10 chars is not plan:/execute: for the current ticket 't1'"
     assertEquals(emptyList<String>(), r.runner.spawnedTaskRefs)
-    assertEquals(listOf(refusal, refusal), r.lead.escalations)
+    assertEquals(listOf(refusal, refusal), r.host.escalations)
     r.store.close()
   }
 
@@ -201,7 +201,7 @@ class PodSpawnBatchTest {
           "recorded (${recorded.take(16)}) — completed work is not re-run, and further redundant " +
           "proposals are refused without a repeat escalation"
       ),
-      r.lead.escalations,
+      r.host.escalations,
     )
     r.store.close()
   }

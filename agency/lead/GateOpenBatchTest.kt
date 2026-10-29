@@ -37,7 +37,7 @@ class GateOpenBatchTest {
 
   private val badDigest = "0".repeat(64)
 
-  private class Run(val store: SqliteStore, val lead: LeadState)
+  private class Run(val store: SqliteStore, val lead: LeadState, val host: HostState)
 
   /**
    * The first turn spawns ticket t1's planner. The planner completes at once, the mechanical pass
@@ -72,10 +72,10 @@ class GateOpenBatchTest {
         leadAuth = if (ceremony) ceremonyAuth() else LeadAuth.DENY_ALL,
         timers = if (ceremony) TimerService { _, _ -> } else TimerService.NOOP,
       )
-    var lead = daemon.driveUntilQuiescent().lead
-    repeat(drives - 1) { lead = daemon.driveUntilQuiescent().lead }
+    var folded = daemon.driveUntilQuiescent()
+    repeat(drives - 1) { folded = daemon.driveUntilQuiescent() }
     assertEquals("turns left unrun", 0, cognition.turns.size)
-    return Run(store, lead)
+    return Run(store, folded.lead, folded.host)
   }
 
   private fun plan(ctx: AgentWakeContext<LeadState>): String = ctx.lead.planArtifactSha!!
@@ -102,7 +102,7 @@ class GateOpenBatchTest {
         )
       })
     assertPlanGateOpenedOnce(r)
-    assertEquals(emptyList<String>(), r.lead.escalations)
+    assertEquals(emptyList<String>(), r.host.escalations)
     r.store.close()
   }
 
@@ -129,7 +129,7 @@ class GateOpenBatchTest {
         "gate-open notify had no sink for $gateId (${GateKinds.PLAN_APPROVAL}) — gate is open and " +
           "blocking, operator not notified"
       ),
-      r.lead.escalations,
+      r.host.escalations,
     )
     r.store.close()
   }
@@ -147,7 +147,7 @@ class GateOpenBatchTest {
       })
     assertEquals(0, count(r.store, LeadKinds.GATE_OPENED))
     // GuardsTest pins the refusal's wording; here it matters only that the one escalation is it.
-    assertTrue(r.lead.escalations.single().startsWith("gate-open rejected for plan-approval:t1:"))
+    assertTrue(r.host.escalations.single().startsWith("gate-open rejected for plan-approval:t1:"))
     r.store.close()
   }
 
@@ -161,7 +161,7 @@ class GateOpenBatchTest {
         )
       })
     assertPlanGateOpenedOnce(r)
-    assertEquals(emptyList<String>(), r.lead.escalations)
+    assertEquals(emptyList<String>(), r.host.escalations)
     r.store.close()
   }
 
@@ -181,7 +181,7 @@ class GateOpenBatchTest {
         drives = 2,
       )
     assertPlanGateOpenedOnce(r)
-    assertEquals(emptyList<String>(), r.lead.escalations)
+    assertEquals(emptyList<String>(), r.host.escalations)
     r.store.close()
   }
 
@@ -203,10 +203,10 @@ class GateOpenBatchTest {
         leadAuth = LeadAuth.DENY_ALL,
         timers = TimerService.NOOP,
       )
-    val lead = daemon.driveUntilQuiescent().lead
+    val host = daemon.driveUntilQuiescent().host
     assertEquals("turns left unrun", 0, cognition.turns.size)
     assertEquals(0, count(store, LeadKinds.GATE_OPENED))
-    assertTrue(lead.escalations.isEmpty())
+    assertTrue(host.escalations.isEmpty())
     store.close()
   }
 }

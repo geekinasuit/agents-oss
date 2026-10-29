@@ -291,10 +291,9 @@ class CognitionParsingTest {
     val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, ticket)
     val plan = "a".repeat(64)
     val earlier = "b".repeat(64)
+    val lead = LeadState(currentTicket = ticket, planArtifactSha = plan)
     val reOpenedPastApproval =
-      LeadState(
-        currentTicket = ticket,
-        planArtifactSha = plan,
+      HostState(
         openGates = mapOf(planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, plan, 9L)),
         releasedGates = setOf(planGateId), // epoch-blind: released at all this ticket
         releasedDigests = mapOf(planGateId to setOf(earlier)), // only on d1, not the open one
@@ -302,13 +301,13 @@ class CognitionParsingTest {
 
     assertTrue(
       "a plan gate re-opened onto another digest renders as unapproved",
-      render(reOpenedPastApproval).contains("digest=$plan, approved=false"),
+      render(lead, reOpenedPastApproval).contains("digest=$plan, approved=false"),
     )
     // Positive control: the same gate released on the recorded plan it is open on reads approved
     // — so the render tracks the open digest's approval, not some unrelated always-false branch.
     assertTrue(
       "released on the recorded plan it is open on, the line reads approved",
-      render(reOpenedPastApproval.copy(releasedDigests = mapOf(planGateId to setOf(earlier, plan))))
+      render(lead, reOpenedPastApproval.copy(releasedDigests = mapOf(planGateId to setOf(earlier, plan))))
         .contains("digest=$plan, approved=true"),
     )
   }
@@ -324,10 +323,9 @@ class CognitionParsingTest {
     val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, ticket)
     val plan = "a".repeat(64)
     val notThePlan = "b".repeat(64)
+    val lead = LeadState(currentTicket = ticket, planArtifactSha = plan)
     val releasedOffThePlan =
-      LeadState(
-        currentTicket = ticket,
-        planArtifactSha = plan,
+      HostState(
         openGates =
           mapOf(planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, notThePlan, 9L)),
         releasedGates = setOf(planGateId),
@@ -335,7 +333,7 @@ class CognitionParsingTest {
       )
     assertTrue(
       "released on the digest it is open on, which is not the plan, reads not approved",
-      render(releasedOffThePlan).contains("digest=$notThePlan, approved=false"),
+      render(lead, releasedOffThePlan).contains("digest=$notThePlan, approved=false"),
     )
     // A gate under an id no stage of the current ticket waits on approves nothing, even open and
     // released on the recorded plan while the current ticket's own plan gate is approved on it. Nor
@@ -344,9 +342,9 @@ class CognitionParsingTest {
     val otherGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t2")
     val commitGateId = gateIdFor(GateKinds.COMMIT_APPROVAL, ticket)
     val manifest = "c".repeat(64)
+    val besideLead = lead.copy(commitManifestDigest = manifest)
     val beside =
       releasedOffThePlan.copy(
-        commitManifestDigest = manifest,
         openGates =
           mapOf(
             planGateId to OpenGate(planGateId, GateKinds.PLAN_APPROVAL, plan, 9L),
@@ -358,30 +356,21 @@ class CognitionParsingTest {
       )
     assertTrue(
       "the current ticket's plan gate reads approved",
-      render(beside).contains("$planGateId(digest=$plan, approved=true"),
+      render(besideLead, beside).contains("$planGateId(digest=$plan, approved=true"),
     )
     assertTrue(
       "another ticket's plan gate beside it reads not approved",
-      render(beside).contains("$otherGateId(digest=$plan, approved=false"),
+      render(besideLead, beside).contains("$otherGateId(digest=$plan, approved=false"),
     )
     assertTrue(
       "the current ticket's unreleased commit gate reads not approved",
-      render(beside).contains("$commitGateId(digest=$manifest, approved=false"),
+      render(besideLead, beside).contains("$commitGateId(digest=$manifest, approved=false"),
     )
   }
 
-  /** The render of [lead], with the host holding the gates and releases [lead] lists, as a fold
-   * copies them. */
-  private fun render(lead: LeadState) =
-    CognitionProtocol.renderContext(
-      AgentWakeContext(
-        WakeReason.Adopted,
-        lead,
-        HostState(openGates = lead.openGates, releasedDigests = lead.releasedDigests),
-        JournalState(),
-        emptyList(),
-      )
-    )
+  /** The render of [lead], beside the host's records [host]. */
+  private fun render(lead: LeadState, host: HostState) =
+    CognitionProtocol.renderContext(AgentWakeContext(WakeReason.Adopted, lead, host, JournalState(), emptyList()))
 }
 
 // Text the model chose, which no malformed reason may repeat.

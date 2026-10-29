@@ -91,11 +91,12 @@ kt_jvm_library(
     ],
 )
 
+# associates (not deps) on :lead, since it reads the host's records, which are internal to it.
 kt_jvm_library(
     name = "lead_fixture_lib",
     srcs = ["LeadFixture.kt"],
+    associates = [":lead"],
     deps = [
-        ":lead",
         "//agency/pod",
         "//agency/shared/journal",
         "//agency/shared/journal:fixture_lib",
@@ -114,14 +115,15 @@ java_binary(
     ],
 )
 
+# associates (not deps) on :lead, since it reads the host's records, which are internal to it.
 kt_jvm_test(
     name = "lead_fold_test",
     size = "small",
     srcs = ["LeadFoldTest.kt"],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.LeadFoldTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
-        ":lead",
         "//agency/shared/journal",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
@@ -129,14 +131,15 @@ kt_jvm_test(
     ],
 )
 
+# associates (not deps) on :lead, since it reads the host's records, which are internal to it.
 kt_jvm_test(
     name = "auth_fold_test",
     size = "small",
     srcs = ["AuthFoldTest.kt"],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.AuthFoldTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
-        ":lead",
         # These cells build LeadAuth (allow-list + verifier + quorum) and feed the fold's
         # verified-approver set to the quorum evaluator; the lead library depends on this
         # target too (2b), so the test's use of it is direct, not a peek past the boundary.
@@ -148,14 +151,15 @@ kt_jvm_test(
     ],
 )
 
+# associates (not deps) on :lead, since it reads the host's records, which are internal to it.
 kt_jvm_test(
     name = "wake_loop_test",
     size = "small",
     srcs = ["WakeLoopTest.kt"],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.WakeLoopTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
-        ":lead",
         "//agency/pod",
         "//agency/shared/journal",
         "@maven//:junit_junit",
@@ -166,16 +170,17 @@ kt_jvm_test(
 
 # The bound copy of a pod's artifact, read back before the plan record: disturbed copies at the
 # bound path after a crash, and snapshots at and over the limit the lead records. Two cells hold
-# snapshots of the whole limit, 32 MiB, in memory.
+# snapshots of the whole limit, 32 MiB, in memory. associates (not deps) on :lead, since it reads
+# the host's records, which are internal to it.
 kt_jvm_test(
     name = "bound_artifact_test",
     size = "small",
     srcs = ["BoundArtifactTest.kt"],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.BoundArtifactTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
         ":fifo_test_support",
-        ":lead",
         "//agency/pod",
         "//agency/shared/journal",
         "@maven//:junit_junit",
@@ -279,14 +284,15 @@ kt_jvm_test(
 # Pins the exact journal the lead writes across the scripted walk and every kill point, under both
 # auths, against golden files generated before the host/workflow split. The goldens arrive as
 # runfiles located through `env`, and so a native java_test, for the reason lead_scenario_test
-# gives below.
+# gives below. associates (not deps) on :lead, since it reads the host's records, which are
+# internal to it.
 kt_jvm_library(
     name = "golden_journal_test_lib",
     testonly = True,
     srcs = ["GoldenJournalTest.kt"],
+    associates = [":lead"],
     deps = [
         ":ceremony_test_support",
-        ":lead",
         "//agency/pod",
         "//agency/shared/journal",
         "@maven//:junit_junit",
@@ -391,15 +397,16 @@ kt_jvm_test(
 
 # A cognition turn's gate-open proposals that repeat a gate: each gate id is acted on at most
 # once per turn, refused or opened, and an open gate is never opened again or escalated.
+# associates (not deps) on :lead, since it reads the host's records, which are internal to it.
 kt_jvm_test(
     name = "gate_open_batch_test",
     size = "small",
     srcs = ["GateOpenBatchTest.kt"],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.GateOpenBatchTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
         ":ceremony_test_support",
-        ":lead",
         "//agency/pod",
         "//agency/shared/journal",
         "@maven//:junit_junit",
@@ -409,15 +416,16 @@ kt_jvm_test(
 )
 
 # A cognition turn's pod-spawn proposals that repeat or re-propose a task: which are refused and
-# escalated each time, which once, and which are skipped silently.
+# escalated each time, which once, and which are skipped silently. associates (not deps) on :lead,
+# since it reads the host's records, which are internal to it.
 kt_jvm_test(
     name = "pod_spawn_batch_test",
     size = "small",
     srcs = ["PodSpawnBatchTest.kt"],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.PodSpawnBatchTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
-        ":lead",
         "//agency/pod",
         "//agency/shared/journal",
         "@maven//:junit_junit",
@@ -426,16 +434,17 @@ kt_jvm_test(
     ],
 )
 
+# associates (not deps) on :lead, since it reads the host's records, which are internal to it.
 kt_jvm_test(
     name = "nonce_mint_test",
     size = "small",
     srcs = ["NonceMintTest.kt"],
+    associates = [":lead"],
     test_class = "com.geekinasuit.agency.lead.NonceMintTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
         # A ceremony auth makes hasApprovers hold, which is what gates the mint.
         ":ceremony_test_support",
-        ":lead",
         "//agency/pod",
         "//agency/shared/journal",
         "@maven//:junit_junit",
@@ -569,8 +578,9 @@ kt_jvm_library(
     name = "lead_scenario_test_lib",
     testonly = True,
     srcs = ["LeadScenarioTest.kt"],
+    # associates (not deps) on :lead, since it reads the host's records, which are internal to it.
+    associates = [":lead"],
     deps = [
-        ":lead",
         "//agency/shared/journal",
         "@maven//:junit_junit",
     ],
@@ -621,6 +631,8 @@ kt_jvm_test(
     name = "claude_cognition_smoke_test",
     size = "medium",
     srcs = ["ClaudeCognitionSmokeTest.kt"],
+    # associates (not deps) on :lead, since it reads the host's records, which are internal to it.
+    associates = [":lead"],
     # Env-gated manual smoke (AGENCY_MODEL_TESTS=1 + claude on PATH): out of CI and out
     # of wildcard builds; run explicitly when validating the model-backed path.
     tags = [
@@ -630,7 +642,6 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.ClaudeCognitionSmokeTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
-        ":lead",
         "//agency/pod",
         "//agency/shared/harness",
         "//agency/shared/journal",
@@ -647,6 +658,8 @@ kt_jvm_test(
     name = "ollama_cognition_smoke_test",
     size = "large",
     srcs = ["OllamaCognitionSmokeTest.kt"],
+    # associates (not deps) on :lead, since it reads the host's records, which are internal to it.
+    associates = [":lead"],
     tags = [
         "external",
         "manual",
@@ -654,7 +667,6 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.OllamaCognitionSmokeTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
-        ":lead",
         "//agency/pod",
         "//agency/shared/harness",
         "//agency/shared/journal",

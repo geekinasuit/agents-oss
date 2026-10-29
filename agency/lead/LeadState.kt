@@ -324,6 +324,10 @@ private val SHA256_HEX_RE = Regex("[0-9a-f]{64}")
 fun leadFold(entries: List<JournalEntry>, auth: LeadAuth): LeadState =
   foldLeadJournal(entries, auth, TicketWorkflowFold)
 
+/** The host's records of a ticket lead's journal, folded beside [leadFold]'s state under [auth]. */
+internal fun leadHostFold(entries: List<JournalEntry>, auth: LeadAuth): HostState =
+  foldHostAndLead(entries, auth, TicketWorkflowFold).first
+
 /** The ticket workflow's half of the lead fold. */
 internal object TicketWorkflowFold : WorkflowFold<LeadState, TicketWorkflowState> {
   override val substrateKinds: Set<String> = TICKET_WORKFLOW_SUBSTRATE_KINDS
