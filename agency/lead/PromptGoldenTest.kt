@@ -200,7 +200,7 @@ class PromptGoldenTest {
       AgentWakeContext(
         WakeReason.Adopted,
         approved,
-        HostState(openGates = approved.openGates),
+        HostState(openGates = approved.openGates, releasedDigests = approved.releasedDigests),
         JournalState(),
         emptyList(),
       )

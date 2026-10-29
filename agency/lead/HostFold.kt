@@ -716,6 +716,11 @@ private fun foldApproval(s: HostState, e: JournalEntry, p: JsonObject, auth: Lea
 internal fun activePods(pods: Map<String, PodRecord>): List<PodRecord> =
   pods.values.filter { it.active }.sortedBy { it.spawnedSeq }
 
+/** The latest non-abandoned pod for [taskRef], or null. See [LeadState.podFor] for why abandoned
+ * pods are excluded. */
+internal fun podFor(pods: Map<String, PodRecord>, taskRef: String): PodRecord? =
+  pods.values.filter { it.taskRef == taskRef && it.abandonedReason == null }.maxByOrNull { it.spawnedSeq }
+
 /** Whether [gateId] is open and released on the digest it is open on now. See
  * [HostView.approvedOnCurrentDigest]. */
 internal fun approvedOnCurrentDigest(

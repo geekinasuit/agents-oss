@@ -44,8 +44,9 @@ internal interface Workflow<S> {
   /** Whether the host may launch a pod for [taskRef], as cognition proposed, in [turn]. Refusals
    * the workflow makes are escalated through [host] here, as the workflow's guards require; a
    * proposal it skips without refusing returns false too. The host's own guards (the attempt cap,
-   * the ref's form, the artifact path, the launch profile) run after an admission. */
-  fun admitPodSpawn(taskRef: String, lead: S, turn: ProposalTurn, host: HostServices): Boolean
+   * the ref's form, the artifact path, the launch profile) run after an admission. The workflow
+   * reads gates, pods and escalations from [records], the host's own. */
+  fun admitPodSpawn(taskRef: String, lead: S, records: HostView, turn: ProposalTurn, host: HostServices): Boolean
 
   /** The bound copy an operator reads to decide a gate of [gateKind]: the evidence the gate opened
    * on, or null when the workflow recorded none for that kind. */
@@ -67,8 +68,9 @@ internal interface Workflow<S> {
   fun evidenceMismatch(gateKind: String, digest: String, lead: S): String?
 
   /** The message to fire a pending effect keyed [key] with again, or null when the workflow would
-   * not journal that effect now. The message comes from [lead], never from the intent row. */
-  fun redriveMessage(key: String, lead: S): String?
+   * not journal that effect now. The message comes from [lead], never from the intent row; whether
+   * the effect's gates are approved comes from [records], the host's own. */
+  fun redriveMessage(key: String, lead: S, records: HostView): String?
 
   /** Why the workflow declines to fire a pending effect keyed [key] again, when [key] is one of the
    * workflow's own effect keys, or null when it is not, and the host says so in its own words. */
@@ -76,8 +78,9 @@ internal interface Workflow<S> {
 
   /** Advance the workflow's own pipeline by one mechanical step, one that needs no judgment, after
    * the host's own recovery found nothing to do. Returns true if the step made progress, so the
-   * host refolds and runs the pass again. */
-  fun mechanicalStep(lead: S, shared: JournalState, host: HostServices): Boolean
+   * host refolds and runs the pass again. The workflow reads gates and pods from [records], the
+   * host's own. */
+  fun mechanicalStep(lead: S, records: HostView, shared: JournalState, host: HostServices): Boolean
 }
 
 /** What the host does for a workflow. Each append is substrate-authored. */

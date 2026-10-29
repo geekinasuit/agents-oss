@@ -246,6 +246,14 @@ data class LeadState(
     return openGates[gateId]?.payloadDigest == evidence && approvedOnCurrentDigest(gateId)
   }
 
+  /** [approvedOnEvidence], with the gate and its releases read from [records], the host's own,
+   * rather than this state's copies. The workflow decides on this one. */
+  fun approvedOnEvidence(records: HostView, gateKind: String, ticket: String): Boolean {
+    val gateId = gateIdFor(gateKind, ticket)
+    val evidence = evidenceDigest(gateKind) ?: return false
+    return records.openGates[gateId]?.payloadDigest == evidence && records.approvedOnCurrentDigest(gateId)
+  }
+
   /** Whether the commit effect may fire for [ticket]: its commit gate is approved on the recorded
    * manifest and its plan gate on the recorded plan ([approvedOnEvidence]). The daemon asks this
    * before it journals the effect's intent, and again before adopt re-fires an intent a crash cut
@@ -253,6 +261,11 @@ data class LeadState(
   fun approvedToCommit(ticket: String): Boolean =
     approvedOnEvidence(GateKinds.COMMIT_APPROVAL, ticket) &&
       approvedOnEvidence(GateKinds.PLAN_APPROVAL, ticket)
+
+  /** [approvedToCommit], with the gates read from [records], the host's own. */
+  fun approvedToCommit(records: HostView, ticket: String): Boolean =
+    approvedOnEvidence(records, GateKinds.COMMIT_APPROVAL, ticket) &&
+      approvedOnEvidence(records, GateKinds.PLAN_APPROVAL, ticket)
 
   /** The gate's currently-usable nonce: issued for THIS gate, bound to the digest the
    * gate is CURRENTLY open on, and not consumed — the same clauses [foldRelease] honors,
@@ -281,10 +294,7 @@ data class LeadState(
    * evidence-based playbook re-proposes a fresh pod. It also closes the late-completion path
    * (a delayed result for an abandoned pod can no longer drive plan/commit recording).
    */
-  fun podFor(taskRef: String): PodRecord? =
-    pods.values
-      .filter { it.taskRef == taskRef && it.abandonedReason == null }
-      .maxByOrNull { it.spawnedSeq }
+  fun podFor(taskRef: String): PodRecord? = podFor(pods, taskRef)
 }
 
 /** The form the substrate records an evidence digest in: [sha256HexBytes]'s lowercase hex. */

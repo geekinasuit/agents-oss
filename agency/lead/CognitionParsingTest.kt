@@ -370,10 +370,17 @@ class CognitionParsingTest {
     )
   }
 
-  /** The render of [lead], with the host holding the gates [lead] lists, as a fold copies them. */
+  /** The render of [lead], with the host holding the gates and releases [lead] lists, as a fold
+   * copies them. */
   private fun render(lead: LeadState) =
     CognitionProtocol.renderContext(
-      AgentWakeContext(WakeReason.Adopted, lead, HostState(openGates = lead.openGates), JournalState(), emptyList())
+      AgentWakeContext(
+        WakeReason.Adopted,
+        lead,
+        HostState(openGates = lead.openGates, releasedDigests = lead.releasedDigests),
+        JournalState(),
+        emptyList(),
+      )
     )
 }
 

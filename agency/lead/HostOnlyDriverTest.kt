@@ -241,7 +241,13 @@ class HostOnlyDriverTest {
         GateOpenDecision.Refuse("not the recorded evidence")
       }
 
-    override fun admitPodSpawn(taskRef: String, lead: GateLead, turn: ProposalTurn, host: HostServices) = false
+    override fun admitPodSpawn(
+      taskRef: String,
+      lead: GateLead,
+      records: HostView,
+      turn: ProposalTurn,
+      host: HostServices,
+    ) = false
 
     override fun gateArtifactPath(gateKind: String, lead: GateLead) = evidence.absolutePath.takeIf { lead.w.evidence != null }
 
@@ -254,11 +260,11 @@ class HostOnlyDriverTest {
         else -> "not the recorded evidence"
       }
 
-    override fun redriveMessage(key: String, lead: GateLead): String? = null
+    override fun redriveMessage(key: String, lead: GateLead, records: HostView): String? = null
 
     override fun redriveDeclineReason(key: String): String? = null
 
-    override fun mechanicalStep(lead: GateLead, shared: JournalState, host: HostServices): Boolean {
+    override fun mechanicalStep(lead: GateLead, records: HostView, shared: JournalState, host: HostServices): Boolean {
       if (lead.w.scope != null) return false
       host.append(
         SCOPE_OPENED,
@@ -292,7 +298,7 @@ class HostOnlyDriverTest {
 
     override fun renderLines(lead: GateLead) = emptyList<String>()
 
-    override fun gateReadsApproved(lead: GateLead, gate: OpenGate) = false
+    override fun gateReadsApproved(lead: GateLead, records: HostView, gate: OpenGate) = false
 
     override fun parseProposal(type: String, p: JSONObject): ProposalParse =
       ProposalParse.Malformed(MalformedReasons.UNKNOWN_TYPE)
