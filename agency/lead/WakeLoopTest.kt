@@ -103,9 +103,9 @@ class WakeLoopTest {
     assertEquals(TicketPhase.PLAN_GATED, f1.lead.phase)
     assertTrue(f1.lead.planArtifactSha != null)
     val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
-    assertEquals(listOf(planGateId), f1.lead.pendingGates.map { it.gateId })
-    assertEquals(f1.lead.planArtifactSha, f1.lead.pendingGates.single().payloadDigest)
-    assertTrue(f1.lead.statusTail.isNotEmpty())
+    assertEquals(listOf(planGateId), f1.host.pendingGates.map { it.gateId })
+    assertEquals(f1.lead.planArtifactSha, f1.host.pendingGates.single().payloadDigest)
+    assertTrue(f1.host.statusTail.isNotEmpty())
     assertTrue(File(f1.lead.planArtifactPath!!).exists()) // pod wrote at the lead-assigned path
 
     // Cognition decisions are journaled with cognition provenance before execution.
@@ -126,7 +126,7 @@ class WakeLoopTest {
     assertEquals(TicketPhase.COMMIT_GATED, f2.lead.phase)
     assertTrue(f2.lead.commitManifestDigest != null)
     val commitGateId = gateIdFor(GateKinds.COMMIT_APPROVAL, "t1")
-    assertEquals(listOf(commitGateId), f2.lead.pendingGates.map { it.gateId })
+    assertEquals(listOf(commitGateId), f2.host.pendingGates.map { it.gateId })
 
     // Checkpoint 3: store-level authorization (the AuthStub surface, daemon not looping)
     // → commit effect fires exactly once, ticket completes, lead returns to idle.
@@ -140,7 +140,7 @@ class WakeLoopTest {
     // residue. The releases themselves are proven by the pipeline reaching done: the commit
     // effect fires only on a released commit gate, which opens only after the plan gate
     // released.
-    assertTrue("done clears ticket-scoped gate state", f3.lead.releasedGates.isEmpty())
+    assertTrue("done clears ticket-scoped gate state", f3.host.releasedGates.isEmpty())
 
     // Quiescent again: the done ticket is not re-claimed.
     val f4 = rig.daemon.driveUntilQuiescent()
@@ -277,7 +277,7 @@ class WakeLoopTest {
 
     val b = Rig(dir)
     val f2 = b.daemon.driveUntilQuiescent()
-    assertTrue("the accepted release is honored after adopt", planGateId in f2.lead.releasedGates)
+    assertTrue("the accepted release is honored after adopt", planGateId in f2.host.releasedGates)
     assertEquals(TicketPhase.COMMIT_GATED, f2.lead.phase) // pipeline advanced through it
     assertEquals(1, b.store.readAll().count { it.kind == KIND_GATE_RELEASED })
     b.store.close()
@@ -448,13 +448,13 @@ class WakeLoopTest {
     val rig = Rig(dir, hold = true)
     val f1 = rig.daemon.driveUntilQuiescent()
     assertEquals(TicketPhase.PLANNING, f1.lead.phase)
-    assertEquals(1, f1.lead.activePods.size) // planner outstanding, completion parked
+    assertEquals(1, f1.host.activePods.size) // planner outstanding, completion parked
 
     // A fresh drive adopts: the in-flight pod is abandoned visibly and re-proposed
     // (re-spawn, not resume); this rig's runner still holds, so it is active again.
     val f2 = rig.daemon.driveUntilQuiescent()
-    assertEquals(1, f2.lead.activePods.size)
-    assertTrue(f2.lead.pods.values.any { it.abandonedReason == "lead-restart" })
+    assertEquals(1, f2.host.activePods.size)
+    assertTrue(f2.host.pods.values.any { it.abandonedReason == "lead-restart" })
     assertEquals(2, rig.runner.spawnedTaskRefs.size)
     rig.store.close()
   }
@@ -501,7 +501,7 @@ class WakeLoopTest {
     val folded = daemon.driveUntilQuiescent()
     assertTrue(
       "the runner's fault reached the journal",
-      folded.lead.escalations.any { it.contains("AGENCY-028") },
+      folded.host.escalations.any { it.contains("AGENCY-028") },
     )
     assertEquals(1, store.readAll().count { it.kind == LeadKinds.ESCALATED })
 
@@ -525,7 +525,7 @@ class WakeLoopTest {
     awaitTrue("planner pod spawned") {
       rig.store.readAll().any { it.kind == LeadKinds.POD_SPAWNED }
     }
-    val podId = rig.daemon.refold().lead.activePods.single().podId
+    val podId = rig.daemon.refold().host.activePods.single().podId
 
     rig.daemon.injectPodEvent(PodEvent.RestartsExhausted(podId, 2, "attempt 2: transport closed"))
     awaitTrue("the corpse was abandoned and the playbook re-proposed") {
@@ -539,10 +539,10 @@ class WakeLoopTest {
     assertEquals(
       "the abandon carries the engine's own disposition",
       "engine-terminal: restarts-exhausted",
-      folded.lead.pods[podId]?.abandonedReason,
+      folded.host.pods[podId]?.abandonedReason,
     )
-    assertTrue(folded.lead.escalations.any { it.contains("exhausted its restart cap") })
-    assertEquals(1, folded.lead.activePods.size) // the respawn (held again) is the only live pod
+    assertTrue(folded.host.escalations.any { it.contains("exhausted its restart cap") })
+    assertEquals(1, folded.host.activePods.size) // the respawn (held again) is the only live pod
     rig.store.close()
   }
 
@@ -575,7 +575,7 @@ class WakeLoopTest {
     awaitTrue("planner pod spawned") {
       sqlite.readAll().any { it.kind == LeadKinds.POD_SPAWNED }
     }
-    val podId = daemon.refold().lead.activePods.single().podId
+    val podId = daemon.refold().host.activePods.single().podId
 
     store.refuse = { it == LeadKinds.ESCALATED }
     try {
@@ -594,10 +594,10 @@ class WakeLoopTest {
     loop.join(5_000)
     assertTrue(!loop.isAlive)
     val folded = daemon.refold()
-    assertEquals("engine-terminal: restarts-exhausted", folded.lead.pods[podId]?.abandonedReason)
+    assertEquals("engine-terminal: restarts-exhausted", folded.host.pods[podId]?.abandonedReason)
     assertTrue(
       "the refused escalation never reached the journal",
-      folded.lead.escalations.none { it.contains("exhausted its restart cap") },
+      folded.host.escalations.none { it.contains("exhausted its restart cap") },
     )
     sqlite.close()
   }
@@ -617,10 +617,10 @@ class WakeLoopTest {
     assertEquals(0, rig.store.readAll().count { it.kind == LeadKinds.POD_RESULT_RECORDED })
     assertTrue(
       "the refusal names the cap",
-      folded.lead.escalations.any { it.contains("cap 3") },
+      folded.host.escalations.any { it.contains("cap 3") },
     )
     assertEquals(TicketPhase.PLANNING, folded.lead.phase) // wedged VISIBLY, never advanced
-    assertTrue("no live pod remains", folded.lead.activePods.isEmpty())
+    assertTrue("no live pod remains", folded.host.activePods.isEmpty())
 
     // Later proposing wakes replay the refusal, not the escalation row: the wedge is
     // announced once per taskRef per process, and the journal does not accrete an
@@ -928,7 +928,7 @@ class WakeLoopTest {
       "unmeasured cost is journaled as ABSENT, never a fabricated 0.0",
       !result.payloadJson.contains("costUsd"),
     )
-    assertEquals(null, folded.lead.podFor("plan:t1")!!.costUsd)
+    assertEquals(null, folded.host.podFor("plan:t1")!!.costUsd)
     assertTrue("the pipeline advanced on the uncosted result", folded.lead.planArtifactSha != null)
     store.close()
   }
@@ -981,8 +981,8 @@ class WakeLoopTest {
     val folded = daemon.driveUntilQuiescent()
     val result = store.readAll().first { it.kind == LeadKinds.POD_RESULT_RECORDED }
     assertTrue("the garbage cost never reaches the chain", !result.payloadJson.contains("costUsd"))
-    assertTrue(folded.lead.escalations.any { it.contains("costUsd rejected") })
-    assertEquals(null, folded.lead.podFor("plan:t1")!!.costUsd)
+    assertTrue(folded.host.escalations.any { it.contains("costUsd rejected") })
+    assertEquals(null, folded.host.podFor("plan:t1")!!.costUsd)
     assertTrue("the pipeline advanced on the result", folded.lead.planArtifactSha != null)
     store.close()
   }

@@ -79,7 +79,7 @@ class WorkflowProtocolTest {
       protocol.renderContext(
         AgentWakeContext(
           WakeReason.Adopted,
-          LeadState(currentTicket = "t9", openGates = mapOf("g1" to gate)),
+          LeadState(currentTicket = "t9"),
           HostState(openGates = mapOf("g1" to gate)),
           JournalState(),
           emptyList(),

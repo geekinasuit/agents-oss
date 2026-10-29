@@ -124,7 +124,7 @@ class OllamaCognitionSmokeTest {
     // NOT that the origin check would refuse one. That property is proven where it can
     // actually be exercised, by the fold's own tests against a forged cognition-origin
     // release, and is not what a live model happening to behave demonstrates.
-    assertTrue(folded.lead.releasedGates.isEmpty())
+    assertTrue(folded.host.releasedGates.isEmpty())
     assertTrue(folded.shared.gateReleases.isEmpty())
     store.close()
   }

@@ -72,7 +72,7 @@ class AuthFoldTest {
       quorum = QuorumGroup(1, principalIds.map { SignerLeaf(it) }),
     )
 
-  private fun JournalStore.lead(): LeadState = leadFold(readAll(), testAuth)
+  private fun JournalStore.host(): HostState = leadHostFold(readAll(), testAuth)
 
   // -- append helpers ----------------------------------------------------------------------
 
@@ -202,7 +202,7 @@ class AuthFoldTest {
 
   /** Fold with a caller-supplied auth instead of [testAuth] — for the cells that vary the
    * allow-list, verifier, or quorum (recovery contract, quorum tree, provenance anchor). */
-  private fun JournalStore.leadWith(auth: LeadAuth): LeadState = leadFold(readAll(), auth)
+  private fun JournalStore.hostWith(auth: LeadAuth): HostState = leadHostFold(readAll(), auth)
 
   private fun sha256Hex(s: String): String =
     java.security.MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") {
@@ -216,12 +216,12 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1")
-    val before = s.lead()
+    val before = s.host()
     assertEquals("n1", before.openNonceFor(before.openGates["g1"]!!)?.nonce)
 
     s.approvalFor("g1", "operator", "n1", "d1") // a verified approval meets the quorum
     s.release("g1", "d1", nonce = "n1")
-    val st = s.lead()
+    val st = s.host()
     assertTrue("g1" in st.releasedGates)
     assertFalse("g1" in st.nonceLessReleases) // ceremony release, and the state says so
     assertTrue("n1" in st.consumedNonces)
@@ -237,7 +237,7 @@ class AuthFoldTest {
     s.approvalFor("g1", "operator", "n1", "d1")
     s.release("g1", "d1", nonce = "n1")
     val replaySeq = s.release("g1", "d1", nonce = "n1").seq
-    val st = s.lead()
+    val st = s.host()
     assertTrue("g1" in st.releasedGates)
     assertEquals(listOf(replaySeq to "g1"), st.staleReleases)
   }
@@ -261,7 +261,7 @@ class AuthFoldTest {
     // checkbox as covering such a consumer.
     val second = open(dir)
     val replaySeq = second.release("g1", "d1", nonce = "n1").seq
-    val st = second.lead()
+    val st = second.host()
     assertTrue("g1" in st.releasedGates)
     assertTrue("n1" in st.consumedNonces)
     assertEquals(listOf(replaySeq to "g1"), st.staleReleases)
@@ -280,7 +280,7 @@ class AuthFoldTest {
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1")
     s.release("g1", "d1") // nonce-less on a gate that HAS one
-    val st = s.lead()
+    val st = s.host()
     assertFalse("g1" in st.releasedGates)
     assertEquals(listOf("g1"), st.staleReleases.map { it.second })
   }
@@ -295,7 +295,7 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     val releaseSeq = s.release("g1", "d1").seq
-    val st = s.leadWith(LeadAuth.DENY_ALL)
+    val st = s.hostWith(LeadAuth.DENY_ALL)
     assertTrue("g1" in st.releasedGates)
     assertEquals(releaseSeq, st.nonceLessReleases["g1"])
   }
@@ -309,7 +309,7 @@ class AuthFoldTest {
     s.gateOpened("g1", "d1")
     val firstSeq = s.release("g1", "d1").seq
     val replaySeq = s.release("g1", "d1").seq
-    val st = s.leadWith(LeadAuth.DENY_ALL)
+    val st = s.hostWith(LeadAuth.DENY_ALL)
     assertTrue("g1" in st.releasedGates)
     assertEquals(firstSeq, st.nonceLessReleases["g1"])
     assertEquals(listOf(replaySeq to "g1"), st.staleReleases)
@@ -329,7 +329,7 @@ class AuthFoldTest {
     val firstSeq = s.release("g1", "d1").seq // pre-ceremony honor
     s.gateOpened("g1", "d2") // re-opened on a new digest
     val reSeq = s.release("g1", "d2").seq // nonce-less again, on the new digest
-    val st = s.leadWith(LeadAuth.DENY_ALL)
+    val st = s.hostWith(LeadAuth.DENY_ALL)
     assertTrue("g1" in st.releasedGates)
     assertEquals(firstSeq, st.nonceLessReleases["g1"])
     assertEquals(listOf(reSeq to "g1"), st.staleReleases)
@@ -345,7 +345,7 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.release("g1", "d1") // nonce-less, no nonce ever issued for this gate
-    val st = s.lead() // testAuth: non-empty allow-list
+    val st = s.host() // testAuth: non-empty allow-list
     assertFalse("g1" in st.releasedGates)
     assertEquals(listOf("g1"), st.staleReleases.map { it.second })
     assertTrue("g1" !in st.nonceLessReleases)
@@ -360,9 +360,9 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.release("g1", "d1") // nonce-less
-    val preCeremony = s.leadWith(LeadAuth.DENY_ALL)
+    val preCeremony = s.hostWith(LeadAuth.DENY_ALL)
     assertTrue("g1" in preCeremony.releasedGates)
-    val ceremony = s.leadWith(testAuth)
+    val ceremony = s.hostWith(testAuth)
     assertFalse("g1" in ceremony.releasedGates)
     assertEquals(listOf("g1"), ceremony.staleReleases.map { it.second })
   }
@@ -384,14 +384,14 @@ class AuthFoldTest {
     // digest binding (issued.payloadDigest == digest — the clause this cell observes).
     s.release("g1", "d1", nonce = "n1")
     s.release("g1", "d2", nonce = "n1")
-    val st = s.lead()
+    val st = s.host()
     assertFalse("g1" in st.releasedGates)
     assertEquals(listOf("g1", "g1"), st.staleReleases.map { it.second })
 
     // The fresh nonce releases it.
     s.approvalFor("g1", "operator", "n2", "d2")
     s.release("g1", "d2", nonce = "n2")
-    assertTrue("g1" in s.lead().releasedGates)
+    assertTrue("g1" in s.host().releasedGates)
   }
 
   @Test
@@ -401,7 +401,7 @@ class AuthFoldTest {
     s.gateOpened("g2", "d1")
     s.nonceIssued("n1", "g1", "d1")
     s.release("g2", "d1", nonce = "n1")
-    val st = s.lead()
+    val st = s.host()
     assertFalse("g2" in st.releasedGates)
     assertEquals(listOf("g2"), st.staleReleases.map { it.second })
   }
@@ -415,7 +415,7 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.release("g1", "d1", nonce = "never-minted")
-    val st = s.lead()
+    val st = s.host()
     assertFalse("g1" in st.releasedGates)
     assertEquals(listOf("g1"), st.staleReleases.map { it.second })
     assertTrue(st.consumedNonces.isEmpty())
@@ -431,7 +431,7 @@ class AuthFoldTest {
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1")
     s.release("g1", "d1", nonce = "n-forged") // gate + digest agree; value never minted
-    val st = s.lead()
+    val st = s.host()
     assertFalse("g1" in st.releasedGates)
     assertEquals(listOf("g1"), st.staleReleases.map { it.second })
     assertTrue("n-forged" !in st.consumedNonces)
@@ -445,7 +445,7 @@ class AuthFoldTest {
     s.nonceIssued("n1", "g1", "d1")
     s.nonceConsumed("n1", "expired")
     s.release("g1", "d1", nonce = "n1")
-    val st = s.lead()
+    val st = s.host()
     assertFalse("g1" in st.releasedGates)
     assertEquals(listOf("g1"), st.staleReleases.map { it.second })
   }
@@ -465,7 +465,7 @@ class AuthFoldTest {
     s.release("g1", "d1", nonce = "n1") // honored; n1 consumed
     s.nonceIssued("n2", "g1", "d1") // a second nonce for the SAME gate and digest
     val reReleaseSeq = s.release("g1", "d1", nonce = "n2").seq
-    val st = s.lead()
+    val st = s.host()
     assertTrue("g1" in st.releasedGates)
     assertTrue("n1" in st.consumedNonces)
     assertTrue("n2" !in st.consumedNonces)
@@ -488,7 +488,7 @@ class AuthFoldTest {
     s.nonceIssued("n2", "g1", "d2")
     s.approvalFor("g1", "operator", "n2", "d2")
     s.release("g1", "d2", nonce = "n2") // must be honored on d2
-    val st = s.lead()
+    val st = s.host()
     assertTrue("g1" in st.releasedGates)
     assertTrue("n1" in st.consumedNonces)
     assertTrue("n2" in st.consumedNonces)
@@ -514,7 +514,7 @@ class AuthFoldTest {
     s.gateOpened("g1", "d1") // re-opened on the ALREADY-RELEASED d1
     s.nonceIssued("n3", "g1", "d1")
     val revisitSeq = s.release("g1", "d1", nonce = "n3").seq // must fold stale
-    val st = s.lead()
+    val st = s.host()
     assertTrue("g1" in st.releasedGates)
     assertTrue("n1" in st.consumedNonces)
     assertTrue("n2" in st.consumedNonces)
@@ -534,17 +534,17 @@ class AuthFoldTest {
     s.nonceIssued("n1", "g1", "d1")
     s.approvalFor("g1", "operator", "n1", "d1")
     s.release("g1", "d1", nonce = "n1") // approved on d1
-    assertTrue("released at all this ticket", "g1" in s.lead().releasedGates)
-    assertTrue("approved on the open digest d1", s.lead().approvedOnCurrentDigest("g1"))
+    assertTrue("released at all this ticket", "g1" in s.host().releasedGates)
+    assertTrue("approved on the open digest d1", s.host().approvedOnCurrentDigest("g1"))
 
     s.gateOpened("g1", "d2") // re-opened on a new digest, not yet approved
-    assertTrue("still in releasedGates (epoch-blind)", "g1" in s.lead().releasedGates)
-    assertFalse("NOT approved on the current digest d2", s.lead().approvedOnCurrentDigest("g1"))
+    assertTrue("still in releasedGates (epoch-blind)", "g1" in s.host().releasedGates)
+    assertFalse("NOT approved on the current digest d2", s.host().approvedOnCurrentDigest("g1"))
 
     s.nonceIssued("n2", "g1", "d2")
     s.approvalFor("g1", "operator", "n2", "d2")
     s.release("g1", "d2", nonce = "n2") // approved on d2
-    assertTrue("approved again once d2 is released", s.lead().approvedOnCurrentDigest("g1"))
+    assertTrue("approved again once d2 is released", s.host().approvedOnCurrentDigest("g1"))
   }
 
   @Test
@@ -552,7 +552,7 @@ class AuthFoldTest {
     // Fail-closed: no open gate is not approved. ScriptedCognition reads this while no plan gate
     // is open yet: a true here would have it propose the execute pod while the planner still runs.
     val s = open(newStoreDir())
-    assertFalse(s.lead().approvedOnCurrentDigest("never-opened"))
+    assertFalse(s.host().approvedOnCurrentDigest("never-opened"))
   }
 
   // -- nonce bookkeeping anomalies ----------------------------------------------------------
@@ -562,7 +562,7 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.nonceConsumed("never-issued", "typo")
-    val st = s.lead()
+    val st = s.host()
     assertTrue(st.escalations.any { "unknown nonce" in it })
     assertTrue(st.consumedNonces.isEmpty())
   }
@@ -574,7 +574,7 @@ class AuthFoldTest {
     s.nonceIssued("n1", "g1", "d1")
     s.release("g1", "d1", nonce = "n1")
     s.nonceConsumed("n1", "released") // bookkeeping after the fold already consumed
-    val st = s.lead()
+    val st = s.host()
     assertTrue("n1" in st.consumedNonces)
     assertTrue(st.escalations.isEmpty())
   }
@@ -588,7 +588,7 @@ class AuthFoldTest {
     s.gateOpened(rebindTarget, "d2")
     val kept = s.nonceIssued("n1", "g1", "d1")
     val rebind = s.nonceIssued("n1", rebindTarget, "d2") // rebind attempt
-    val st = s.lead()
+    val st = s.host()
     assertEquals("g1", st.issuedNonces["n1"]?.gateId)
     // The rebinding entry's gate id is described by its length, and the kept binding by its seq.
     assertEquals(
@@ -600,14 +600,14 @@ class AuthFoldTest {
     )
     // And the rebind target cannot be released with it.
     s.release(rebindTarget, "d2", nonce = "n1")
-    assertFalse(rebindTarget in s.lead().releasedGates)
+    assertFalse(rebindTarget in s.host().releasedGates)
   }
 
   @Test
   fun issueForUnknownGateIsRecordedAndFlagged() {
     val s = open(newStoreDir())
     val issued = s.nonceIssued("n1", "ghost", "d1")
-    val st = s.lead()
+    val st = s.host()
     assertEquals("ghost", st.issuedNonces["n1"]?.gateId)
     // The unknown gate's id is the entry's own field, so it is described by its length.
     assertEquals(listOf("nonce issued at seq=${issued.seq} for an unknown gate id of 5 chars"), st.escalations)
@@ -624,7 +624,7 @@ class AuthFoldTest {
     s.nonceIssued("n1", "g1", "dX") // minted against a digest no gate ever opened on
     s.gateOpened("g1", "d1")
     s.release("g1", "d1", nonce = "n1")
-    val st = s.lead()
+    val st = s.host()
     assertFalse("g1" in st.releasedGates)
     assertEquals(listOf("g1"), st.staleReleases.map { it.second })
   }
@@ -648,7 +648,7 @@ class AuthFoldTest {
     )
     val message =
       try {
-        s.lead()
+        s.host()
         throw AssertionError("expected LeadFoldException")
       } catch (expected: LeadFoldException) {
         expected.message.orEmpty()
@@ -674,7 +674,7 @@ class AuthFoldTest {
     )
     val message =
       try {
-        s.lead()
+        s.host()
         throw AssertionError("expected LeadFoldException")
       } catch (expected: LeadFoldException) {
         expected.message.orEmpty()
@@ -713,7 +713,7 @@ class AuthFoldTest {
       },
       ORIGIN_AUTH_LAYER,
     )
-    val st = s.leadWith(LeadAuth.DENY_ALL)
+    val st = s.hostWith(LeadAuth.DENY_ALL)
     assertFalse("g1" in st.releasedGates)
     assertEquals(listOf("g1"), st.staleReleases.map { it.second })
     assertTrue("g2" in st.releasedGates)
@@ -725,7 +725,7 @@ class AuthFoldTest {
     val s = open(newStoreDir())
     s.gateOpened("g1", "d1")
     s.nonceIssued("n1", "g1", "d1", origin = ORIGIN_COGNITION)
-    val st = s.lead()
+    val st = s.host()
     assertTrue(st.issuedNonces.isEmpty())
     // seq 1 is the chain's genesis entry; the appends here start at 2.
     assertEquals(listOf(3L to LeadKinds.NONCE_ISSUED), st.misOriginedEntries)
@@ -746,7 +746,7 @@ class AuthFoldTest {
     // A k-of-n quorum fills across restarts because accumulation is journal-derived.
     val second = open(dir)
     second.approvalFor("g1", "ops-a", "n1", "d1")
-    val st = second.lead()
+    val st = second.host()
     assertEquals(2, st.verifiedApprovals["g1"]!!.size)
 
     val gate = st.openGates["g1"]!!
@@ -775,7 +775,7 @@ class AuthFoldTest {
     s.approvalFor("g1", "council-a", "n1", "d1")
     s.gateOpened("g1", "d2") // re-opened on a new digest
     s.nonceIssued("n2", "g1", "d2")
-    val st = s.lead()
+    val st = s.host()
     val gate = st.openGates["g1"]!!
     // Present in the record, excluded from the bound set under the new digest and nonce.
     assertEquals(1, st.verifiedApprovals["g1"]!!.size)
@@ -788,7 +788,7 @@ class AuthFoldTest {
     s.gateOpened("g1", "d1")
     s.approval("g1", "operator", "n1", "d1", origin = ORIGIN_COGNITION)
     s.approval("g1", "operator", "n1", "d1", origin = ORIGIN_SUBSTRATE)
-    val st = s.lead()
+    val st = s.host()
     assertTrue(st.verifiedApprovals.isEmpty())
     // seq 1 is the chain's genesis entry; the appends here start at 2.
     assertEquals(
@@ -804,7 +804,7 @@ class AuthFoldTest {
     // state anyway) but the drift is flagged — verification and drift are orthogonal.
     val s = open(newStoreDir())
     s.approvalFor("ghost", "operator", "n9", "d1")
-    val st = s.lead()
+    val st = s.host()
     assertEquals(1, st.verifiedApprovals["ghost"]!!.size)
     assertTrue(st.escalations.any { "unknown gate" in it })
     assertTrue(st.escalations.any { "unminted nonce" in it })
@@ -823,9 +823,9 @@ class AuthFoldTest {
     // cleared. unverifiedApprovals is not populated here — it rides the same one-shot TICKET_DONE
     // reset. The nonce-less mark is cleared under DENY_ALL (a ceremony auth can never populate
     // it) in ticketDoneClearsTheNonceLessMark.
-    assertTrue("g1" in s.lead().releasedGates)
+    assertTrue("g1" in s.host().releasedGates)
     s.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
-    val st = s.lead()
+    val st = s.host()
     assertTrue(st.issuedNonces.isEmpty())
     assertTrue(st.consumedNonces.isEmpty())
     assertTrue(st.verifiedApprovals.isEmpty())
@@ -842,9 +842,9 @@ class AuthFoldTest {
     s.append(LeadKinds.TICKET_CLAIMED, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
     s.gateOpened("g1", "d1")
     s.release("g1", "d1") // pre-ceremony nonce-less honor → marked
-    assertTrue("g1" in s.leadWith(LeadAuth.DENY_ALL).nonceLessReleases)
+    assertTrue("g1" in s.hostWith(LeadAuth.DENY_ALL).nonceLessReleases)
     s.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", "t1") }, ORIGIN_SUBSTRATE)
-    assertTrue(s.leadWith(LeadAuth.DENY_ALL).nonceLessReleases.isEmpty())
+    assertTrue(s.hostWith(LeadAuth.DENY_ALL).nonceLessReleases.isEmpty())
   }
 
   // -- mechanical re-verification (2b) ------------------------------------------------------
@@ -866,7 +866,7 @@ class AuthFoldTest {
       ApprovalEvidence("test", pubKeyFor("operator"), "sig", "carrier", "g1", "d1", "n1", signedPreimage = null),
     )
     s.release("g1", "d1", nonce = "n1")
-    val st = s.lead()
+    val st = s.host()
     assertTrue(st.verifiedApprovals.isEmpty())
     assertTrue(st.unverifiedApprovals.any { "no signed preimage" in it.second })
     assertFalse("g1" in st.releasedGates)
@@ -900,7 +900,7 @@ class AuthFoldTest {
           "approval at seq=${approval.seq} has malformed evidence: " +
             "approval evidence 'publicKey' must be a JSON string"
       ),
-      s.lead().unverifiedApprovals,
+      s.host().unverifiedApprovals,
     )
   }
 
@@ -922,7 +922,7 @@ class AuthFoldTest {
       ApprovalEvidence("test", pubKeyFor("council-a"), "sig", "carrier", "g1", "d1", "n1", signedPreimage = preimage),
     )
     s.release("g1", "d1", nonce = "n1")
-    val st = s.lead()
+    val st = s.host()
     assertTrue(st.verifiedApprovals.isEmpty())
     assertTrue(st.unverifiedApprovals.any { "evidence publicKey disagrees" in it.second })
     assertFalse("g1" in st.releasedGates)
@@ -945,7 +945,7 @@ class AuthFoldTest {
       ApprovalEvidence("test", "pk-ghost", "sig", "carrier", "g1", "d1", "n1", signedPreimage = preimage),
     )
     s.release("g1", "d1", nonce = "n1")
-    val st = s.lead()
+    val st = s.host()
     assertTrue(st.verifiedApprovals.isEmpty())
     assertTrue(st.unverifiedApprovals.any { "not in the allow-list" in it.second })
     assertFalse("g1" in st.releasedGates)
@@ -967,7 +967,7 @@ class AuthFoldTest {
       ApprovalEvidence("test", pubKeyFor("operator"), "sig", "carrier", "g1", "d1", "n1", signedPreimage = "not-a-canonical-array"),
     )
     s.release("g1", "d1", nonce = "n1")
-    val st = s.lead()
+    val st = s.host()
     assertTrue(st.verifiedApprovals.isEmpty())
     assertTrue(st.unverifiedApprovals.any { "not a canonical committed approval" in it.second })
     assertFalse("g1" in st.releasedGates)
@@ -999,13 +999,13 @@ class AuthFoldTest {
     // Only one group represented: quorum unmet, the release folds stale (n1 not consumed).
     s.approvalFor("g1", "ops-a", "n1", "d1")
     s.release("g1", "d1", nonce = "n1")
-    assertFalse("g1" in s.leadWith(auth).releasedGates)
+    assertFalse("g1" in s.hostWith(auth).releasedGates)
 
     // A second, distinct approver from the other group meets the 2-of-2 root; a fresh release
     // over the same (still-unconsumed) nonce now honors.
     s.approvalFor("g1", "council-a", "n1", "d1")
     s.release("g1", "d1", nonce = "n1")
-    assertTrue("g1" in s.leadWith(auth).releasedGates)
+    assertTrue("g1" in s.hostWith(auth).releasedGates)
   }
 
   @Test
@@ -1024,8 +1024,8 @@ class AuthFoldTest {
     val granting = LeadAuth(allowListOf("council-a"), acceptingVerifier, oneOfOne("council-a"))
     val revoked = LeadAuth(allowListOf("ops-a"), acceptingVerifier, oneOfOne("council-a"))
 
-    assertTrue("g1" in s.leadWith(granting).releasedGates)
-    val refolded = s.leadWith(revoked)
+    assertTrue("g1" in s.hostWith(granting).releasedGates)
+    val refolded = s.hostWith(revoked)
     assertFalse("g1" in refolded.releasedGates)
     assertEquals(listOf("g1"), refolded.staleReleases.map { it.second })
   }
@@ -1053,7 +1053,7 @@ class AuthFoldTest {
       ApprovalEvidence("test", pk, "sha256:" + sha256Hex(preimage), "carrier", "g1", "d1", "n1", signedPreimage = preimage),
     )
     good.release("g1", "d1", nonce = "n1")
-    assertTrue("g1" in good.leadWith(auth).releasedGates)
+    assertTrue("g1" in good.hostWith(auth).releasedGates)
 
     val bad = open(newStoreDir())
     bad.gateOpened("g1", "d1")
@@ -1066,7 +1066,7 @@ class AuthFoldTest {
       ApprovalEvidence("test", pk, "sha256:" + sha256Hex("not the preimage"), "carrier", "g1", "d1", "n1", signedPreimage = preimage),
     )
     bad.release("g1", "d1", nonce = "n1")
-    val st = bad.leadWith(auth)
+    val st = bad.hostWith(auth)
     assertFalse("g1" in st.releasedGates)
     assertTrue(st.unverifiedApprovals.any { "does not verify" in it.second })
   }
@@ -1077,7 +1077,7 @@ class AuthFoldTest {
   // sha256 of exactly the bytes handed over), so a refusal can only come from the fold reading
   // no gate approval out of those bytes — never from a bad signature.
 
-  private fun foldOverValidlySigned(preimage: String): LeadState {
+  private fun foldOverValidlySigned(preimage: String): HostState {
     val shaVerifier =
       ApprovalVerifier { _, _, signature, bytes -> signature == "sha256:" + sha256Hex(bytes) }
     val auth = LeadAuth(allowListOf("operator"), shaVerifier, oneOfOne("operator"))
@@ -1101,7 +1101,7 @@ class AuthFoldTest {
       ),
     )
     s.release("g1", "d1", nonce = "n1")
-    return s.leadWith(auth)
+    return s.hostWith(auth)
   }
 
   @Test
@@ -1152,7 +1152,7 @@ class AuthFoldTest {
 
   /** Every list the cell scans, keyed by name; `null` where the list holds no seq. [reached]
    * reads the same map, so a list left out here also fails the case that targets it. */
-  private fun lists(st: LeadState): Map<String, List<Pair<Long?, String>>> =
+  private fun lists(st: HostState): Map<String, List<Pair<Long?, String>>> =
     mapOf(
       "escalations" to st.escalations.map { null to it },
       "unverifiedApprovals" to st.unverifiedApprovals,
@@ -1177,7 +1177,7 @@ class AuthFoldTest {
       ORIGIN_AUTH_LAYER,
     ).seq
 
-  private fun reached(st: LeadState, case: AnomalyCase, seq: Long): Boolean =
+  private fun reached(st: HostState, case: AnomalyCase, seq: Long): Boolean =
     lists(st)[case.target].orEmpty().any { (entrySeq, text) ->
       val atSeq = if (entrySeq == null) "seq=$seq " in text || text.endsWith("seq=$seq") else entrySeq == seq
       atSeq && (case.expect == null || case.expect in text)
@@ -1188,7 +1188,7 @@ class AuthFoldTest {
     // Every string field below carries its own marker. The fold's diagnostic lists may quote a
     // marker only when the text is one the lead vouches for:
     //  - an ESCALATED row's reason, stalledGateId, stalledDigest and declinedEffectDigest are
-    //    passthrough by design (LeadState.escalations "does not try to be stronger than the
+    //    passthrough by design (HostState.declinedEffects "does not try to be stronger than the
     //    journal"); only the reason reaches a list, and it is the positive control below.
     //  - a gate id inside a preimage whose signature re-verified against an allow-listed key.
     // A STATUS_WRITTEN status is passthrough too, but lands in statusTail, not a diagnostic list.
@@ -1366,7 +1366,7 @@ class AuthFoldTest {
     for (case in cases) {
       open(newStoreDir()).use { s ->
         val seq = case.build(s)
-        val st = s.leadWith(auth)
+        val st = s.hostWith(auth)
         if (case.target == "escalations" && case.branch.startsWith("escalation ")) {
           if (st.escalations.none { escReason in it }) failures += "${case.branch}: the passthrough reason was not found"
         } else if (!reached(st, case, seq)) {

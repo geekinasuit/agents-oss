@@ -82,16 +82,16 @@ class NonceMintTest {
     // Exactly one nonce, bound to the gate that opened AND the digest it opened on. Asserting
     // BOTH bindings against distinct recorded values (planGateId vs the plan-artifact sha) is
     // what makes this non-vacuous: a mint that wrote the wrong field, or an empty nonce, fails.
-    assertEquals("one nonce minted at gate-open under a ceremony auth", 1, f.lead.issuedNonces.size)
-    val nonce = f.lead.issuedNonces.values.single()
+    assertEquals("one nonce minted at gate-open under a ceremony auth", 1, f.host.issuedNonces.size)
+    val nonce = f.host.issuedNonces.values.single()
     assertEquals("nonce bound to the opened gate", planGateId, nonce.gateId)
     assertEquals("nonce bound to the gate's digest", digest, nonce.payloadDigest)
     assertTrue("the minted nonce is a non-blank value", nonce.nonce.isNotBlank())
 
     // The notifier's accessor resolves it: bound to the gate's CURRENT digest, unconsumed.
-    val open = f.lead.openGates[planGateId]
+    val open = f.host.openGates[planGateId]
     assertNotNull("the plan gate is open", open)
-    assertEquals("openNonceFor resolves the minted nonce", nonce, f.lead.openNonceFor(open!!))
+    assertEquals("openNonceFor resolves the minted nonce", nonce, f.host.openNonceFor(open!!))
     store.close()
   }
 
@@ -104,8 +104,8 @@ class NonceMintTest {
     val planGateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
     // Non-vacuous: the gate DID open, so "no nonce" is a real negative and not an empty
     // pipeline that never reached the mint site at all.
-    assertTrue("the plan gate opened", planGateId in f.lead.openGates)
-    assertTrue("DENY_ALL mints no nonce", f.lead.issuedNonces.isEmpty())
+    assertTrue("the plan gate opened", planGateId in f.host.openGates)
+    assertTrue("DENY_ALL mints no nonce", f.host.issuedNonces.isEmpty())
     store.close()
   }
 
@@ -114,43 +114,43 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val afterCrash = crashAfterGateOpened(dir, store, GateKinds.PLAN_APPROVAL)
-    assertTrue("the gate opened before the crash", PLAN_GATE in afterCrash.openGates)
-    assertTrue("the crash left the gate nonce-less", afterCrash.issuedNonces.isEmpty())
+    assertTrue("the gate opened before the crash", PLAN_GATE in afterCrash.host.openGates)
+    assertTrue("the crash left the gate nonce-less", afterCrash.host.issuedNonces.isEmpty())
 
     // A fresh process adopts the orphaned journal, and a nonce-less release is attempted. The
     // wake mints the orphan's nonce, bound to the digest the gate opened on, and announces it,
     // while the release fold still refuses the nonce-less release under a ceremony auth.
     val d2 = daemon(dir, store, ceremonyAuth())
-    d2.injectAuthRelease(PLAN_GATE, afterCrash.planArtifactSha!!)
+    d2.injectAuthRelease(PLAN_GATE, afterCrash.lead.planArtifactSha!!)
     val f = d2.driveUntilQuiescent()
-    val minted = planNonces(f.lead)
+    val minted = planNonces(f.host)
     assertEquals("the wake mints one nonce for the orphan", 1, minted.size)
-    assertEquals("bound to the gate's digest", afterCrash.planArtifactSha, minted[0].payloadDigest)
-    assertTrue("the minted nonce is announced", minted[0].nonce in f.lead.notifiedNonces)
-    assertTrue("the orphan the mint recovers is not escalated as stalled", stalls(f.lead, PLAN_GATE).isEmpty())
-    assertFalse("the gate is NOT released", PLAN_GATE in f.lead.releasedGates)
+    assertEquals("bound to the gate's digest", afterCrash.lead.planArtifactSha, minted[0].payloadDigest)
+    assertTrue("the minted nonce is announced", minted[0].nonce in f.host.notifiedNonces)
+    assertTrue("the orphan the mint recovers is not escalated as stalled", stalls(f.host, PLAN_GATE).isEmpty())
+    assertFalse("the gate is NOT released", PLAN_GATE in f.host.releasedGates)
     assertTrue(
       "the nonce-less release folded stale",
-      f.lead.staleReleases.any { it.second == PLAN_GATE },
+      f.host.staleReleases.any { it.second == PLAN_GATE },
     )
     // No sink is wired, so the announce was escalated too. That escalation must not silence the
     // playbook's escalation of the refused release: each is a different thing for a human to see.
     assertTrue(
       "the gate-open no sink announced is escalated",
-      f.lead.escalations.any { it.startsWith("gate-open notify had no sink") },
+      f.host.escalations.any { it.startsWith("gate-open notify had no sink") },
     )
     assertEquals(
       "the refused release is escalated once",
       1,
-      f.lead.escalations.count { it == "stale gate release observed (digest mismatch)" },
+      f.host.escalations.count { it == "stale gate release observed (digest mismatch)" },
     )
 
     val again = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertEquals("a second restart mints nothing more", minted, planNonces(again.lead))
+    assertEquals("a second restart mints nothing more", minted, planNonces(again.host))
     assertEquals(
       "a second restart does not escalate the refused release again",
       1,
-      again.lead.escalations.count { it == "stale gate release observed (digest mismatch)" },
+      again.host.escalations.count { it == "stale gate release observed (digest mismatch)" },
     )
     store.close()
   }
@@ -161,25 +161,25 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val planNonce = planNonces(f1.lead).single().nonce
+    val planNonce = planNonces(f1.host).single().nonce
     store.approveAndRelease(PLAN_GATE, f1.lead.planArtifactSha!!, planNonce)
     val afterCrash = crashAfterGateOpened(dir, store, GateKinds.COMMIT_APPROVAL)
-    assertTrue("the commit gate opened before the crash", COMMIT_GATE in afterCrash.openGates)
+    assertTrue("the commit gate opened before the crash", COMMIT_GATE in afterCrash.host.openGates)
     assertTrue(
       "the crash left the commit gate nonce-less",
-      afterCrash.issuedNonces.values.none { it.gateId == COMMIT_GATE },
+      afterCrash.host.issuedNonces.values.none { it.gateId == COMMIT_GATE },
     )
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val minted = f.lead.issuedNonces.values.filter { it.gateId == COMMIT_GATE }
+    val minted = f.host.issuedNonces.values.filter { it.gateId == COMMIT_GATE }
     assertEquals("the wake mints one nonce for the commit gate", 1, minted.size)
     assertEquals(
       "bound to the commit manifest's digest",
-      afterCrash.commitManifestDigest,
+      afterCrash.lead.commitManifestDigest,
       minted[0].payloadDigest,
     )
-    assertTrue("the minted nonce is announced", minted[0].nonce in f.lead.notifiedNonces)
-    assertTrue("the orphan the mint recovers is not escalated as stalled", stalls(f.lead, COMMIT_GATE).isEmpty())
+    assertTrue("the minted nonce is announced", minted[0].nonce in f.host.notifiedNonces)
+    assertTrue("the orphan the mint recovers is not escalated as stalled", stalls(f.host, COMMIT_GATE).isEmpty())
     store.close()
   }
 
@@ -189,7 +189,7 @@ class NonceMintTest {
     // same digest would re-authorize the payload the void withdrew.
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
-    val issued = planNonces(daemon(dir, store, ceremonyAuth()).driveUntilQuiescent().lead)
+    val issued = planNonces(daemon(dir, store, ceremonyAuth()).driveUntilQuiescent().host)
     assertEquals("the gate-open minted one nonce", 1, issued.size)
     store.append(
       LeadKinds.NONCE_CONSUMED,
@@ -201,8 +201,8 @@ class NonceMintTest {
     )
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertTrue("the void holds", issued[0].nonce in f.lead.consumedNonces)
-    assertEquals("no nonce is minted in its place", issued, planNonces(f.lead))
+    assertTrue("the void holds", issued[0].nonce in f.host.consumedNonces)
+    assertEquals("no nonce is minted in its place", issued, planNonces(f.host))
     store.close()
   }
 
@@ -213,13 +213,13 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val issued = planNonces(f1.lead)
+    val issued = planNonces(f1.host)
     assertEquals("the gate-open minted one nonce", 1, issued.size)
     store.approveAndRelease(PLAN_GATE, f1.lead.planArtifactSha!!, issued[0].nonce)
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertTrue("the plan gate is released", f.lead.approvedOnCurrentDigest(PLAN_GATE))
-    assertEquals("no nonce is minted for the released gate", issued, planNonces(f.lead))
+    assertTrue("the plan gate is released", f.host.approvedOnCurrentDigest(PLAN_GATE))
+    assertEquals("no nonce is minted for the released gate", issued, planNonces(f.host))
     store.close()
   }
 
@@ -231,8 +231,8 @@ class NonceMintTest {
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     daemon(dir, store, LeadAuth.DENY_ALL).driveUntilQuiescent()
     val f = daemon(dir, store, LeadAuth.DENY_ALL).driveUntilQuiescent()
-    assertTrue("the plan gate is open", PLAN_GATE in f.lead.openGates)
-    assertTrue("a restart under DENY_ALL mints nothing", f.lead.issuedNonces.isEmpty())
+    assertTrue("the plan gate is open", PLAN_GATE in f.host.openGates)
+    assertTrue("a restart under DENY_ALL mints nothing", f.host.issuedNonces.isEmpty())
     store.close()
   }
 
@@ -243,16 +243,16 @@ class NonceMintTest {
     // the gate gets one nonce, bound to its digest, and the nonce is announced.
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
-    val pre = daemon(dir, store, LeadAuth.DENY_ALL).driveUntilQuiescent().lead
-    assertTrue("the plan gate opened under DENY_ALL", PLAN_GATE in pre.openGates)
-    assertTrue("DENY_ALL minted nothing", pre.issuedNonces.isEmpty())
+    val pre = daemon(dir, store, LeadAuth.DENY_ALL).driveUntilQuiescent()
+    assertTrue("the plan gate opened under DENY_ALL", PLAN_GATE in pre.host.openGates)
+    assertTrue("DENY_ALL minted nothing", pre.host.issuedNonces.isEmpty())
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val minted = planNonces(f.lead)
+    val minted = planNonces(f.host)
     assertEquals("the ceremony restart mints one nonce", 1, minted.size)
-    assertEquals("bound to the gate's digest", pre.planArtifactSha, minted[0].payloadDigest)
-    assertTrue("the minted nonce is announced", minted[0].nonce in f.lead.notifiedNonces)
-    assertTrue("the gate the mint recovers is not escalated as stalled", stalls(f.lead, PLAN_GATE).isEmpty())
+    assertEquals("bound to the gate's digest", pre.lead.planArtifactSha, minted[0].payloadDigest)
+    assertTrue("the minted nonce is announced", minted[0].nonce in f.host.notifiedNonces)
+    assertTrue("the gate the mint recovers is not escalated as stalled", stalls(f.host, PLAN_GATE).isEmpty())
     store.close()
   }
 
@@ -264,15 +264,15 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val afterCrash = crashAfterGateOpened(dir, store, GateKinds.PLAN_APPROVAL)
-    store.planArtifactRecorded(afterCrash.planArtifactPath!!, OTHER_DIGEST)
+    store.planArtifactRecorded(afterCrash.lead.planArtifactPath!!, OTHER_DIGEST)
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
     assertEquals(
       "the gate is still open on the digest it opened on",
-      afterCrash.planArtifactSha,
-      f.lead.openGates[PLAN_GATE]?.payloadDigest,
+      afterCrash.lead.planArtifactSha,
+      f.host.openGates[PLAN_GATE]?.payloadDigest,
     )
-    assertTrue("no nonce is minted for a superseded digest", f.lead.issuedNonces.isEmpty())
+    assertTrue("no nonce is minted for a superseded digest", f.host.issuedNonces.isEmpty())
     store.close()
   }
 
@@ -284,7 +284,7 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val first = planNonces(f1.lead)
+    val first = planNonces(f1.host)
     assertEquals("the gate-open minted one nonce", 1, first.size)
     store.planArtifactRecorded(f1.lead.planArtifactPath!!, OTHER_DIGEST)
     store.append(
@@ -298,14 +298,14 @@ class NonceMintTest {
     )
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val nonces = planNonces(f.lead)
+    val nonces = planNonces(f.host)
     assertEquals("the first open's nonce, then one for the new digest", 2, nonces.size)
     assertEquals("the first is unchanged", first[0], nonces[0])
     assertEquals("the second is bound to the new digest", OTHER_DIGEST, nonces[1].payloadDigest)
     assertEquals(
       "and it is the gate's usable nonce",
       nonces[1],
-      f.lead.openNonceFor(f.lead.openGates.getValue(PLAN_GATE)),
+      f.host.openNonceFor(f.host.openGates.getValue(PLAN_GATE)),
     )
     store.close()
   }
@@ -317,7 +317,7 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val first = planNonces(f1.lead)
+    val first = planNonces(f1.host)
     assertEquals("the gate-open minted one nonce", 1, first.size)
     store.planArtifactRecorded(f1.lead.planArtifactPath!!, "")
     store.append(
@@ -331,15 +331,15 @@ class NonceMintTest {
     )
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertEquals("the gate is open on the blank digest", "", f.lead.openGates[PLAN_GATE]?.payloadDigest)
-    assertEquals("no nonce is minted for it", first, planNonces(f.lead))
-    val escalated = stalls(f.lead, PLAN_GATE)
+    assertEquals("the gate is open on the blank digest", "", f.host.openGates[PLAN_GATE]?.payloadDigest)
+    assertEquals("no nonce is minted for it", first, planNonces(f.host))
+    val escalated = stalls(f.host, PLAN_GATE)
     assertEquals("the gate on the blank digest is escalated as stalled once", 1, escalated.size)
     assertTrue(
       "the escalation says the recorded evidence is not in the substrate's form",
       escalated[0].contains("because $MALFORMED_EVIDENCE — "),
     )
-    assertEquals("the journal still folds", first, planNonces(leadFold(store.readAll(), ceremonyAuth())))
+    assertEquals("the journal still folds", first, planNonces(leadHostFold(store.readAll(), ceremonyAuth())))
     store.close()
   }
 
@@ -351,16 +351,16 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val beforeGateOpen = crashAfterPlanRecorded(dir, store)
-    store.planArtifactRecorded(beforeGateOpen.planArtifactPath!!, "")
+    store.planArtifactRecorded(beforeGateOpen.lead.planArtifactPath!!, "")
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertFalse("the plan gate stays closed", PLAN_GATE in f.lead.openGates)
-    assertTrue("no nonce is minted", f.lead.issuedNonces.isEmpty())
+    assertFalse("the plan gate stays closed", PLAN_GATE in f.host.openGates)
+    assertTrue("no nonce is minted", f.host.issuedNonces.isEmpty())
     assertTrue(
       "the gate-open is rejected with an escalation",
-      f.lead.escalations.any { it.startsWith("gate-open rejected for $PLAN_GATE") },
+      f.host.escalations.any { it.startsWith("gate-open rejected for $PLAN_GATE") },
     )
-    assertTrue("the journal still folds", leadFold(store.readAll(), ceremonyAuth()).issuedNonces.isEmpty())
+    assertTrue("the journal still folds", leadHostFold(store.readAll(), ceremonyAuth()).issuedNonces.isEmpty())
     store.close()
   }
 
@@ -371,7 +371,7 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val first = planNonces(f1.lead)
+    val first = planNonces(f1.host)
     assertEquals("the gate-open minted one nonce", 1, first.size)
     store.append(
       LeadKinds.GATE_OPENED,
@@ -384,12 +384,12 @@ class NonceMintTest {
     )
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertTrue("the fold opened a gate under the blank id", "" in f.lead.openGates)
-    assertEquals("no nonce is minted for it", first, f.lead.issuedNonces.values.toList())
+    assertTrue("the fold opened a gate under the blank id", "" in f.host.openGates)
+    assertEquals("no nonce is minted for it", first, f.host.issuedNonces.values.toList())
     assertEquals(
       "the journal still folds",
       first,
-      leadFold(store.readAll(), ceremonyAuth()).issuedNonces.values.toList(),
+      leadHostFold(store.readAll(), ceremonyAuth()).issuedNonces.values.toList(),
     )
     store.close()
   }
@@ -402,7 +402,7 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val first = f1.lead.issuedNonces.values.toList()
+    val first = f1.host.issuedNonces.values.toList()
     assertEquals("the gate-open minted one nonce", 1, first.size)
     val otherGate = gateIdFor(GateKinds.PLAN_APPROVAL, "t2")
     store.append(
@@ -417,8 +417,8 @@ class NonceMintTest {
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
     assertEquals("the current ticket is still t1", "t1", f.lead.currentTicket)
-    assertTrue("the fold opened the other ticket's gate", otherGate in f.lead.openGates)
-    assertEquals("no nonce is minted for it", first, f.lead.issuedNonces.values.toList())
+    assertTrue("the fold opened the other ticket's gate", otherGate in f.host.openGates)
+    assertEquals("no nonce is minted for it", first, f.host.issuedNonces.values.toList())
     store.close()
   }
 
@@ -430,7 +430,7 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val first = planNonces(f1.lead)
+    val first = planNonces(f1.host)
     assertEquals("the gate-open minted one nonce", 1, first.size)
     store.append(
       LeadKinds.PLAN_ARTIFACT_RECORDED,
@@ -454,10 +454,10 @@ class NonceMintTest {
     assertEquals(
       "the gate is open on the digest with its surrogate",
       "ab$LONE_SURROGATE",
-      f.lead.openGates[PLAN_GATE]?.payloadDigest,
+      f.host.openGates[PLAN_GATE]?.payloadDigest,
     )
-    assertEquals("no nonce is minted for it", first, planNonces(f.lead))
-    val escalated = stalls(f.lead, PLAN_GATE)
+    assertEquals("no nonce is minted for it", first, planNonces(f.host))
+    val escalated = stalls(f.host, PLAN_GATE)
     assertEquals("the gate on that digest is escalated as stalled once", 1, escalated.size)
     assertTrue(
       "the escalation says the recorded evidence is not in the substrate's form",
@@ -536,7 +536,7 @@ class NonceMintTest {
     assertEquals("a marker for the walk's own nonce, then one for this one", 2, markers.size)
     assertTrue(
       "its marker reads back as written",
-      nonce in leadFold(store.readAll(), ceremonyAuth()).notifiedNonces,
+      nonce in leadHostFold(store.readAll(), ceremonyAuth()).notifiedNonces,
     )
     store.close()
   }
@@ -552,7 +552,7 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val planNonce = planNonces(f1.lead).single().nonce
+    val planNonce = planNonces(f1.host).single().nonce
     store.gateOpened(COMMIT_GATE, GateKinds.COMMIT_APPROVAL, OTHER_DIGEST)
     store.approveAndRelease(PLAN_GATE, f1.lead.planArtifactSha!!, planNonce)
 
@@ -562,15 +562,15 @@ class NonceMintTest {
     assertEquals(
       "the commit gate is still open on the other digest",
       OTHER_DIGEST,
-      f.lead.openGates[COMMIT_GATE]?.payloadDigest,
+      f.host.openGates[COMMIT_GATE]?.payloadDigest,
     )
     assertEquals(
       "the lead opened no commit gate of its own",
       1,
       store.readAll().count { it.kind == LeadKinds.GATE_OPENED && it.payloadJson.contains("\"$COMMIT_GATE\"") },
     )
-    assertTrue("the commit gate has no nonce", f.lead.issuedNonces.values.none { it.gateId == COMMIT_GATE })
-    val escalated = stalls(f.lead, COMMIT_GATE)
+    assertTrue("the commit gate has no nonce", f.host.issuedNonces.values.none { it.gateId == COMMIT_GATE })
+    val escalated = stalls(f.host, COMMIT_GATE)
     assertEquals("the stalled commit gate is escalated once", 1, escalated.size)
     assertTrue(
       "the escalation names the manifest the gate's digest does not match",
@@ -584,7 +584,7 @@ class NonceMintTest {
     assertFalse("t1 is not done", "t1" in f.lead.doneTickets)
 
     val again = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertEquals("a restart escalates it no more", 1, stalls(again.lead, COMMIT_GATE).size)
+    assertEquals("a restart escalates it no more", 1, stalls(again.host, COMMIT_GATE).size)
     store.close()
   }
 
@@ -599,7 +599,7 @@ class NonceMintTest {
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
     store.gateOpened(COMMIT_GATE, GateKinds.COMMIT_APPROVAL, manifest)
-    store.approveAndRelease(PLAN_GATE, f1.lead.planArtifactSha!!, planNonces(f1.lead).single().nonce)
+    store.approveAndRelease(PLAN_GATE, f1.lead.planArtifactSha!!, planNonces(f1.host).single().nonce)
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
     assertEquals("this journal's manifest is the one the gate was opened on", manifest, f.lead.commitManifestDigest)
@@ -608,20 +608,20 @@ class NonceMintTest {
       1,
       store.readAll().count { it.kind == LeadKinds.GATE_OPENED && it.payloadJson.contains("\"$COMMIT_GATE\"") },
     )
-    assertNotNull("the commit gate has a usable nonce", f.lead.openNonceFor(f.lead.openGates.getValue(COMMIT_GATE)))
-    assertTrue("the gate is not escalated as stalled", stalls(f.lead, COMMIT_GATE).isEmpty())
+    assertNotNull("the commit gate has a usable nonce", f.host.openNonceFor(f.host.openGates.getValue(COMMIT_GATE)))
+    assertTrue("the gate is not escalated as stalled", stalls(f.host, COMMIT_GATE).isEmpty())
 
-    val commitNonce = f.lead.issuedNonces.values.single { it.gateId == COMMIT_GATE }.nonce
+    val commitNonce = f.host.issuedNonces.values.single { it.gateId == COMMIT_GATE }.nonce
     store.approveAndRelease(COMMIT_GATE, manifest, commitNonce)
     val done = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
     assertTrue("a release cleared the gate and t1 is done", "t1" in done.lead.doneTickets)
     assertTrue(
       "no gate was escalated as stalled",
-      done.lead.escalations.none { it.startsWith("gate-open stalled") },
+      done.host.escalations.none { it.startsWith("gate-open stalled") },
     )
     assertTrue(
       "nor as released off its evidence: each release was on the evidence for its kind",
-      done.lead.escalations.none { it.startsWith("gate released off its evidence") },
+      done.host.escalations.none { it.startsWith("gate released off its evidence") },
     )
     store.close()
   }
@@ -634,11 +634,11 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val afterCrash = crashAfterGateOpened(dir, store, GateKinds.PLAN_APPROVAL)
-    store.planArtifactRecorded(afterCrash.planArtifactPath!!, OTHER_DIGEST)
+    store.planArtifactRecorded(afterCrash.lead.planArtifactPath!!, OTHER_DIGEST)
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertTrue("no nonce is minted", f.lead.issuedNonces.isEmpty())
-    val escalated = stalls(f.lead, PLAN_GATE)
+    assertTrue("no nonce is minted", f.host.issuedNonces.isEmpty())
+    val escalated = stalls(f.host, PLAN_GATE)
     assertEquals("the stalled plan gate is escalated once", 1, escalated.size)
     assertTrue(
       "the escalation gives the gate's digest by its length and names the evidence it does not match",
@@ -646,11 +646,11 @@ class NonceMintTest {
     )
     assertFalse(
       "the escalation quotes no part of the gate's digest",
-      escalated[0].contains(afterCrash.planArtifactSha!!.take(8)),
+      escalated[0].contains(afterCrash.lead.planArtifactSha!!.take(8)),
     )
 
     val again = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertEquals("a restart escalates it no more", 1, stalls(again.lead, PLAN_GATE).size)
+    assertEquals("a restart escalates it no more", 1, stalls(again.host, PLAN_GATE).size)
     store.close()
   }
 
@@ -660,7 +660,7 @@ class NonceMintTest {
     // none a release can name. It is escalated once, across restarts.
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
-    val issued = planNonces(daemon(dir, store, ceremonyAuth()).driveUntilQuiescent().lead).single()
+    val issued = planNonces(daemon(dir, store, ceremonyAuth()).driveUntilQuiescent().host).single()
     store.append(
       LeadKinds.NONCE_CONSUMED,
       buildJsonObject {
@@ -671,7 +671,7 @@ class NonceMintTest {
     )
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    val escalated = stalls(f.lead, PLAN_GATE)
+    val escalated = stalls(f.host, PLAN_GATE)
     assertEquals("the gate is escalated once", 1, escalated.size)
     assertTrue(
       "the escalation names the nonce its digest already had",
@@ -679,7 +679,7 @@ class NonceMintTest {
     )
 
     val again = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertEquals("a restart escalates it no more", 1, stalls(again.lead, PLAN_GATE).size)
+    assertEquals("a restart escalates it no more", 1, stalls(again.host, PLAN_GATE).size)
     store.close()
   }
 
@@ -690,15 +690,15 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val afterCrash = crashAfterGateOpened(dir, store, GateKinds.PLAN_APPROVAL)
-    store.planArtifactRecorded(afterCrash.planArtifactPath!!, OTHER_DIGEST)
+    store.planArtifactRecorded(afterCrash.lead.planArtifactPath!!, OTHER_DIGEST)
     val first = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertEquals("the first digest is escalated once", 1, stalls(first.lead, PLAN_GATE).size)
+    assertEquals("the first digest is escalated once", 1, stalls(first.host, PLAN_GATE).size)
     store.gateOpened(PLAN_GATE, GateKinds.PLAN_APPROVAL, THIRD_DIGEST)
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertEquals("the second digest is escalated once more", 2, stalls(f.lead, PLAN_GATE).size)
+    assertEquals("the second digest is escalated once more", 2, stalls(f.host, PLAN_GATE).size)
     val again = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertEquals("a restart escalates neither again", 2, stalls(again.lead, PLAN_GATE).size)
+    assertEquals("a restart escalates neither again", 2, stalls(again.host, PLAN_GATE).size)
     store.close()
   }
 
@@ -714,21 +714,21 @@ class NonceMintTest {
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
     assertNotNull(
       "the plan gate has a usable nonce",
-      f1.lead.openNonceFor(f1.lead.openGates.getValue(PLAN_GATE)),
+      f1.host.openNonceFor(f1.host.openGates.getValue(PLAN_GATE)),
     )
-    assertTrue("it is not escalated as stalled", stalls(f1.lead, PLAN_GATE).isEmpty())
-    store.approveAndRelease(PLAN_GATE, f1.lead.planArtifactSha!!, planNonces(f1.lead).single().nonce)
+    assertTrue("it is not escalated as stalled", stalls(f1.host, PLAN_GATE).isEmpty())
+    store.approveAndRelease(PLAN_GATE, f1.lead.planArtifactSha!!, planNonces(f1.host).single().nonce)
 
     daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertTrue("the plan gate is released", f.lead.approvedOnCurrentDigest(PLAN_GATE))
+    assertTrue("the plan gate is released", f.host.approvedOnCurrentDigest(PLAN_GATE))
     assertNotNull(
       "the commit gate has a usable nonce",
-      f.lead.openNonceFor(f.lead.openGates.getValue(COMMIT_GATE)),
+      f.host.openNonceFor(f.host.openGates.getValue(COMMIT_GATE)),
     )
     assertTrue(
       "no gate is escalated as stalled",
-      f.lead.escalations.none { it.startsWith("gate-open stalled") },
+      f.host.escalations.none { it.startsWith("gate-open stalled") },
     )
     store.close()
   }
@@ -746,11 +746,11 @@ class NonceMintTest {
     assertEquals(
       "the plan gate is open on a digest that is not the evidence",
       f1.lead.planArtifactSha,
-      f.lead.openGates[PLAN_GATE]?.payloadDigest,
+      f.host.openGates[PLAN_GATE]?.payloadDigest,
     )
     assertTrue(
       "no gate is escalated as stalled",
-      f.lead.escalations.none { it.startsWith("gate-open stalled") },
+      f.host.escalations.none { it.startsWith("gate-open stalled") },
     )
     store.close()
   }
@@ -771,15 +771,15 @@ class NonceMintTest {
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
     assertTrue(
       "both gates are open",
-      otherTicketsGate in f.lead.openGates && unknownKindsGate in f.lead.openGates,
+      otherTicketsGate in f.host.openGates && unknownKindsGate in f.host.openGates,
     )
     assertTrue(
       "neither gets a nonce",
-      f.lead.issuedNonces.values.none { it.gateId == otherTicketsGate || it.gateId == unknownKindsGate },
+      f.host.issuedNonces.values.none { it.gateId == otherTicketsGate || it.gateId == unknownKindsGate },
     )
     assertTrue(
       "no gate is escalated as stalled",
-      f.lead.escalations.none { it.startsWith("gate-open stalled") },
+      f.host.escalations.none { it.startsWith("gate-open stalled") },
     )
     store.close()
   }
@@ -803,21 +803,21 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val beforeGateOpen = crashAfterPlanRecorded(dir, store)
-    store.gateOpened(PLAN_GATE, gateKind, beforeGateOpen.planArtifactSha!!)
+    store.gateOpened(PLAN_GATE, gateKind, beforeGateOpen.lead.planArtifactSha!!)
 
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
     assertEquals(
       "the gate under the plan gate's id records the other kind",
       gateKind,
-      f.lead.openGates[PLAN_GATE]?.gateKind,
+      f.host.openGates[PLAN_GATE]?.gateKind,
     )
     assertEquals(
       "the lead opened no plan gate of its own",
       1,
       store.readAll().count { it.kind == LeadKinds.GATE_OPENED },
     )
-    assertTrue("no nonce is minted", f.lead.issuedNonces.isEmpty())
-    val escalated = stalls(f.lead, PLAN_GATE)
+    assertTrue("no nonce is minted", f.host.issuedNonces.isEmpty())
+    val escalated = stalls(f.host, PLAN_GATE)
     assertEquals("the gate is escalated once", 1, escalated.size)
     assertTrue(
       "the escalation gives the recorded kind by its length",
@@ -826,7 +826,7 @@ class NonceMintTest {
     assertFalse("the escalation does not quote the recorded kind", escalated[0].contains(gateKind))
 
     val again = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    assertEquals("a restart escalates it no more", 1, stalls(again.lead, PLAN_GATE).size)
+    assertEquals("a restart escalates it no more", 1, stalls(again.host, PLAN_GATE).size)
     store.close()
   }
 
@@ -853,11 +853,11 @@ class NonceMintTest {
     val f = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
     assertTrue(
       "the announce is escalated as unresolved",
-      f.lead.escalations.any {
+      f.host.escalations.any {
         it.startsWith("gate-open notify unresolved for $PLAN_GATE") && it.contains("digest-mismatch")
       },
     )
-    assertTrue("the gate is not escalated as stalled", stalls(f.lead, PLAN_GATE).isEmpty())
+    assertTrue("the gate is not escalated as stalled", stalls(f.host, PLAN_GATE).isEmpty())
     store.close()
   }
 
@@ -865,7 +865,7 @@ class NonceMintTest {
    * Runs a ceremony daemon until an injected crash lands between a [gateKind] gate's GATE_OPENED
    * and its NONCE_ISSUED, two sequential appends, and returns the state the journal folds to then.
    */
-  private fun crashAfterGateOpened(dir: File, store: SqliteStore, gateKind: String): LeadState {
+  private fun crashAfterGateOpened(dir: File, store: SqliteStore, gateKind: String): AgentHost.Folded<LeadState> {
     val crash =
       FaultInjector {
         if (it == "after-gate-opened-$gateKind") {
@@ -880,14 +880,14 @@ class NonceMintTest {
       threw = true
     }
     assertTrue("the injected crash fired at the post-gate-open seam", threw)
-    return d1.refold().lead
+    return d1.refold()
   }
 
   /**
    * Runs a ceremony daemon until an injected crash lands right after the plan is recorded, before
    * the plan gate opens, and returns the state the journal folds to then.
    */
-  private fun crashAfterPlanRecorded(dir: File, store: SqliteStore): LeadState {
+  private fun crashAfterPlanRecorded(dir: File, store: SqliteStore): AgentHost.Folded<LeadState> {
     val crash =
       FaultInjector {
         if (it == "after-plan-recorded") throw RuntimeException("crash after the plan is recorded")
@@ -900,8 +900,8 @@ class NonceMintTest {
       threw = true
     }
     assertTrue("the injected crash fired after the plan was recorded", threw)
-    val beforeGateOpen = d1.refold().lead
-    assertFalse("the plan gate has not opened", PLAN_GATE in beforeGateOpen.openGates)
+    val beforeGateOpen = d1.refold()
+    assertFalse("the plan gate has not opened", PLAN_GATE in beforeGateOpen.host.openGates)
     return beforeGateOpen
   }
 
@@ -911,19 +911,19 @@ class NonceMintTest {
     val dir = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
     val f1 = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
-    store.approveAndRelease(PLAN_GATE, f1.lead.planArtifactSha!!, planNonces(f1.lead).single().nonce)
+    store.approveAndRelease(PLAN_GATE, f1.lead.planArtifactSha!!, planNonces(f1.host).single().nonce)
     val manifest = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent().lead.commitManifestDigest
     store.close()
     return checkNotNull(manifest) { "the honest walk recorded no manifest" }
   }
 
   /** The nonces issued for the plan gate, in issue order. */
-  private fun planNonces(lead: LeadState): List<IssuedNonce> =
-    lead.issuedNonces.values.filter { it.gateId == PLAN_GATE }.sortedBy { it.issuedSeq }
+  private fun planNonces(host: HostState): List<IssuedNonce> =
+    host.issuedNonces.values.filter { it.gateId == PLAN_GATE }.sortedBy { it.issuedSeq }
 
   /** The escalations that report [gateId] as stalled: open with no nonce a release can name. */
-  private fun stalls(lead: LeadState, gateId: String): List<String> =
-    lead.escalations.filter { it.startsWith("gate-open stalled for $gateId:") }
+  private fun stalls(host: HostState, gateId: String): List<String> =
+    host.escalations.filter { it.startsWith("gate-open stalled for $gateId:") }
 
   private fun SqliteStore.gateOpened(gateId: String, gateKind: String, digest: String) =
     append(

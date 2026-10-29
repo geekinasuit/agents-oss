@@ -210,7 +210,7 @@ class OpenAiCompatCognitionTest {
     assertTrue(cog.all { it.origin == ORIGIN_COGNITION })
     assertFalse("this strategy reports no cost", cog.any { it.payloadJson.contains("costUsd") })
     assertTrue("token provenance must survive into the row", cog.any { it.payloadJson.contains("completionTokens") })
-    assertEquals(0.0, folded.lead.cognitionSpendUsd, 0.0)
+    assertEquals(0.0, folded.host.cognitionSpendUsd, 0.0)
     store.close()
   }
 

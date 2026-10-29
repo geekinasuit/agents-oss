@@ -100,9 +100,9 @@ class KindPartitionTest {
         hash = "",
         sig = null,
       )
-    val lead = foldLeadJournal(listOf(turn), LeadAuth.DENY_ALL, FakeFold(kinds = lying))
-    assertEquals("the turn is not rejected", emptyList<Pair<Long, String>>(), lead.misOriginedEntries)
-    assertEquals("the turn's spend is folded", 0.5, lead.cognitionSpendUsd, 0.0)
+    val host = foldHostAndLead(listOf(turn), LeadAuth.DENY_ALL, FakeFold(kinds = lying)).first
+    assertEquals("the turn is not rejected", emptyList<Pair<Long, String>>(), host.misOriginedEntries)
+    assertEquals("the turn's spend is folded", 0.5, host.cognitionSpendUsd, 0.0)
   }
 
   @Test
@@ -135,11 +135,12 @@ class KindPartitionTest {
         hash = "",
         sig = null,
       )
-    val lead = foldLeadJournal(listOf(turn), LeadAuth.DENY_ALL, FakeFold(kinds = setOf("w-done"), scopeEnds = lying))
-    assertEquals("the turn's spend is folded, not cleared as a scope end", 0.5, lead.cognitionSpendUsd, 0.0)
+    val fold = FakeFold(kinds = setOf("w-done"), scopeEnds = lying)
+    val host = foldHostAndLead(listOf(turn), LeadAuth.DENY_ALL, fold).first
+    assertEquals("the turn's spend is folded, not cleared as a scope end", 0.5, host.cognitionSpendUsd, 0.0)
   }
 
-  private class FakeFold(kinds: Set<String>, scopeEnds: Set<String> = emptySet()) : WorkflowFold<LeadState, Unit> {
+  private class FakeFold(kinds: Set<String>, scopeEnds: Set<String> = emptySet()) : WorkflowFold<Unit, Unit> {
     override val substrateKinds = kinds
     override val scopeEndKinds = scopeEnds
     override val start = Unit
@@ -148,7 +149,6 @@ class KindPartitionTest {
 
     override fun step(w: Unit, e: JournalEntry, outcome: HostOutcome) = Unit
 
-    override fun assemble(host: HostState, w: Unit) =
-      LeadState(misOriginedEntries = host.misOriginedEntries, cognitionSpendUsd = host.cognitionSpendUsd)
+    override fun assemble(host: HostState, w: Unit) = Unit
   }
 }

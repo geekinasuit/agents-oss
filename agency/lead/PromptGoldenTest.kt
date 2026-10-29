@@ -163,24 +163,23 @@ class PromptGoldenTest {
     val manifest = "b".repeat(64)
     val planGate = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
     val commitGate = gateIdFor(GateKinds.COMMIT_APPROVAL, "t1")
-    val gated =
-      LeadState(
-        currentTicket = "t1",
-        phase = TicketPhase.PLAN_GATED,
-        planArtifactSha = plan,
+    val gated = LeadState(currentTicket = "t1", phase = TicketPhase.PLAN_GATED, planArtifactSha = plan)
+    // The host's records beside [gated], as a fold would hold them.
+    val gatedHost =
+      HostState(
         openGates = mapOf(planGate to OpenGate(planGate, GateKinds.PLAN_APPROVAL, plan, 9)),
         staleReleases = listOf(11L to planGate),
         escalations = listOf("an escalation"),
       )
-    // The host's records for [gated], as a fold would hold them beside it.
-    val gatedHost =
-      HostState(openGates = gated.openGates, staleReleases = gated.staleReleases, escalations = gated.escalations)
     val approved =
       LeadState(
         currentTicket = "t1",
         phase = TicketPhase.COMMIT_APPROVED,
         planArtifactSha = plan,
         commitManifestDigest = manifest,
+      )
+    val approvedHost =
+      HostState(
         openGates =
           mapOf(
             planGate to OpenGate(planGate, GateKinds.PLAN_APPROVAL, plan, 9),
@@ -200,7 +199,7 @@ class PromptGoldenTest {
       AgentWakeContext(
         WakeReason.Adopted,
         approved,
-        HostState(openGates = approved.openGates, releasedDigests = approved.releasedDigests),
+        approvedHost,
         JournalState(),
         emptyList(),
       )
@@ -242,7 +241,7 @@ class PromptGoldenTest {
         ) = (if (taskRef.startsWith("execute:")) held else now).spawn(spec, taskRef, workdir, artifactPath, onComplete)
       }
     val daemon = daemon(dir, store, cognition, ceremony = false, runner = runner)
-    val gate = daemon.driveUntilQuiescent().lead.pendingGates.single()
+    val gate = daemon.driveUntilQuiescent().host.pendingGates.single()
     AuthStub.appendRelease(store, gate.gateId, gate.payloadDigest)
     daemon.injectMail("while the executor runs")
     daemon.driveUntilQuiescent()
@@ -260,15 +259,15 @@ class PromptGoldenTest {
     val cognition = Recording()
     val daemon = daemon(dir, store, cognition, ceremony)
     repeat(MAX_DRIVES) {
-      val lead = daemon.driveUntilQuiescent().lead
-      if ("t1" in lead.doneTickets) {
+      val folded = daemon.driveUntilQuiescent()
+      if ("t1" in folded.lead.doneTickets) {
         store.close()
         return cognition.contexts to dir
       }
-      val gate = lead.pendingGates.firstOrNull() ?: return@repeat
+      val gate = folded.host.pendingGates.firstOrNull() ?: return@repeat
       daemon.injectMail("waiting on ${gate.gateId}")
       daemon.driveUntilQuiescent()
-      if (ceremony) store.approveAndRelease(lead.openNonceFor(gate) ?: error("no open nonce for ${gate.gateId}"))
+      if (ceremony) store.approveAndRelease(folded.host.openNonceFor(gate) ?: error("no open nonce for ${gate.gateId}"))
       else AuthStub.appendRelease(store, gate.gateId, gate.payloadDigest)
     }
     store.close()

@@ -54,6 +54,16 @@ internal data class HostState(
     approvedOnCurrentDigest(openGates, releasedDigests, gateId)
 
   override fun openNonceFor(gate: OpenGate): IssuedNonce? = openNonceFor(issuedNonces, consumedNonces, gate)
+
+  /** The open gates not released at all this scope, by opening order. */
+  val pendingGates: List<OpenGate>
+    get() = openGates.values.filter { it.gateId !in releasedGates }.sortedBy { it.openedSeq }
+
+  /** The latest non-abandoned pod for [taskRef], or null. */
+  fun podFor(taskRef: String): PodRecord? = podFor(pods, taskRef)
+
+  /** The verified approvers bound to [gate] as it stands, under [nonce]. */
+  fun boundApprovers(gate: OpenGate, nonce: String): Set<String> = boundApprovers(verifiedApprovals, gate, nonce)
 }
 
 /**

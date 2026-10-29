@@ -102,7 +102,7 @@ object LeadFixture {
     val folded = daemon.driveUntilQuiescent()
     println(
       "ADVANCE phase=${folded.lead.phase} ticket=${folded.lead.currentTicket} " +
-        "pending=${folded.lead.pendingGates.map { it.gateId }} done=${folded.lead.doneTickets}"
+        "pending=${folded.host.pendingGates.map { it.gateId }} done=${folded.lead.doneTickets}"
     )
   }
 
@@ -114,9 +114,9 @@ object LeadFixture {
    */
   private fun release(store: SqliteStore, a: ArgMap) {
     val gateKind = a.req("gate-kind")
-    val lead = leadFold(store.readAll(), LeadAuth.DENY_ALL)
+    val host = leadHostFold(store.readAll(), LeadAuth.DENY_ALL)
     val gate =
-      lead.pendingGates.firstOrNull { it.gateKind == gateKind }
+      host.pendingGates.firstOrNull { it.gateKind == gateKind }
         ?: run {
           System.err.println("no pending gate of kind '$gateKind'")
           exitProcess(2)
@@ -150,18 +150,18 @@ object LeadFixture {
 
   private fun replay(store: SqliteStore, dir: String) {
     val entries = store.readAll()
-    val lead = leadFold(entries, LeadAuth.DENY_ALL)
+    val (host, lead) = foldHostAndLead(entries, LeadAuth.DENY_ALL, TicketWorkflowFold)
     val shared = fold(entries)
     val effectLines =
       lead.doneTickets.plus(listOfNotNull(lead.currentTicket)).associateWith {
         EffectReceiver(dir).lineCountFor("apply-commit:$it")
       }
     println(
-      "REPLAY phase=${lead.phase} ticket=${lead.currentTicket} runs=${lead.runsStarted} " +
-        "pending=${lead.pendingGates.map { it.gateId }.sorted()} " +
-        "released=${lead.releasedGates.sorted()} stale=${lead.staleReleases.size} " +
-        "rejected=${shared.rejectedGateReleases.size} escalations=${lead.escalations.size} " +
-        "activePods=${lead.activePods.size} doneTickets=${lead.doneTickets} " +
+      "REPLAY phase=${lead.phase} ticket=${lead.currentTicket} runs=${host.runsStarted} " +
+        "pending=${host.pendingGates.map { it.gateId }.sorted()} " +
+        "released=${host.releasedGates.sorted()} stale=${host.staleReleases.size} " +
+        "rejected=${shared.rejectedGateReleases.size} escalations=${host.escalations.size} " +
+        "activePods=${host.activePods.size} doneTickets=${lead.doneTickets} " +
         "pendingEffects=${shared.pendingEffectKeys} effects=$effectLines"
     )
   }

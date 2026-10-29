@@ -146,18 +146,18 @@ class GoldenJournalTest {
         store.close()
         return Run(entries, dir, killed = killAt != null && armed == null)
       }
-      val pending = folded.lead.pendingGates.firstOrNull() ?: return@repeat
-      release(store, auth, folded.lead, pending)
+      val pending = folded.host.pendingGates.firstOrNull() ?: return@repeat
+      release(store, auth, folded.host, pending)
     }
     store.close()
     fail("$auth walk${killAt?.let { " killed at $it" } ?: ""} did not reach done in $MAX_DRIVES drives")
     error("unreachable")
   }
 
-  private fun release(store: SqliteStore, auth: Auth, lead: LeadState, gate: OpenGate) {
+  private fun release(store: SqliteStore, auth: Auth, host: HostState, gate: OpenGate) {
     when (auth) {
       Auth.DENY_ALL -> AuthStub.appendRelease(store, gate.gateId, gate.payloadDigest)
-      Auth.CEREMONY -> store.approveAndRelease(lead.openNonceFor(gate) ?: error("no open nonce for ${gate.gateId}"))
+      Auth.CEREMONY -> store.approveAndRelease(host.openNonceFor(gate) ?: error("no open nonce for ${gate.gateId}"))
     }
   }
 
