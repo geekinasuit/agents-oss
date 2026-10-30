@@ -102,8 +102,41 @@ class IncrementalLeadViewTest {
     }
   }
 
+  @Test
+  fun aWorkflowWhoseAssembleThrowsFailsTheAdvanceAsItFailsAColdFold() {
+    SqliteStore(tmp.newFolder().absolutePath, componentId = "lead").use { store ->
+      val view = IncrementalLeadView(store, LeadAuth.DENY_ALL, AssembleFailsPastOne)
+      store.append(LeadKinds.RUN_STARTED, buildJsonObject {}, origin = ORIGIN_SUBSTRATE)
+      view.advance()
+      assertEquals("positive control: one entry assembles", 1, view.lead)
+      store.append(LeadKinds.RUN_STARTED, buildJsonObject {}, origin = ORIGIN_SUBSTRATE)
+      val cold = assertThrows(IllegalStateException::class.java) {
+        foldHostAndLead(store.readAll(), LeadAuth.DENY_ALL, AssembleFailsPastOne)
+      }
+      val warm = assertThrows(IllegalStateException::class.java) { view.advance() }
+      assertEquals(cold.message, warm.message)
+      assertFailed("assemble failure", view, warm)
+    }
+  }
+
+  /** A workflow that counts run-started rows and cannot assemble a lead's state past one. */
+  private object AssembleFailsPastOne : WorkflowFold<Int, Int> {
+    override val substrateKinds = emptySet<String>()
+    override val scopeEndKinds = emptySet<String>()
+    override val start = 0
+
+    override fun expectedTaskRefs(w: Int) = emptySet<String>()
+
+    override fun step(w: Int, e: JournalEntry, outcome: HostOutcome) = if (e.kind == LeadKinds.RUN_STARTED) w + 1 else w
+
+    override fun assemble(host: HostState, w: Int): Int {
+      check(w <= 1) { "cannot assemble past one run, at $w" }
+      return w
+    }
+  }
+
   /** [view] has failed with [cause]: its advance and both reads refuse, naming [cause]. */
-  private fun assertFailed(label: String, view: IncrementalLeadView<LeadState, *>, cause: Throwable) {
+  private fun assertFailed(label: String, view: IncrementalLeadView<*, *>, cause: Throwable) {
     assertSame("$label: advance", cause, assertThrows(IllegalStateException::class.java) { view.advance() }.cause)
     assertSame("$label: host", cause, assertThrows(IllegalStateException::class.java) { view.host }.cause)
     assertSame("$label: lead", cause, assertThrows(IllegalStateException::class.java) { view.lead }.cause)
