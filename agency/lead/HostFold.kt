@@ -294,31 +294,52 @@ internal fun <S, W> foldHostAndLead(
   auth: LeadAuth,
   fold: WorkflowFold<S, W>,
 ): Pair<HostState, S> {
-  val workflowKinds = fold.substrateKinds.toSet()
-  val scopeEndKinds = fold.scopeEndKinds.toSet()
-  requireKindPartition(HOST_KINDS, workflowKinds, scopeEndKinds)
-  var host = HostState()
-  var workflow = fold.start
-  for (e in entries) {
+  val stepper = LeadFoldStepper(auth, fold)
+  var state = stepper.start
+  for (e in entries) state = stepper.step(state, e)
+  return state.host to stepper.assemble(state)
+}
+
+/** The host's records and the workflow's state, after some prefix of a lead journal. */
+internal data class LeadFoldState<out W>(val host: HostState, val workflow: W)
+
+/**
+ * [foldHostAndLead] one entry at a time: [start], then [step] per entry, then [assemble]. The kind
+ * sets are read from [fold] once, as copies, and checked ([requireKindPartition]) when the stepper is
+ * built, so every step folds with the sets that were checked.
+ */
+internal class LeadFoldStepper<S, W>(private val auth: LeadAuth, private val fold: WorkflowFold<S, W>) {
+  private val workflowKinds = fold.substrateKinds.toSet()
+  private val scopeEndKinds = fold.scopeEndKinds.toSet()
+
+  init {
+    requireKindPartition(HOST_KINDS, workflowKinds, scopeEndKinds)
+  }
+
+  val start: LeadFoldState<W> = LeadFoldState(HostState(), fold.start)
+
+  /** [state] after [e]. A failure is classified by [e] ([LeadFoldException]); one that already is a
+   * [LeadFoldException] passes through as thrown. */
+  fun step(state: LeadFoldState<W>, e: JournalEntry): LeadFoldState<W> =
     try {
       val step =
         hostStep(
-          host,
+          state.host,
           e,
           auth,
           workflowKinds = workflowKinds,
           isScopeEnd = e.kind in scopeEndKinds,
-          expectedTaskRefs = fold.expectedTaskRefs(workflow),
+          expectedTaskRefs = fold.expectedTaskRefs(state.workflow),
         )
-      workflow = fold.step(workflow, e, step.outcome)
-      host = step.state
+      LeadFoldState(step.state, fold.step(state.workflow, e, step.outcome))
     } catch (x: LeadFoldException) {
       throw x
     } catch (x: Exception) {
       throw LeadFoldException(e.seq, e.kind, x)
     }
-  }
-  return host to fold.assemble(host, workflow)
+
+  /** The lead's state, from [state]'s two halves. A failure here is not classified. */
+  fun assemble(state: LeadFoldState<W>): S = fold.assemble(state.host, state.workflow)
 }
 
 /**

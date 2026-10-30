@@ -41,6 +41,7 @@ kt_jvm_library(
         "HostKinds.kt",
         "HostRecords.kt",
         "HostSeams.kt",
+        "IncrementalLeadView.kt",
         "OpenAiCompatCognition.kt",
         "PayloadReaders.kt",
         "PodSeam.kt",
@@ -382,6 +383,28 @@ kt_jvm_test(
     deps = [
         ":ceremony_test_support",
         "//agency/shared/auth",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# The view the approval ingress folds with must equal a cold fold after every advance. Corpus
+# journals are re-chained into real stores, so every advance goes through the verified tail read.
+# associates (not deps) on :lead and :fold_corpus, since it reads the host's records and the
+# corpus, which are internal to them.
+kt_jvm_test(
+    name = "incremental_lead_view_test",
+    size = "medium",
+    srcs = ["IncrementalLeadViewTest.kt"],
+    associates = [
+        ":fold_corpus",
+        ":lead",
+    ],
+    test_class = "com.geekinasuit.agency.lead.IncrementalLeadViewTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
         "//agency/shared/journal",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
