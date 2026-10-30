@@ -49,6 +49,21 @@ interface JournalStore : AutoCloseable {
    */
   fun readAll(): List<JournalEntry>
 
+  /**
+   * Reads the entries after [from], verified and upcast as [readAll] verifies and upcasts them, with
+   * the chain continuing from [from]: the first entry must link to [from]'s hash, and the key-epoch
+   * rules start from [from]'s epoch. Returns the entries and the cursor after the last of them
+   * ([from] itself when there are none).
+   *
+   * The entry at [from] must still be stored with [from]'s hash, else this throws
+   * [ChainBrokenException]: so a truncation below [from], a rewrite that changes the hash at [from],
+   * and a cursor past the head are each seen. [from]'s epoch must be the stored chain's epoch after
+   * [from], else this throws [EpochRuleException]. The entries up to and including [from] are not verified
+   * again (only [from]'s stored hash is compared, never recomputed), so an in-place change among
+   * them that leaves that stored hash alone goes unseen here; [readAll] sees it.
+   */
+  fun readAfter(from: ChainCursor): TailRead
+
   /** Raw read without verify/upcast — fixture generation and chain checks only. */
   fun readRaw(): List<JournalEntry>
 
@@ -81,13 +96,40 @@ interface JournalStore : AutoCloseable {
  * must be unsigned; epoch >0 entries must carry a sig — presence rules now, cryptographic
  * verification arrives with active signing).
  */
-fun verifyAndUpcast(raw: List<JournalEntry>, expectedChainContext: String): List<JournalEntry> {
-  var prevHash = GENESIS_HASH
-  var epoch = 0
+fun verifyAndUpcast(raw: List<JournalEntry>, expectedChainContext: String): List<JournalEntry> =
+  verifyAndUpcastAfter(raw, expectedChainContext, ChainCursor.START).entries
+
+/**
+ * Where a verified read stopped: the last entry's seq and stored hash, and the key epoch the chain
+ * is in after it. [START] is the position before any entry.
+ */
+data class ChainCursor(val seq: Long, val hash: String, val keyEpoch: Int) {
+  companion object {
+    val START = ChainCursor(0L, GENESIS_HASH, 0)
+  }
+}
+
+/** Entries read after a cursor, verified and upcast, and the cursor after the last of them. */
+data class TailRead(val entries: List<JournalEntry>, val cursor: ChainCursor)
+
+/**
+ * [verifyAndUpcast] over entries that continue a chain from [from]. Every entry is verified before
+ * any is upcast, so a chain fault is reported ahead of an unsupported version wherever each occurs.
+ */
+fun verifyAndUpcastAfter(raw: List<JournalEntry>, expectedChainContext: String, from: ChainCursor): TailRead {
+  val cursor = verifyChain(raw, expectedChainContext, from)
+  return TailRead(raw.map { upcastToSupported(it, expectedChainContext) }, cursor)
+}
+
+private fun verifyChain(raw: List<JournalEntry>, expectedChainContext: String, from: ChainCursor): ChainCursor {
+  var seq = from.seq
+  var prevHash = from.hash
+  var epoch = from.keyEpoch
   for (e in raw) {
     val recomputed = entryHashFor(e)
     if (e.prevHash != prevHash) throw ChainBrokenException(e.seq, "prevHash does not link to prior entry")
     if (recomputed != e.hash) throw ChainBrokenException(e.seq, "stored hash does not match recomputed hash")
+    seq = e.seq
     prevHash = e.hash
 
     if (e.schemaVersion >= 3) {
@@ -107,7 +149,7 @@ fun verifyAndUpcast(raw: List<JournalEntry>, expectedChainContext: String): List
       if (epoch > 0 && e.sig == null) throw EpochRuleException(e.seq, "epoch $epoch requires a signature")
     }
   }
-  return raw.map { upcastToSupported(it, expectedChainContext) }
+  return ChainCursor(seq, prevHash, epoch)
 }
 
 fun chainContextOf(componentId: String, chainKind: String): String =
