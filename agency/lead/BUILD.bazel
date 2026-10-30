@@ -30,6 +30,7 @@ kt_jvm_library(
     name = "host",
     srcs = [
         "AgentHost.kt",
+        "ApprovalClassifier.kt",
         "AuthStub.kt",
         "ClaudeCognition.kt",
         "Cognition.kt",
@@ -384,6 +385,24 @@ kt_jvm_test(
         ":ceremony_test_support",
         "//agency/shared/auth",
         "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# The approval classifier's verdicts: new, duplicate with its original seq, or rejected with the
+# claimed key or the unlisted bucket. associates (not deps) on :host, since the classifier is
+# internal to it.
+kt_jvm_test(
+    name = "approval_classifier_test",
+    size = "small",
+    srcs = ["ApprovalClassifierTest.kt"],
+    associates = [":host"],
+    test_class = "com.geekinasuit.agency.lead.ApprovalClassifierTest",
+    deps = [
+        ":ceremony_test_support",
+        "//agency/shared/auth",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
