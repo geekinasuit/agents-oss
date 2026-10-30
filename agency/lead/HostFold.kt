@@ -5,9 +5,6 @@ import com.geekinasuit.agency.lead.PayloadReaders.marksRetry
 import com.geekinasuit.agency.lead.PayloadReaders.marksTrue
 import com.geekinasuit.agency.lead.PayloadReaders.str
 import com.geekinasuit.agency.lead.PayloadReaders.strOrNull
-import com.geekinasuit.agency.shared.auth.ApprovalEvidence
-import com.geekinasuit.agency.shared.auth.SchemeKey
-import com.geekinasuit.agency.shared.auth.parseCommitted
 import com.geekinasuit.agency.shared.auth.quorumSatisfied
 import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
@@ -769,93 +766,41 @@ private fun foldRelease(s: HostState, e: JournalEntry, p: JsonObject, auth: Lead
 }
 
 /**
- * APPROVAL_RECORDED handling — the mechanical re-verification (2b). An approval counts
- * toward a quorum only if it RE-VERIFIES here: the fold reads the evidence sub-object,
- * re-derives the signer's committed identity from the signed preimage, checks the signature
- * over that preimage, resolves the committed key to an allow-listed principal, and confirms
- * every committed field agrees with its flat copy. The PREIMAGE is the sole authority; the
- * flat columns (top-level and evidence) are lookup indices held to agreement, never trusted —
- * so the flat `principalId` a record claims can never by itself put an approver in a quorum.
- *
- * A verified approval lands in [HostState.verifiedApprovals] under its COMMITTED gate, keyed
- * by the preimage-derived principal, deduped on (principal, nonce, digest). Anything that
- * fails a step lands in [HostState.unverifiedApprovals] with a reason and contributes
- * nothing — a null/absent preimage included (fail-closed: unverifiable, never a pass). The
- * refusal names WHICH layer disagreed, so a split-source attempt is legible after the fact.
- *
- * The top-level payload framing (gateId/principalId/nonce/payloadDigest) is the auth layer's
- * own contract, read strictly ([str] throws classified on a malformed required field); the
- * evidence sub-object is carrier-provided PROOF, so a malformed or absent one is "unverified",
+ * APPROVAL_RECORDED handling — the mechanical re-verification (2b), by [classifyApproval]. A
+ * verified approval lands in [HostState.verifiedApprovals] under its COMMITTED gate, keyed by the
+ * preimage-derived principal, deduped on (principal, nonce, digest). Anything that fails a step
+ * lands in [HostState.unverifiedApprovals] with the classifier's reason and contributes nothing — a
+ * null/absent preimage included (fail-closed: unverifiable, never a pass). A malformed top-level
+ * field throws, classified by the fold; a malformed or absent evidence sub-object is unverified,
  * never a fold crash — an approval that cannot be verified must not be able to brick recovery.
  */
-private fun foldApproval(s: HostState, e: JournalEntry, p: JsonObject, auth: LeadAuth): HostState {
-  val claimedGate = p.str("gateId")
-  val claimedPrincipal = p.str("principalId")
-  val claimedNonce = p.str("nonce")
-  val claimedDigest = p.str("payloadDigest")
-
-  fun unverified(reason: String): HostState =
-    s.copy(
-      unverifiedApprovals =
-        (s.unverifiedApprovals + (e.seq to "approval at seq=${e.seq} $reason")).takeLast(ANOMALY_TAIL)
-    )
-
-  val evidenceObj = p["evidence"] as? JsonObject ?: return unverified("carries no evidence sub-object")
-  val evidence =
-    try {
-      ApprovalEvidence.fromJson(evidenceObj)
-    } catch (x: Exception) {
-      return unverified("has malformed evidence: ${x.message}")
+private fun foldApproval(s: HostState, e: JournalEntry, p: JsonObject, auth: LeadAuth): HostState =
+  when (val verdict = classifyApproval(s.verifiedApprovals, p, e.seq, auth)) {
+    is ApprovalVerdict.Rejected ->
+      s.copy(
+        unverifiedApprovals =
+          (s.unverifiedApprovals + (e.seq to "approval at seq=${e.seq} ${verdict.reason}")).takeLast(ANOMALY_TAIL)
+      )
+    is ApprovalVerdict.VerifiedDuplicate -> s
+    is ApprovalVerdict.VerifiedNew -> {
+      val gateId = verdict.gateId
+      val verified = verdict.approval
+      // Verified, but drift is still worth flagging: a verified approval can commit to a gate not
+      // yet opened or a nonce not yet minted (issue-before-open). Kept — a release re-checks
+      // against live state — with the same flagged-but-kept pattern as NONCE_ISSUED.
+      val drift = buildList {
+        if (gateId !in s.openGates) add("verified approval at seq=${e.seq} for unknown gate '$gateId'")
+        if (verified.nonce !in s.issuedNonces)
+          add("verified approval at seq=${e.seq} for unminted nonce on gate '$gateId'")
+      }
+      val flagged =
+        if (drift.isEmpty()) s else s.copy(escalations = (s.escalations + drift).takeLast(ANOMALY_TAIL))
+      flagged.copy(
+        verifiedApprovals =
+          flagged.verifiedApprovals + (gateId to (s.verifiedApprovals[gateId].orEmpty() + verified))
+      )
     }
-  val preimage =
-    evidence.signedPreimage
-      ?: return unverified("carries no signed preimage — cannot re-verify (fail-closed)")
-  val committed =
-    parseCommitted(preimage)
-      ?: return unverified("has a preimage that is not a canonical committed approval")
-  if (!auth.verifier.verifies(evidence.schemeId, committed.publicKey, evidence.signature, preimage))
-    return unverified("has a signature that does not verify over its preimage")
-  val principal =
-    auth.allowList.principalFor(SchemeKey(evidence.schemeId, committed.publicKey))
-      ?: return unverified("is signed by a key not in the allow-list")
-  // Three-layer agreement: the preimage is authority; the evidence's flat copies AND the
-  // top-level payload fields must match it, or the record names one thing and signs another.
-  if (evidence.publicKey != committed.publicKey) return unverified("evidence publicKey disagrees with the preimage")
-  if (evidence.gateId != committed.gateId) return unverified("evidence gateId disagrees with the preimage")
-  if (evidence.payloadDigest != committed.payloadDigest)
-    return unverified("evidence payloadDigest disagrees with the preimage")
-  if (evidence.nonce != committed.nonce) return unverified("evidence nonce disagrees with the preimage")
-  if (claimedGate != committed.gateId) return unverified("payload gateId disagrees with the preimage")
-  if (claimedNonce != committed.nonce) return unverified("payload nonce disagrees with the preimage")
-  if (claimedDigest != committed.payloadDigest)
-    return unverified("payload payloadDigest disagrees with the preimage")
-  if (claimedPrincipal != principal.principalId)
-    return unverified("payload principalId disagrees with the allow-list identity resolved from the preimage")
-
-  val verified = VerifiedApproval(principal.principalId, committed.nonce, committed.payloadDigest, e.seq)
-  val current = s.verifiedApprovals[committed.gateId].orEmpty()
-  val duplicate =
-    current.any {
-      it.principalId == verified.principalId &&
-        it.nonce == verified.nonce &&
-        it.payloadDigest == verified.payloadDigest
-    }
-  if (duplicate) return s
-  // Verified, but drift is still worth flagging: a verified approval can commit to a gate not
-  // yet opened or a nonce not yet minted (issue-before-open). Kept — a release re-checks
-  // against live state — with the same flagged-but-kept pattern as NONCE_ISSUED.
-  val drift = buildList {
-    if (committed.gateId !in s.openGates)
-      add("verified approval at seq=${e.seq} for unknown gate '${committed.gateId}'")
-    if (committed.nonce !in s.issuedNonces)
-      add("verified approval at seq=${e.seq} for unminted nonce on gate '${committed.gateId}'")
   }
-  val flagged =
-    if (drift.isEmpty()) s else s.copy(escalations = (s.escalations + drift).takeLast(ANOMALY_TAIL))
-  return flagged.copy(
-    verifiedApprovals = flagged.verifiedApprovals + (committed.gateId to (current + verified))
-  )
-}
 
 /** The pods still running, by spawn order. See [HostView.activePods]. */
 internal fun activePods(pods: Map<String, PodRecord>): List<PodRecord> =
