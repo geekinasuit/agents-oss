@@ -347,9 +347,26 @@ java_test(
     ],
 )
 
+# A seeded corpus of lead journals, for the cells that compare two folds of the same journals.
+# associates (not deps) on :lead, since it builds the lead's auth shapes, which are internal to it.
+kt_jvm_library(
+    name = "fold_corpus",
+    testonly = True,
+    srcs = ["FoldCorpus.kt"],
+    associates = [":lead"],
+    deps = [
+        ":ceremony_test_support",
+        "//agency/shared/auth",
+        "//agency/shared/journal",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
 # Folds a seeded corpus of journals with the pre-split fold (LegacyLeadFold.kt, frozen verbatim)
 # and with the host/workflow split fold, and asserts they agree on every one, failures included.
-# associates (not deps) on :lead, since it reads the host's records, which are internal to it.
+# associates (not deps) on :lead and :fold_corpus, since it reads the host's records and the
+# corpus, which are internal to them.
 kt_jvm_test(
     name = "fold_split_differential_test",
     size = "small",
@@ -357,7 +374,10 @@ kt_jvm_test(
         "FoldSplitDifferentialTest.kt",
         "LegacyLeadFold.kt",
     ],
-    associates = [":lead"],
+    associates = [
+        ":fold_corpus",
+        ":lead",
+    ],
     test_class = "com.geekinasuit.agency.lead.FoldSplitDifferentialTest",
     deps = [
         ":ceremony_test_support",
