@@ -17,9 +17,12 @@ import com.geekinasuit.agency.shared.journal.JournalStore
  * every wake.
  *
  * The first [advance] reads from genesis. A failed [advance] leaves the view failed, whatever the
- * cause (a chain fault in the tail, a fold failure on one of its entries, or a store error): every
- * later [advance], [host] and [lead] throws [IllegalStateException] with the first failure as its
- * cause. To try again, build a new view, which reads from genesis.
+ * cause (a chain fault in the tail, a fold failure on one of its entries, a failure assembling the
+ * lead's state, or a store error): every later [advance], [host] and [lead] throws
+ * [IllegalStateException] with the first failure as its cause. To try again, build a new view, which
+ * reads from genesis. The lead's state is assembled inside [advance], so a workflow whose assemble
+ * throws fails the advance, as it fails a cold fold. Before the first [advance], [lead] is assembled
+ * from the empty state when the view is built, and a failure there is thrown by the constructor.
  *
  * Not thread-safe: the caller serializes calls.
  */
@@ -31,6 +34,7 @@ internal class IncrementalLeadView<S, W>(
   private val stepper = LeadFoldStepper(auth, fold)
   private var cursor = ChainCursor.START
   private var state = stepper.start
+  private var assembled = stepper.assemble(state)
   private var failure: Exception? = null
 
   /** The host's records as of the last [advance]. */
@@ -39,7 +43,10 @@ internal class IncrementalLeadView<S, W>(
 
   /** The lead's state as of the last [advance]. */
   val lead: S
-    get() = stepper.assemble(current())
+    get() {
+      current()
+      return assembled
+    }
 
   /** Folds the entries appended since the last call. */
   fun advance() {
@@ -48,7 +55,9 @@ internal class IncrementalLeadView<S, W>(
       val tail = store.readAfter(cursor)
       var next = state
       for (e in tail.entries) next = stepper.step(next, e)
+      val nextLead = stepper.assemble(next)
       state = next
+      assembled = nextLead
       cursor = tail.cursor
     } catch (x: Exception) {
       failure = x

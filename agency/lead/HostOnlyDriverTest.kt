@@ -1,11 +1,9 @@
 package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.pod.PodSpec
-import com.geekinasuit.agency.pod.sha256HexBytes
 import com.geekinasuit.agency.shared.harness.ClaudeHarness
 import com.geekinasuit.agency.shared.journal.EffectReceiver
 import com.geekinasuit.agency.shared.journal.JournalEntry
-import com.geekinasuit.agency.shared.journal.JournalState
 import com.geekinasuit.agency.shared.journal.ORIGIN_COGNITION
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
@@ -16,7 +14,6 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
-import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -200,112 +197,8 @@ class HostOnlyDriverTest {
       gateOpenSink = sink,
     )
 
-  /** The workflow's own state: the scope it opened, and the evidence it recorded for the gate. */
-  private data class GateWorkflowState(val scope: String? = null, val evidence: String? = null)
-
-  /** A lead's state for [GateWorkflow]: the workflow's own, and none of the host's records. */
-  private class GateLead(val w: GateWorkflowState)
-
-  private object GateFold : WorkflowFold<GateLead, GateWorkflowState> {
-    override val substrateKinds = setOf(SCOPE_OPENED)
-    override val scopeEndKinds = emptySet<String>()
-    override val start = GateWorkflowState()
-
-    override fun expectedTaskRefs(w: GateWorkflowState) = emptySet<String>()
-
-    override fun step(w: GateWorkflowState, e: JournalEntry, outcome: HostOutcome): GateWorkflowState {
-      if (e.kind != SCOPE_OPENED || outcome is HostOutcome.Rejected) return w
-      val p = Json.parseToJsonElement(e.payloadJson).jsonObject
-      return GateWorkflowState(p.getValue("scope").jsonPrimitive.content, p.getValue("evidence").jsonPrimitive.content)
-    }
-
-    override fun assemble(host: HostState, w: GateWorkflowState) = GateLead(w)
-  }
-
-  /** One scope, one gate: the workflow records the evidence file's digest, and the gate opens only on
-   * it. Its own logic reads only its own state. */
-  private class GateWorkflow(private val evidence: File) : Workflow<GateLead> {
-    override val fold = GateFold
-    override val gateKinds = setOf(GATE_KIND)
-
-    override fun scopeKey(lead: GateLead) = lead.w.scope
-
-    override fun currentScopeKey(lead: GateLead) = lead.w.scope
-
-    override fun gateId(gateKind: String, scopeKey: String) = "$gateKind:$scopeKey"
-
-    override fun admitGateOpen(gateKind: String, payloadDigest: String, gateId: String, lead: GateLead) =
-      if (evidenceMismatch(gateKind, payloadDigest, lead) == null) {
-        GateOpenDecision.Open(payloadDigest)
-      } else {
-        GateOpenDecision.Refuse("not the recorded evidence")
-      }
-
-    override fun admitPodSpawn(
-      taskRef: String,
-      lead: GateLead,
-      records: HostView,
-      turn: ProposalTurn,
-      host: HostServices,
-    ) = false
-
-    override fun gateArtifactPath(gateKind: String, lead: GateLead) = evidence.absolutePath.takeIf { lead.w.evidence != null }
-
-    override fun recordedEvidence(gateKind: String, lead: GateLead) = lead.w.evidence
-
-    override fun evidenceMismatch(gateKind: String, digest: String, lead: GateLead) =
-      when (lead.w.evidence) {
-        null -> "no evidence recorded"
-        digest -> null
-        else -> "not the recorded evidence"
-      }
-
-    override fun redriveMessage(key: String, lead: GateLead, records: HostView): String? = null
-
-    override fun redriveDeclineReason(key: String): String? = null
-
-    override fun mechanicalStep(lead: GateLead, records: HostView, shared: JournalState, host: HostServices): Boolean {
-      if (lead.w.scope != null) return false
-      host.append(
-        SCOPE_OPENED,
-        buildJsonObject {
-          put("scope", "s1")
-          put("evidence", sha256HexBytes(evidence.readBytes()))
-        },
-      )
-      return true
-    }
-  }
-
-  /** Proposes the gate on the recorded evidence at every turn; the host opens it once. */
-  private object ProposeTheGate : AgentCognition<GateLead> {
-    override val name = "propose-the-gate"
-
-    override fun decide(context: AgentWakeContext<GateLead>): CognitionOutput {
-      val evidence = context.lead.w.evidence ?: return CognitionOutput.idle(ContextPresentation.PRESENTED)
-      return CognitionOutput(
-        proposals = listOf(Proposal.ProposeGateOpen(GATE_KIND, evidence)),
-        presentation = ContextPresentation.PRESENTED,
-      )
-    }
-  }
-
-  /** [GateWorkflow]'s part of the cognition protocol: no proposals of its own, no lines of state. */
-  private object GateProtocol : WorkflowProtocol<GateLead> {
-    override val proposalShapes = emptyList<String>()
-    override val rules = ""
-    override val proposalTypes = emptySet<String>()
-
-    override fun renderLines(lead: GateLead) = emptyList<String>()
-
-    override fun gateReadsApproved(lead: GateLead, records: HostView, gate: OpenGate) = false
-
-    override fun parseProposal(type: String, p: JSONObject): ProposalParse =
-      ProposalParse.Malformed(MalformedReasons.UNKNOWN_TYPE)
-  }
-
   private companion object {
-    const val SCOPE_OPENED = "gate-scope-opened"
-    const val GATE_KIND = "approval"
+    const val SCOPE_OPENED = GATE_WORKFLOW_SCOPE_OPENED
+    const val GATE_KIND = GATE_WORKFLOW_GATE_KIND
   }
 }

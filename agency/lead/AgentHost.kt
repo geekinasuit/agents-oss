@@ -37,7 +37,7 @@ import kotlinx.serialization.json.put
  *
  * THREADING (the single-writer discipline made concrete): one PROCESS writes the store,
  * and within it every store op is serialized by the store's internal lock. ARRIVAL facts
- * — injected mail, the auth stub's releases — are journaled AT THE ACCEPT BOUNDARY by the
+ * — injected mail, approvals, the auth stub's releases — are journaled AT THE ACCEPT BOUNDARY by the
  * accepting thread (journal-then-doorbell, AGENCY-021): the entry is durable before
  * the inject call returns, and the queued [WakeEvent] is only a doorbell. DERIVED facts —
  * everything the pipeline concludes — are journaled by the loop thread, which refolds,
@@ -212,6 +212,9 @@ class AgentHost<S> internal constructor(
 
   private val queue = LinkedBlockingQueue<WakeEvent>()
 
+  /** The approval accept boundary ([injectApproval]). Stopped when [runLoop] exits. */
+  private val approvals = ApprovalAcceptor(store, leadAuth, workflow.fold, faults, ::escalate)
+
   /** Structural single-run guard: the single-writer/single-loop-thread rule is enforced,
    * not just documented — a second concurrent run mode throws instead of racing the store. */
   private val active = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -293,6 +296,18 @@ class AgentHost<S> internal constructor(
     // offer, not put — same false-refusal reasoning as injectMail's doorbell.
     queue.offer(WakeEvent.AuthRelease(gateId, payloadDigest))
   }
+
+  /**
+   * Accept one approval, from any thread: the host bounds it against its records as the journal
+   * stands now, classifies it with the fold's own code, and journals a verified approval it does not
+   * hold yet before this returns ([ApprovalAcceptor] says how). Everything else is dropped, and the
+   * result says why. A host whose loop has exited, or whose view of the journal failed, refuses by
+   * throwing, and appends nothing.
+   *
+   * No doorbell is rung: an approval that completes no quorum changes nothing the loop acts on, and
+   * nothing here writes a release yet.
+   */
+  fun injectApproval(candidate: ApprovalCandidate): ApprovalAccept = approvals.accept(candidate)
 
   /** Timer fires stay enqueue-only (no accept-append, deliberately): a timer is
    * self-scheduled re-derivable state — armed and not fired re-arms at adopt — so a lost
@@ -421,6 +436,9 @@ class AgentHost<S> internal constructor(
         }
       }
     } finally {
+      // Whatever ended the loop, this host will not act on an approval accepted after it, so it
+      // accepts none; the carrier delivers it again to the restarted host.
+      approvals.stop("the loop has exited")
       active.set(false)
     }
   }
