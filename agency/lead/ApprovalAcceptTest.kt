@@ -1,8 +1,11 @@
 package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.pod.PodSpec
+import com.geekinasuit.agency.shared.auth.AllowList
 import com.geekinasuit.agency.shared.auth.ApprovalEvidence
 import com.geekinasuit.agency.shared.auth.ApprovalVerifier
+import com.geekinasuit.agency.shared.auth.Principal
+import com.geekinasuit.agency.shared.auth.SchemeKey
 import com.geekinasuit.agency.shared.auth.committedPreimage
 import com.geekinasuit.agency.shared.auth.oneOfOne
 import com.geekinasuit.agency.shared.journal.ChainBrokenException
@@ -36,8 +39,9 @@ import org.junit.rules.TemporaryFolder
  * Every cell that drops a candidate for one of its fields also shows that a candidate differing in
  * that field is journaled, so a boundary that dropped everything fails. The consumed-nonce cell drops
  * for the journal's state, not a field; the cells before it journal the same candidate on the open
- * nonce. The cells run on one thread: the lock is argued, not exercised, and the fault points stand
- * in for the loop thread's appends between check and append.
+ * nonce. A rejected attempt is journaled once per claimed key on a nonce, and the allowance cells
+ * show the next attempt for that key is not. The cells run on one thread: the lock is argued,
+ * not exercised, and the fault points stand in for the loop thread's appends between check and append.
  */
 class ApprovalAcceptTest {
 
@@ -139,21 +143,99 @@ class ApprovalAcceptTest {
     }
 
   @Test
-  fun aForgeryNamingTheGenuineKeyIsRejectedAndTheGenuineApprovalStillCounts() =
+  fun aGenuineApprovalIsAcceptedAfterItsKeysAllowanceIsUsed() =
     onBothWorkflows { rig ->
       val nonce = rig.openGate()
       val host = rig.host()
-      assertDropped(rig, ApprovalAccept.REJECTED, host.injectApproval(candidate(nonce, signature = "forged")))
+      assertEquals(ApprovalAccept.REJECTED, host.injectApproval(candidate(nonce, signature = "forged")))
+      assertEquals(ApprovalAccept.REJECTED_OVER_ALLOWANCE, host.injectApproval(candidate(nonce, signature = "forged-2")))
+      assertEquals("one rejected row", 1, rig.approvalRows().size)
       assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
-      assertEquals(1, rig.host().refold().host.verifiedApprovals[nonce.gateId].orEmpty().size)
+      val folded = rig.host().refold().host
+      assertEquals(listOf("operator"), folded.verifiedApprovals[nonce.gateId].orEmpty().map { it.principalId })
+      assertEquals(1, folded.unverifiedApprovals.size)
     }
 
   @Test
-  fun aCandidateSignedByAKeyNotInTheAllowListIsRejected() =
+  fun aRejectedRowNamesNoPrincipalAndCountsTowardNothing() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      assertEquals(ApprovalAccept.REJECTED, rig.host().injectApproval(candidate(nonce, signature = "forged")))
+      val row = Json.parseToJsonElement(rig.approvalRows().single().payloadJson).jsonObject
+      assertEquals(JsonPrimitive(LeadAuth.UNLISTED_PRINCIPAL_ID), row.getValue("principalId"))
+      val claimed = row.getValue("evidence").jsonObject.getValue("publicKey")
+      assertEquals("the key it claims stays in its evidence", JsonPrimitive("pk-operator"), claimed)
+      val folded = rig.host().refold().host
+      assertEquals(emptyList<VerifiedApproval>(), folded.verifiedApprovals[nonce.gateId].orEmpty())
+      assertEquals(1, folded.unverifiedApprovals.size)
+    }
+
+  @Test
+  fun eachClaimedKeyAndTheUnlistedBucketHasItsOwnAllowance() =
     onBothWorkflows { rig ->
       val nonce = rig.openGate()
       val host = rig.host()
-      assertDropped(rig, ApprovalAccept.REJECTED, host.injectApproval(candidate(nonce, publicKey = "pk-stranger")))
+      for (key in listOf("pk-operator", "pk-second", "pk-stranger")) {
+        assertEquals(key, ApprovalAccept.REJECTED, host.injectApproval(candidate(nonce, publicKey = key, signature = "forged")))
+      }
+      for (key in listOf("pk-operator", "pk-second", "pk-stranger", "pk-stranger-2")) {
+        val again = host.injectApproval(candidate(nonce, publicKey = key, signature = "forged-2"))
+        assertEquals(key, ApprovalAccept.REJECTED_OVER_ALLOWANCE, again)
+      }
+      assertEquals(3, rig.approvalRows().size)
+    }
+
+  @Test
+  fun aSplitNonceFloodAddsOneRowAndUsesNoListedKeysAllowance() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val host = rig.host()
+      val flood = (0 until 20).map { host.injectApproval(candidate(nonce, evidenceNonce = "${nonce.nonce}-$it")) }
+      assertEquals(listOf(ApprovalAccept.REJECTED) + List(19) { ApprovalAccept.REJECTED_OVER_ALLOWANCE }, flood)
+      val forged = host.injectApproval(candidate(nonce, signature = "forged"))
+      assertEquals("the operator's own allowance is unused", ApprovalAccept.REJECTED, forged)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      assertEquals(3, rig.approvalRows().size)
+    }
+
+  @Test
+  fun theAllowanceTallySurvivesARestart() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      assertEquals(ApprovalAccept.REJECTED, rig.host().injectApproval(candidate(nonce, signature = "forged")))
+      val restarted = rig.host()
+      assertEquals(ApprovalAccept.REJECTED_OVER_ALLOWANCE, restarted.injectApproval(candidate(nonce, signature = "forged-2")))
+      val second = restarted.injectApproval(candidate(nonce, publicKey = "pk-second", signature = "forged"))
+      assertEquals("positive control", ApprovalAccept.REJECTED, second)
+      assertEquals(2, rig.approvalRows().size)
+    }
+
+  @Test
+  fun aRejectedRowIsBoundAsItIsJournaled() =
+    onBothWorkflows { rig ->
+      // The rejected row names the sentinel, longer than "operator": a forgery sized so its row
+      // would fit under the operator's id does not fit under the sentinel's.
+      val nonce = rig.openGate()
+      val host = rig.host()
+      val grow = LeadAuth.UNLISTED_PRINCIPAL_ID.length - "operator".length
+      val oneCharCarrier = rowUnderOperator(candidate(nonce, signature = FORGED_SAME_LENGTH, carrier = "c")).length
+      // Under the sentinel, the row is one char over the bound.
+      val target = ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS + 1 - grow
+      val carrier = "c".repeat(target - oneCharCarrier + 1)
+      val forged = candidate(nonce, signature = FORGED_SAME_LENGTH, carrier = carrier)
+      assertEquals(target, rowUnderOperator(forged).length)
+      assertDropped(rig, ApprovalAccept.OVERSIZED, host.injectApproval(forged))
+      assertEquals("the same size verified fits", ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce, carrier = carrier)))
+    }
+
+  @Test
+  fun aCandidateSignedByAKeyNotInTheAllowListIsRejectedOnce() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val host = rig.host()
+      assertEquals(ApprovalAccept.REJECTED, host.injectApproval(candidate(nonce, publicKey = "pk-stranger")))
+      assertEquals(ApprovalAccept.REJECTED_OVER_ALLOWANCE, host.injectApproval(candidate(nonce, publicKey = "pk-stranger")))
+      assertEquals(1, rig.approvalRows().size)
       assertEquals("positive control", ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
     }
 
@@ -190,13 +272,50 @@ class ApprovalAcceptTest {
     }
 
   @Test
-  fun aCandidateWhoseEvidenceDoesNotParseIsRejected() =
+  fun aFloodOfEvidenceThatDoesNotParseAddsOneRow() =
     onBothWorkflows { rig ->
       val nonce = rig.openGate()
       val host = rig.host()
-      val empty = candidate(nonce).copy(evidence = JsonObject(emptyMap()))
-      assertDropped(rig, ApprovalAccept.REJECTED, host.injectApproval(empty))
+      val flood = (0 until 20).map { host.injectApproval(candidate(nonce).copy(evidence = buildJsonObject { put("junk", it) })) }
+      assertEquals(listOf(ApprovalAccept.REJECTED) + List(19) { ApprovalAccept.REJECTED_OVER_ALLOWANCE }, flood)
+      val row = Json.parseToJsonElement(rig.approvalRows().single().payloadJson).jsonObject
+      assertEquals("the carrier's object, signed by nothing, is not journaled", JsonObject(emptyMap()), row.getValue("evidence"))
       assertEquals("positive control", ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+    }
+
+  @Test
+  fun aNonceThatOpensAgainKeepsItsTally() =
+    onBothWorkflows { rig ->
+      // A newer nonce for the same gate and digest shadows the open one; consuming it opens the
+      // older one again.
+      val older = rig.openGate()
+      val host = rig.host()
+      assertEquals(ApprovalAccept.REJECTED, host.injectApproval(candidate(older, signature = "forged")))
+      val newer = older.copy(nonce = "${older.nonce}-newer")
+      rig.store.append(
+        HostKinds.NONCE_ISSUED,
+        buildJsonObject {
+          put("nonce", newer.nonce)
+          put("gateId", newer.gateId)
+          put("payloadDigest", newer.payloadDigest)
+        },
+        ORIGIN_SUBSTRATE,
+      )
+      assertDropped(rig, ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(older, signature = "forged-2")), rows = 1)
+      rig.store.append(HostKinds.NONCE_CONSUMED, buildJsonObject { put("nonce", newer.nonce) }, ORIGIN_SUBSTRATE)
+      assertEquals(ApprovalAccept.REJECTED_OVER_ALLOWANCE, host.injectApproval(candidate(older, signature = "forged-3")))
+      assertEquals(1, rig.approvalRows().size)
+    }
+
+  @Test
+  fun aPrincipalsTwoKeysEachHaveTheirOwnAllowance() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val host = rig.host()
+      for (key in listOf("pk-second", "pk-second-2")) {
+        assertEquals(key, ApprovalAccept.REJECTED, host.injectApproval(candidate(nonce, publicKey = key, signature = "forged")))
+      }
+      assertEquals(2, rig.approvalRows().size)
     }
 
   @Test
@@ -268,9 +387,10 @@ class ApprovalAcceptTest {
       assertEquals("no approval row", 0, rig.rawKindsAndPayloads().count { it.first == HostKinds.APPROVAL_RECORDED })
     }
 
-  private fun assertDropped(rig: Rig, expected: ApprovalAccept, actual: ApprovalAccept) {
+  /** [actual] is [expected], and the journal still holds only the [rows] approval rows it held before. */
+  private fun assertDropped(rig: Rig, expected: ApprovalAccept, actual: ApprovalAccept, rows: Int = 0) {
     assertEquals(expected, actual)
-    assertEquals("$expected appends no approval row", 0, rig.approvalRows().size)
+    assertEquals("$expected appends no approval row", rows, rig.approvalRows().size)
   }
 
   private fun onBothWorkflows(cell: (Rig) -> Unit) {
@@ -345,8 +465,20 @@ class ApprovalAcceptTest {
       )
   }
 
+  /** The row [c] would be journaled as if its key resolved to the operator. */
+  private fun rowUnderOperator(c: ApprovalCandidate): String =
+    buildJsonObject {
+        put("gateId", c.gateId)
+        put("principalId", "operator")
+        put("nonce", c.nonce)
+        put("payloadDigest", c.payloadDigest)
+        put("evidence", c.evidence)
+      }
+      .toString()
+
   /** A candidate approving [n], by the allow-listed operator unless a field is overridden. The
-   * evidence's own gate, digest and nonce agree with the candidate's. */
+   * evidence's own gate and digest agree with the candidate's, and so does its nonce unless
+   * [evidenceNonce] says otherwise. */
   private fun candidate(
     n: IssuedNonce,
     gateId: String = n.gateId,
@@ -355,6 +487,7 @@ class ApprovalAcceptTest {
     publicKey: String = "pk-operator",
     signature: String = GENUINE,
     carrier: String = "carrier-1",
+    evidenceNonce: String = nonce,
   ) =
     ApprovalCandidate(
       gateId,
@@ -367,8 +500,8 @@ class ApprovalAcceptTest {
           carrierArtifactId = carrier,
           gateId = gateId,
           payloadDigest = digest,
-          nonce = nonce,
-          signedPreimage = committedPreimage(publicKey, gateId, digest, nonce),
+          nonce = evidenceNonce,
+          signedPreimage = committedPreimage(publicKey, gateId, digest, evidenceNonce),
         )
         .toJson(),
     )
@@ -376,9 +509,26 @@ class ApprovalAcceptTest {
   private companion object {
     const val GENUINE = "sig-genuine"
 
-    /** [ceremonyAuth]'s allow-list and quorum, with a verifier that accepts only [GENUINE]. */
+    /** A signature that does not verify, as long as [GENUINE]. */
+    val FORGED_SAME_LENGTH = "f".repeat(GENUINE.length)
+
+    /** Two allow-listed principals, the operator and a second holding two keys, so a cell can tell
+     * one listed key's allowance from another's, and a key's from its principal's; a verifier that accepts only [GENUINE]; and the operator's quorum. */
     val AUTH: LeadAuth =
-      LeadAuth(ceremonyAuth().allowList, ApprovalVerifier { _, _, signature, _ -> signature == GENUINE }, oneOfOne("operator"))
+      LeadAuth(
+        AllowList(
+          listOf(
+            Principal("operator", role = "authorizer", keys = listOf(SchemeKey("test", "pk-operator"))),
+            Principal(
+              "second",
+              role = "authorizer",
+              keys = listOf(SchemeKey("test", "pk-second"), SchemeKey("test", "pk-second-2")),
+            ),
+          )
+        ),
+        ApprovalVerifier { _, _, signature, _ -> signature == GENUINE },
+        oneOfOne("operator"),
+      )
 
     /** Fires nothing; a ceremony host refuses only [TimerService.NOOP]. */
     val TIMERS = TimerService { _, _ -> }

@@ -1,6 +1,7 @@
 package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.shared.journal.ChainCursor
+import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.JournalStore
 
 /**
@@ -48,8 +49,8 @@ internal class IncrementalLeadView<S, W>(
       return assembled
     }
 
-  /** Folds the entries appended since the last call. */
-  fun advance() {
+  /** Folds the entries appended since the last call, and returns them. */
+  fun advance(): List<JournalEntry> {
     current()
     try {
       val tail = store.readAfter(cursor)
@@ -59,6 +60,7 @@ internal class IncrementalLeadView<S, W>(
       state = next
       assembled = nextLead
       cursor = tail.cursor
+      return tail.entries
     } catch (x: Exception) {
       failure = x
       throw x
