@@ -5,12 +5,14 @@ import com.geekinasuit.agency.shared.auth.AllowList
 import com.geekinasuit.agency.shared.auth.ApprovalEvidence
 import com.geekinasuit.agency.shared.auth.ApprovalVerifier
 import com.geekinasuit.agency.shared.auth.Principal
+import com.geekinasuit.agency.shared.auth.QuorumGroup
 import com.geekinasuit.agency.shared.auth.SchemeKey
+import com.geekinasuit.agency.shared.auth.SignerLeaf
 import com.geekinasuit.agency.shared.auth.committedPreimage
-import com.geekinasuit.agency.shared.auth.oneOfOne
 import com.geekinasuit.agency.shared.journal.ChainBrokenException
 import com.geekinasuit.agency.shared.journal.EffectReceiver
 import com.geekinasuit.agency.shared.journal.JournalEntry
+import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
 import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
@@ -387,6 +389,172 @@ class ApprovalAcceptTest {
       assertEquals("no approval row", 0, rig.rawKindsAndPayloads().count { it.first == HostKinds.APPROVAL_RECORDED })
     }
 
+  @Test
+  fun twoOfThreeReleasesAtTheSecondApprovalInEitherOrder() {
+    for ((first, second) in listOf("pk-operator" to "pk-second", "pk-second" to "pk-operator")) {
+      onBothWorkflows { rig ->
+        val nonce = rig.openGate()
+        val host = rig.host()
+        assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce, publicKey = first)))
+        assertEquals("no release below the quorum", 0, rig.releaseRows().size)
+        assertEquals(ApprovalAccept.RELEASED, host.injectApproval(candidate(nonce, publicKey = second)))
+        val approvals = rig.approvalRows()
+        assertEquals(listOf(null, JsonPrimitive(true)), approvals.map { payload(it)["completesQuorum"] })
+        val release = rig.releaseRows().single()
+        assertEquals(ORIGIN_AUTH_LAYER, release.origin)
+        assertTrue("after the row that completed it", release.seq > approvals.last().seq)
+        assertEquals(JsonPrimitive(nonce.nonce), payload(release)["nonce"])
+        val folded = rig.host().refold().host
+        assertTrue("the fold honors it", folded.approvedOnCurrentDigest(nonce.gateId))
+        assertEquals("the nonce is spent", ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce, publicKey = "pk-third")))
+      }
+    }
+  }
+
+  @Test
+  fun aCrashBetweenTheApprovalAndTheReleaseLeavesTheMarkedRowAndNoRelease() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      assertEquals(ApprovalAccept.RECORDED, rig.host().injectApproval(candidate(nonce)))
+      val crash = FaultInjector { if (it == ApprovalAcceptor.FAULT_BEFORE_RELEASE) throw RuntimeException("crash") }
+      assertThrows(RuntimeException::class.java) {
+        rig.host(faults = crash).injectApproval(candidate(nonce, publicKey = "pk-second"))
+      }
+      assertEquals(JsonPrimitive(true), payload(rig.approvalRows().last())["completesQuorum"])
+      assertEquals(0, rig.releaseRows().size)
+      val replay = rig.host().injectApproval(candidate(nonce, publicKey = "pk-second"))
+      assertEquals("the nonce is still open, and a replay releases nothing here", ApprovalAccept.DUPLICATE, replay)
+      assertEquals(0, rig.releaseRows().size)
+    }
+
+  @Test
+  fun aReleaseThatFailsOnALiveHostStopsTheBoundaryAndIsEscalated() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      var failed = false
+      val failOnce = FaultInjector {
+        if (it == ApprovalAcceptor.FAULT_BEFORE_RELEASE && !failed) {
+          failed = true
+          throw RuntimeException("the release append failed")
+        }
+      }
+      val host = rig.host(faults = failOnce)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      assertThrows(RuntimeException::class.java) { host.injectApproval(candidate(nonce, publicKey = "pk-second")) }
+      val retry = assertThrows(IllegalStateException::class.java) {
+        host.injectApproval(candidate(nonce, publicKey = "pk-second"))
+      }
+      assertTrue("a redelivery is refused, not taken as a duplicate", "approval boundary stopped" in retry.message!!)
+      assertEquals(
+        "one escalation",
+        1,
+        rig.rawKindsAndPayloads().count { (kind, payload) ->
+          kind == HostKinds.ESCALATED && "approval boundary stopped" in payload
+        },
+      )
+      assertEquals(0, rig.releaseRows().size)
+    }
+
+  @Test
+  fun aLoneApprovalThatMeetsTheQuorumReleases() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      assertEquals(ApprovalAccept.RELEASED, rig.host(auth = LOOSENED).injectApproval(candidate(nonce)))
+      assertEquals(JsonPrimitive(true), payload(rig.approvalRows().single())["completesQuorum"])
+      assertEquals(1, rig.releaseRows().size)
+    }
+
+  @Test
+  fun aCrashBeforeTheDoorbellLeavesTheReleaseForTheRestartedHost() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      assertEquals(ApprovalAccept.RECORDED, rig.host().injectApproval(candidate(nonce)))
+      val crash = FaultInjector { if (it == ApprovalAcceptor.FAULT_AFTER_RELEASE) throw RuntimeException("crash") }
+      assertThrows(RuntimeException::class.java) {
+        rig.host(faults = crash).injectApproval(candidate(nonce, publicKey = "pk-second"))
+      }
+      assertTrue(rig.host().driveUntilQuiescent().host.approvedOnCurrentDigest(nonce.gateId))
+    }
+
+  @Test
+  fun theReleaseWakesAnIdleLoop() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      assertEquals(ApprovalAccept.RECORDED, rig.host().injectApproval(candidate(nonce)))
+      val host = rig.host()
+      val loop = Thread { host.runLoop() }
+      loop.start()
+      try {
+        awaitIdle(loop)
+        assertEquals(ApprovalAccept.RELEASED, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
+        // The loop may already be appending: wait for a row after the release, wherever it lands.
+        val release = rig.releaseRows().single().seq
+        awaitRowAfter(rig, release, "the loop never woke to the release")
+      } finally {
+        host.shutdown()
+        loop.join(10_000)
+      }
+    }
+
+  @Test
+  fun aLoosenedSpecAtRestartReleasesNothingAlreadyJournaled() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      assertEquals(ApprovalAccept.RECORDED, rig.host().injectApproval(candidate(nonce)))
+      val loosened = rig.host(auth = LOOSENED)
+      assertFalse(loosened.refold().host.approvedOnCurrentDigest(nonce.gateId))
+      assertEquals(ApprovalAccept.DUPLICATE, loosened.injectApproval(candidate(nonce)))
+      assertEquals(0, rig.releaseRows().size)
+      val fresh = loosened.injectApproval(candidate(nonce, publicKey = "pk-second"))
+      assertEquals("positive control: a new approval under it releases", ApprovalAccept.RELEASED, fresh)
+    }
+
+  @Test
+  fun revokeThenRegrantOverAnExistingReleaseRow() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val host = rig.host()
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      assertEquals(ApprovalAccept.RELEASED, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
+      val firstRelease = rig.releaseRows().single().seq
+
+      val revoked = rig.host(auth = REVOKED)
+      val underRevoke = revoked.refold().host
+      assertFalse("the revoked approver's release no longer holds", underRevoke.approvedOnCurrentDigest(nonce.gateId))
+      assertEquals(listOf(firstRelease), underRevoke.staleReleases.map { it.first })
+      val third = revoked.injectApproval(candidate(nonce, publicKey = "pk-third"))
+      assertEquals("the nonce is open again, and the third meets the revoked quorum", ApprovalAccept.RELEASED, third)
+      val secondRelease = rig.releaseRows().last().seq
+
+      val regranted = rig.host().refold().host
+      assertTrue("the first release holds again", regranted.approvedOnCurrentDigest(nonce.gateId))
+      val stale = regranted.staleReleases.map { it.first }
+      assertEquals("the second folds stale: the gate is released once", listOf(secondRelease), stale)
+    }
+
+  private fun payload(e: JournalEntry): JsonObject = Json.parseToJsonElement(e.payloadJson).jsonObject
+
+  /** Waits until [loop] is blocked taking its next wake from the queue: its first wake is done. */
+  private fun awaitIdle(loop: Thread) {
+    val deadline = System.nanoTime() + 10_000_000_000L
+    while (System.nanoTime() < deadline) {
+      val taking = loop.stackTrace.any { it.className.endsWith("LinkedBlockingQueue") && it.methodName == "take" }
+      if (taking && loop.state == Thread.State.WAITING) return
+      Thread.sleep(20)
+    }
+    throw AssertionError("the loop never went idle")
+  }
+
+  /** Waits until the journal holds a row after seq [seq]. */
+  private fun awaitRowAfter(rig: Rig, seq: Long, what: String) {
+    val deadline = System.nanoTime() + 10_000_000_000L
+    while (System.nanoTime() < deadline) {
+      if (rig.store.readAll().any { it.seq > seq }) return
+      Thread.sleep(20)
+    }
+    throw AssertionError(what)
+  }
+
   /** [actual] is [expected], and the journal still holds only the [rows] approval rows it held before. */
   private fun assertDropped(rig: Rig, expected: ApprovalAccept, actual: ApprovalAccept, rows: Int = 0) {
     assertEquals(expected, actual)
@@ -409,12 +577,14 @@ class ApprovalAcceptTest {
     val dir: File = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
 
-    abstract fun host(faults: FaultInjector = FaultInjector.NONE): AgentHost<*>
+    abstract fun host(faults: FaultInjector = FaultInjector.NONE, auth: LeadAuth = AUTH): AgentHost<*>
 
     /** Drives a host until its gate is open, and returns the nonce minted for it. */
     fun openGate(): IssuedNonce = host().driveUntilQuiescent().host.issuedNonces.values.single()
 
     fun approvalRows(): List<JournalEntry> = store.readAll().filter { it.kind == HostKinds.APPROVAL_RECORDED }
+
+    fun releaseRows(): List<JournalEntry> = store.readAll().filter { it.kind == KIND_GATE_RELEASED }
 
     /** Every row's kind and payload, read past the chain check, for a journal that no longer verifies. */
     fun rawKindsAndPayloads(): List<Pair<String, String>> =
@@ -432,7 +602,7 @@ class ApprovalAcceptTest {
       File(dir, "ticket.txt").writeText("$ref\n")
     }
 
-    override fun host(faults: FaultInjector): AgentHost<*> =
+    override fun host(faults: FaultInjector, auth: LeadAuth): AgentHost<*> =
       ticketLead(
         store = store,
         cognition = ScriptedCognition(),
@@ -441,7 +611,7 @@ class ApprovalAcceptTest {
         ticketSource = FileTicketSource(File(dir, "ticket.txt")),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
-        leadAuth = AUTH,
+        leadAuth = auth,
         timers = TIMERS,
         faults = faults,
       )
@@ -450,7 +620,7 @@ class ApprovalAcceptTest {
   private inner class GateRig : Rig("a workflow that is not the ticket workflow") {
     private val evidence = File(dir, "evidence.txt").apply { writeText("approve this\n") }
 
-    override fun host(faults: FaultInjector): AgentHost<*> =
+    override fun host(faults: FaultInjector, auth: LeadAuth): AgentHost<*> =
       AgentHost(
         store = store,
         cognition = ProposeTheGate,
@@ -459,7 +629,7 @@ class ApprovalAcceptTest {
         workflow = GateWorkflow(evidence),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
-        leadAuth = AUTH,
+        leadAuth = auth,
         timers = TIMERS,
         faults = faults,
       )
@@ -512,23 +682,30 @@ class ApprovalAcceptTest {
     /** A signature that does not verify, as long as [GENUINE]. */
     val FORGED_SAME_LENGTH = "f".repeat(GENUINE.length)
 
-    /** Two allow-listed principals, the operator and a second holding two keys, so a cell can tell
-     * one listed key's allowance from another's, and a key's from its principal's; a verifier that accepts only [GENUINE]; and the operator's quorum. */
-    val AUTH: LeadAuth =
+    val OPERATOR = Principal("operator", role = "authorizer", keys = listOf(SchemeKey("test", "pk-operator")))
+
+    /** Holds two keys, so a cell can tell a key's allowance from its principal's. */
+    val SECOND =
+      Principal("second", role = "authorizer", keys = listOf(SchemeKey("test", "pk-second"), SchemeKey("test", "pk-second-2")))
+
+    val THIRD = Principal("third", role = "authorizer", keys = listOf(SchemeKey("test", "pk-third")))
+
+    /** [principals], a verifier that accepts only [GENUINE], and [threshold] of [quorumOf]. */
+    fun authOf(principals: List<Principal>, threshold: Int, vararg quorumOf: String) =
       LeadAuth(
-        AllowList(
-          listOf(
-            Principal("operator", role = "authorizer", keys = listOf(SchemeKey("test", "pk-operator"))),
-            Principal(
-              "second",
-              role = "authorizer",
-              keys = listOf(SchemeKey("test", "pk-second"), SchemeKey("test", "pk-second-2")),
-            ),
-          )
-        ),
+        AllowList(principals),
         ApprovalVerifier { _, _, signature, _ -> signature == GENUINE },
-        oneOfOne("operator"),
+        QuorumGroup(threshold, quorumOf.map { SignerLeaf(it) }),
       )
+
+    /** Two of the three principals release, so one approval alone does not. */
+    val AUTH: LeadAuth = authOf(listOf(OPERATOR, SECOND, THIRD), 2, "operator", "second", "third")
+
+    /** [AUTH] loosened: any one of the three releases. */
+    val LOOSENED: LeadAuth = authOf(listOf(OPERATOR, SECOND, THIRD), 1, "operator", "second", "third")
+
+    /** [AUTH] with the second principal revoked: two of the operator and the third release. */
+    val REVOKED: LeadAuth = authOf(listOf(OPERATOR, THIRD), 2, "operator", "third")
 
     /** Fires nothing; a ceremony host refuses only [TimerService.NOOP]. */
     val TIMERS = TimerService { _, _ -> }

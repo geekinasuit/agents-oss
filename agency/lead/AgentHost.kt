@@ -213,7 +213,11 @@ class AgentHost<S> internal constructor(
   private val queue = LinkedBlockingQueue<WakeEvent>()
 
   /** The approval accept boundary ([injectApproval]). Stopped when [runLoop] exits. */
-  private val approvals = ApprovalAcceptor(store, leadAuth, workflow.fold, faults, ::escalate)
+  private val approvals =
+    ApprovalAcceptor(store, leadAuth, workflow.fold, faults, ::escalate) { gateId, payloadDigest ->
+      // offer, not put — same false-refusal reasoning as injectMail's doorbell.
+      queue.offer(WakeEvent.AuthRelease(gateId, payloadDigest))
+    }
 
   /** Structural single-run guard: the single-writer/single-loop-thread rule is enforced,
    * not just documented — a second concurrent run mode throws instead of racing the store. */
@@ -303,10 +307,14 @@ class AgentHost<S> internal constructor(
    * hold yet before this returns ([ApprovalAcceptor] says how). A rejected approval is journaled
    * only within its claimed key's allowance on the nonce, and counts toward nothing. Everything else
    * is dropped, and the result says why. A host whose loop has exited, or whose view of the journal
-   * failed, refuses by throwing, and appends nothing.
+   * failed, refuses by throwing, and appends nothing. One more throw is not a refusal: an approval
+   * that completes the quorum and fails before its release is journaled throws with its row (and an
+   * escalation) already in the journal, and the host then refuses every later approval until it
+   * restarts.
    *
-   * No doorbell is rung: an approval that completes no quorum changes nothing the loop acts on, and
-   * nothing here writes a release yet.
+   * An approval that completes the gate's quorum also journals the gate's release, then rings the
+   * loop's doorbell, so the loop wakes to a journal that holds it. An approval that completes no
+   * quorum rings nothing: it changes nothing the loop acts on.
    */
   fun injectApproval(candidate: ApprovalCandidate): ApprovalAccept = approvals.accept(candidate)
 
