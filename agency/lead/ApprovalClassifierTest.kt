@@ -1,11 +1,14 @@
 package com.geekinasuit.agency.lead
 
+import com.geekinasuit.agency.shared.auth.AllowList
 import com.geekinasuit.agency.shared.auth.ApprovalEvidence
 import com.geekinasuit.agency.shared.auth.ApprovalVerifier
+import com.geekinasuit.agency.shared.auth.Principal
 import com.geekinasuit.agency.shared.auth.SchemeKey
 import com.geekinasuit.agency.shared.auth.committedPreimage
 import com.geekinasuit.agency.shared.auth.oneOfOne
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
@@ -81,6 +84,26 @@ class ApprovalClassifierTest {
       ApprovalVerdict.Rejected("carries no evidence sub-object", null),
       classifyApproval(emptyMap(), noEvidence, seq = 7, AUTH),
     )
+  }
+
+  @Test
+  fun aGenuineApprovalWhosePayloadNamesTheUnlistedSentinelNeverVerifies() {
+    val sentinel = JsonObject(payload() + ("principalId" to JsonPrimitive(LeadAuth.UNLISTED_PRINCIPAL_ID)))
+    assertEquals(
+      ApprovalVerdict.Rejected(
+        "payload principalId disagrees with the allow-list identity resolved from the preimage",
+        SchemeKey("test", OPERATOR_KEY),
+      ),
+      classifyApproval(emptyMap(), sentinel, seq = 7, AUTH),
+    )
+  }
+
+  @Test
+  fun noAllowListMayNameTheUnlistedSentinel() {
+    val sentinel = Principal(LeadAuth.UNLISTED_PRINCIPAL_ID, role = "authorizer", keys = listOf(SchemeKey("test", "pk-x")))
+    assertThrows(IllegalArgumentException::class.java) {
+      LeadAuth(AllowList(listOf(sentinel)), AUTH.verifier, oneOfOne(LeadAuth.UNLISTED_PRINCIPAL_ID))
+    }
   }
 
   @Test

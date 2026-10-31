@@ -300,9 +300,10 @@ class AgentHost<S> internal constructor(
   /**
    * Accept one approval, from any thread: the host bounds it against its records as the journal
    * stands now, classifies it with the fold's own code, and journals a verified approval it does not
-   * hold yet before this returns ([ApprovalAcceptor] says how). Everything else is dropped, and the
-   * result says why. A host whose loop has exited, or whose view of the journal failed, refuses by
-   * throwing, and appends nothing.
+   * hold yet before this returns ([ApprovalAcceptor] says how). A rejected approval is journaled
+   * only within its claimed key's allowance on the nonce, and counts toward nothing. Everything else
+   * is dropped, and the result says why. A host whose loop has exited, or whose view of the journal
+   * failed, refuses by throwing, and appends nothing.
    *
    * No doorbell is rung: an approval that completes no quorum changes nothing the loop acts on, and
    * nothing here writes a release yet.

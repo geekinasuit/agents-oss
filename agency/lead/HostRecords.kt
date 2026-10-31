@@ -79,12 +79,21 @@ data class VerifiedApproval(
  * cannot authorize a ceremony release yet": [hasApprovers] is false, and [foldRelease]
  * refuses the nonce-LESS pre-ceremony path under any ceremony auth, so only a DENY_ALL fold
  * still honors a nonce-less release.
+ *
+ * An [allowList] naming a principal [UNLISTED_PRINCIPAL_ID] is refused: that id is the one an
+ * approval row names when its key resolves to no principal, so no principal may hold it.
  */
 class LeadAuth(
   val allowList: AllowList,
   val verifier: ApprovalVerifier,
   val quorum: QuorumNode,
 ) {
+  init {
+    require(allowList.byId(UNLISTED_PRINCIPAL_ID) == null) {
+      "principalId '$UNLISTED_PRINCIPAL_ID' is reserved for approvals whose key is in no allow-list"
+    }
+  }
+
   /** Whether this auth can authorize a ceremony release at all — true iff the [allowList]
    * names at least one principal. It is the semantic complement of [DENY_ALL]'s empty
    * allow-list, derived from the security object rather than an identity check against the
@@ -95,6 +104,10 @@ class LeadAuth(
     get() = !allowList.isEmpty()
 
   companion object {
+    /** The principal an approval row names when its key resolves to none, and on every row whose
+     * approval did not re-verify. */
+    const val UNLISTED_PRINCIPAL_ID = "unlisted-key"
+
     val DENY_ALL: LeadAuth = LeadAuth(AllowList(emptyList()), RejectingVerifier, oneOfOne("__none__"))
   }
 }
