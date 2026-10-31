@@ -4,6 +4,8 @@ import com.geekinasuit.agency.lead.LeadAuth.Companion.UNLISTED_PRINCIPAL_ID
 import com.geekinasuit.agency.lead.PayloadReaders.str
 import com.geekinasuit.agency.shared.auth.ApprovalEvidence
 import com.geekinasuit.agency.shared.auth.SchemeKey
+import com.geekinasuit.agency.shared.auth.quorumSatisfied
+import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
 import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.JournalStore
 import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
@@ -20,10 +22,20 @@ import kotlinx.serialization.json.put
  */
 data class ApprovalCandidate(val gateId: String, val nonce: String, val payloadDigest: String, val evidence: JsonObject)
 
-/** What [AgentHost.injectApproval] did with one [ApprovalCandidate]. Only [RECORDED] and [REJECTED] append. */
+/** What [AgentHost.injectApproval] did with one [ApprovalCandidate]. Only [RECORDED], [RELEASED] and
+ * [REJECTED] append. */
 enum class ApprovalAccept {
-  /** The approval re-verified and was new; its row is in the journal. */
+  /** The approval re-verified and was new; its row is in the journal. It did not complete the gate's
+   * quorum. */
   RECORDED,
+
+  /**
+   * The approval re-verified, was new, and completed the gate's quorum: its row, marked as completing
+   * it, and the gate's release are in the journal, and the loop has been woken. The fold decides the
+   * release when it folds it, as it decides every release, so a row the loop appended between the
+   * two (a scope end, a consumed nonce) leaves the release stale.
+   */
+  RELEASED,
 
   /** The candidate names a gate that is not open, or a nonce that is not the gate's open nonce. */
   NOT_OPEN,
@@ -42,7 +54,9 @@ enum class ApprovalAccept {
    * claimed key on this nonce, so nothing is appended. */
   REJECTED_OVER_ALLOWANCE,
 
-  /** The row would exceed [ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS]; it is refused whole, never cut. */
+  /** The row would exceed [ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS]; it is refused whole, never cut.
+   * The row is measured as it would be journaled, with any field the acceptor adds, so an approval
+   * that completes the quorum can be refused where the same approval below it would be recorded. */
   OVERSIZED,
 }
 
@@ -62,6 +76,15 @@ enum class ApprovalAccept {
  *    the journal does not hold yet is appended with the authorization layer's origin. A duplicate is
  *    dropped, since the journal holds it already. A rejected one is appended only as its claimed
  *    key's allowance on the nonce, below.
+ * 6. When the verified approvers bound to the gate at the nonce, with the new approval, meet the
+ *    quorum, the approval's row is marked `completesQuorum: true`, the gate's release naming the nonce
+ *    is appended after it, and only then is the loop woken ([ring]), so the loop wakes to a journal
+ *    that holds the release.
+ *
+ * The mark records the acceptor's own decision, under the auth in force when the row was appended.
+ * The fold reads only the fields it names, so it ignores the mark. Only a verified-new approval
+ * decides a release: an approval already journaled that a loosened auth would now count releases
+ * nothing here, and a release that never landed after its marked row is repaired elsewhere.
  *
  * The allowance: on each open nonce, the journal holds at most one rejected row per claimed key
  * ([ApprovalVerdict.Rejected.claimedKey], an allow-listed key the evidence names consistently), and
@@ -85,7 +108,9 @@ enum class ApprovalAccept {
  *
  * When the view fails to advance (a chain fault in the tail, an entry the fold refuses, a store
  * error), the acceptor stops: the failure is escalated and thrown, and every later [accept] throws
- * until the host restarts. The view cannot be trusted after such a failure. Nothing here restarts the
+ * until the host restarts. The view cannot be trusted after such a failure. It stops the same way
+ * when an approval that completes the quorum fails between its row and the doorbell: its row may be
+ * journaled without the release, and only a restart repairs that. Nothing here restarts the
  * host: a chain fault also stops the loop at its next wake, but that wake may be far off, and a
  * transient store error may never reach the loop at all. Until a restart, the escalation is the only
  * signal that approvals are refused.
@@ -96,6 +121,8 @@ internal class ApprovalAcceptor<S>(
   private val fold: WorkflowFold<S, *>,
   private val faults: FaultInjector,
   private val escalate: (String) -> Unit,
+  /** Wakes the loop for the release of a gate on a digest, after the release is journaled. */
+  private val ring: (gateId: String, payloadDigest: String) -> Unit,
 ) {
   private val lock = Any()
   private var view: IncrementalLeadView<S, *>? = null
@@ -110,8 +137,8 @@ internal class ApprovalAcceptor<S>(
     synchronized(lock) { if (stoppedBecause == null) stoppedBecause = reason }
   }
 
-  /** Decides on [candidate], appending its row only when it is [ApprovalAccept.RECORDED] or
-   * [ApprovalAccept.REJECTED]. */
+  /** Decides on [candidate], appending only when it is [ApprovalAccept.RECORDED],
+   * [ApprovalAccept.RELEASED] or [ApprovalAccept.REJECTED]. */
   fun accept(candidate: ApprovalCandidate): ApprovalAccept =
     synchronized(lock) {
       stoppedBecause?.let { throw IllegalStateException("approval refused: the approval boundary has stopped ($it)") }
@@ -124,8 +151,32 @@ internal class ApprovalAcceptor<S>(
       if (!fits(payload)) return ApprovalAccept.OVERSIZED
       when (val verdict = classifyApproval(host.verifiedApprovals, payload, UNJOURNALED_SEQ, auth)) {
         is ApprovalVerdict.VerifiedNew -> {
-          append(payload)
-          ApprovalAccept.RECORDED
+          val approvers = host.boundApprovers(gate, open.nonce) + verdict.approval.principalId
+          if (!quorumSatisfied(auth.quorum, approvers)) {
+            append(payload)
+            return ApprovalAccept.RECORDED
+          }
+          val marked = JsonObject(payload + ("completesQuorum" to JsonPrimitive(true)))
+          if (!fits(marked)) return ApprovalAccept.OVERSIZED
+          // Once the marked row may be durable, a failure strands a met quorum: a redelivery is its
+          // duplicate, and nothing else here writes the release. So the acceptor stops and
+          // escalates, as for a failed view, and the restarted host repairs the release.
+          stoppingOnFailure {
+            append(marked)
+            faults.at(FAULT_BEFORE_RELEASE)
+            store.append(
+              KIND_GATE_RELEASED,
+              buildJsonObject {
+                put("gateId", gate.gateId)
+                put("payloadDigest", open.payloadDigest)
+                put("nonce", open.nonce)
+              },
+              origin = ORIGIN_AUTH_LAYER,
+            )
+            faults.at(FAULT_AFTER_RELEASE)
+            ring(gate.gateId, open.payloadDigest)
+          }
+          ApprovalAccept.RELEASED
         }
         is ApprovalVerdict.VerifiedDuplicate -> ApprovalAccept.DUPLICATE
         is ApprovalVerdict.Rejected -> {
@@ -148,13 +199,18 @@ internal class ApprovalAcceptor<S>(
 
   private fun fits(row: JsonObject): Boolean = row.toString().length <= MAX_APPROVAL_ROW_CHARS
 
-  private fun advance(): HostState =
+  private fun advance(): HostState = stoppingOnFailure {
+    val v = view ?: IncrementalLeadView(store, auth, fold).also { view = it }
+    val folded = v.advance()
+    val host = v.host
+    tallyRejected(folded, host)
+    host
+  }
+
+  /** Runs [block]; when it throws, stops the acceptor, escalates why, and rethrows. */
+  private inline fun <T> stoppingOnFailure(block: () -> T): T =
     try {
-      val v = view ?: IncrementalLeadView(store, auth, fold).also { view = it }
-      val folded = v.advance()
-      val host = v.host
-      tallyRejected(folded, host)
-      host
+      block()
     } catch (x: Exception) {
       val reason = "approval boundary stopped: " + (x.message ?: x::class.qualifiedName ?: "unknown")
       stoppedBecause = reason
@@ -224,8 +280,14 @@ internal class ApprovalAcceptor<S>(
      * appended. */
     const val FAULT_BEFORE_APPEND = "approval-before-append"
 
-    /** The fault point after an approval's row is appended, before [accept] returns. */
+    /** The fault point after an approval's row is appended, before anything after it. */
     const val FAULT_AFTER_APPEND = "approval-after-append"
+
+    /** The fault point after an approval's row marked as completing the quorum, before the release. */
+    const val FAULT_BEFORE_RELEASE = "approval-before-release"
+
+    /** The fault point after the release is appended, before the loop is woken. */
+    const val FAULT_AFTER_RELEASE = "approval-after-release"
 
     /**
      * The largest approval row the boundary journals, as JSON chars, measured before the store
