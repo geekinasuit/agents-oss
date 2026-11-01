@@ -798,6 +798,33 @@ class AuthFoldTest {
   }
 
   @Test
+  fun approvalAuditRowsOfAnotherOriginLandVisibly() {
+    val s = open(newStoreDir())
+    val forged =
+      listOf(ORIGIN_COGNITION, ORIGIN_SUBSTRATE).flatMap { origin ->
+        listOf(
+          s.entry(HostKinds.APPROVAL_DROPS_SUMMARIZED, origin, "gateId" to "g1", "nonce" to "n1"),
+          s.entry(HostKinds.APPROVAL_DROPS_AGGREGATED, origin, "notOpen" to "3"),
+        )
+      }
+    assertEquals(
+      forged.map { it to s.readAll().single { e -> e.seq == it }.kind },
+      s.host().misOriginedEntries,
+    )
+  }
+
+  @Test
+  fun approvalAuditRowsOfTheAuthLayerChangeNoHostState() {
+    val s = open(newStoreDir())
+    s.gateOpened("g1", "d1")
+    s.nonceIssued("n1", "g1", "d1")
+    val before = s.host()
+    s.entry(HostKinds.APPROVAL_DROPS_SUMMARIZED, ORIGIN_AUTH_LAYER, "gateId" to "g1", "nonce" to "n1")
+    s.entry(HostKinds.APPROVAL_DROPS_AGGREGATED, ORIGIN_AUTH_LAYER, "notOpen" to "3")
+    assertEquals("audit-only: folded away", before, s.host())
+  }
+
+  @Test
   fun approvalForUnknownGateOrUnmintedNonceIsRecordedAndFlagged() {
     // Mirrors NONCE_ISSUED's flagged-but-kept pattern: a VERIFIED approval whose committed
     // gate was never opened / nonce never minted is kept (a release re-checks against live

@@ -16,15 +16,28 @@ class KindPartitionTest {
 
   /** Every kind [LeadKinds] declares, read from its constants, so a kind added there without being
    * given to the host or the workflow fails [everyLeadKindBelongsToExactlyOneSide]. */
-  private val declaredLeadKinds: Set<String> =
-    LeadKinds::class
-      .java
-      .declaredFields
+  private val declaredLeadKinds: Set<String> = stringConstants(LeadKinds::class.java)
+
+  /** Every kind [HostKinds] declares, read the same way, so a host kind added there without being
+   * given to the host fails [everyHostKindIsTheHosts], whether or not [LeadKinds] aliases it. */
+  private val declaredHostKinds: Set<String> = stringConstants(HostKinds::class.java)
+
+  private fun stringConstants(holder: Class<*>): Set<String> =
+    holder.declaredFields
       .filter { Modifier.isStatic(it.modifiers) && it.type == String::class.java }
       .map { it.get(null) as String }
       .toSet()
 
   private val ticketWorkflow = TicketWorkflow { null }
+
+  @Test
+  fun everyHostKindIsTheHosts() {
+    assertTrue("HostKinds declares no kinds; the reflection read nothing", declaredHostKinds.isNotEmpty())
+    for (kind in declaredHostKinds) {
+      assertTrue("host kind $kind is not among the kinds the host folds", kind in HOST_KINDS)
+      assertTrue("host kind $kind is claimed by the workflow", kind !in ticketWorkflow.fold.substrateKinds)
+    }
+  }
 
   @Test
   fun everyLeadKindBelongsToExactlyOneSide() {

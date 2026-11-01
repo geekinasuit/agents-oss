@@ -29,6 +29,8 @@ class KindWireStringsTest {
       HostKinds.NONCE_ISSUED to "nonce-issued",
       HostKinds.NONCE_CONSUMED to "nonce-consumed",
       HostKinds.APPROVAL_RECORDED to "approval-recorded",
+      HostKinds.APPROVAL_DROPS_SUMMARIZED to "approval-drops-summarized",
+      HostKinds.APPROVAL_DROPS_AGGREGATED to "approval-drops-aggregated",
     )
 
   private val ticketKinds =
@@ -84,8 +86,15 @@ class KindWireStringsTest {
         LeadKinds.NONCE_ISSUED to "nonce-issued",
         LeadKinds.NONCE_CONSUMED to "nonce-consumed",
         LeadKinds.APPROVAL_RECORDED to "approval-recorded",
+        LeadKinds.APPROVAL_DROPS_SUMMARIZED to "approval-drops-summarized",
+        LeadKinds.APPROVAL_DROPS_AGGREGATED to "approval-drops-aggregated",
       )
     for ((actual, wire) in pairs) assertEquals(wire, wire, actual)
-    assertEquals("LeadKinds names exactly the host's and the ticket workflow's kinds", pairs.map { it.second }.toSet(), declared(LeadKinds::class.java))
+    assertEquals("the lead kinds pinned here are exactly those declared", pairs.map { it.second }.toSet(), declared(LeadKinds::class.java))
+    assertEquals(
+      "LeadKinds names exactly the host's and the ticket workflow's kinds",
+      declared(HostKinds::class.java) + declared(TicketKinds::class.java),
+      declared(LeadKinds::class.java),
+    )
   }
 }

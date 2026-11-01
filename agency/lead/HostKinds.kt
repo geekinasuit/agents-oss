@@ -103,4 +103,25 @@ object HostKinds {
    * field defers to this fold.
    */
   const val APPROVAL_RECORDED = "approval-recorded"
+
+  /**
+   * The approval accept boundary's account of the attempts it dropped on one nonce, written once the
+   * nonce has closed and only when something was dropped (payload: gateId, nonce, payloadDigest,
+   * countsSince, duplicates, originalSeqs, rejectedOverAllowance, wrongDigest, oversized,
+   * firstDropped). The keys `rejectedOverAllowance` counts under, and the evidence in `firstDropped`,
+   * are as the attempts CLAIMED them and UNAUTHENTICATED: anyone can name a genuine approver's key on a
+   * forgery, so a count under a key says nothing about that approver. AUTH-LAYER-authored, like
+   * [APPROVAL_RECORDED], and AUDIT-ONLY: the fold records no state from it, so a binary that predates
+   * it folds it away and reaches the same verdicts. A row of this kind with any other origin lands in
+   * [HostState.misOriginedEntries].
+   */
+  const val APPROVAL_DROPS_SUMMARIZED = "approval-drops-summarized"
+
+  /**
+   * The approval accept boundary's count of attempts that named no open nonce, over one interval,
+   * written after the interval ends and only when the count is not zero (payload: notOpen,
+   * intervalStart, countsSince). AUTH-LAYER-authored and AUDIT-ONLY, as
+   * [APPROVAL_DROPS_SUMMARIZED] is.
+   */
+  const val APPROVAL_DROPS_AGGREGATED = "approval-drops-aggregated"
 }

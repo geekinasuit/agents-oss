@@ -64,6 +64,8 @@ object LeadKinds {
   const val NONCE_ISSUED = HostKinds.NONCE_ISSUED
   const val NONCE_CONSUMED = HostKinds.NONCE_CONSUMED
   const val APPROVAL_RECORDED = HostKinds.APPROVAL_RECORDED
+  const val APPROVAL_DROPS_SUMMARIZED = HostKinds.APPROVAL_DROPS_SUMMARIZED
+  const val APPROVAL_DROPS_AGGREGATED = HostKinds.APPROVAL_DROPS_AGGREGATED
 }
 
 /** A ticket lead's own state: the current ticket, its phase, its recorded plan and manifest, and the
