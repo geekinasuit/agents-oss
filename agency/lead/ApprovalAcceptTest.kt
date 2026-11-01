@@ -846,6 +846,103 @@ class ApprovalAcceptTest {
     }
 
   @Test
+  fun attemptsNamingNoOpenNonceAreAggregatedInOneRowOnceTheirHourEnds() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      var now = T0
+      val timers = CapturedTimers()
+      val host = rig.host(timers = timers, clock = { now })
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce, gateId = "no-such-gate")))
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce, nonce = "no-such-nonce")))
+      now = T0 + HOUR - 1
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce, gateId = "no-such-gate")))
+      timers.fireAll()
+      assertEquals("none while the hour runs", 0, rig.aggregateRows().size)
+      assertEquals("and the timer comes back for it", 1, timers.armed.size)
+      now = T0 + HOUR
+      timers.fireAll()
+      val row = rig.aggregateRows().single()
+      assertEquals(ORIGIN_AUTH_LAYER, row.origin)
+      val a = payload(row)
+      assertEquals(3, a.getValue("notOpen").jsonPrimitive.int)
+      assertEquals(T0, a.getValue("intervalStart").jsonPrimitive.long)
+      assertEquals(T0, a.getValue("countsSince").jsonPrimitive.long)
+      assertEquals("nothing left to aggregate", 0, timers.armed.size)
+      assertEquals("an attempt on no open nonce is not a per-nonce drop", 0, rig.summaryRows().size)
+    }
+
+  @Test
+  fun aQuietHourWritesNoAggregate() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      var now = T0
+      val timers = CapturedTimers()
+      val host = rig.host(timers = timers, clock = { now })
+      now = T0 + 10 * MINUTE
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce, gateId = "no-such-gate")))
+      now = T0 + 2 * HOUR + 10 * MINUTE
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce, gateId = "no-such-gate")))
+      now = T0 + 3 * HOUR
+      timers.fireAll()
+      assertEquals(
+        "one row for each hour with a count, on the grid laid out from countsSince",
+        listOf(T0, T0 + 2 * HOUR),
+        rig.aggregateRows().map { payload(it).getValue("intervalStart").jsonPrimitive.long },
+      )
+    }
+
+  @Test
+  fun anAggregateTheStoreRefusesIsKeptForTheNextPass() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      var now = T0
+      val refusing = RefusingStore(rig.store, HostKinds.APPROVAL_DROPS_AGGREGATED)
+      val timers = CapturedTimers()
+      val host = rig.host(journal = refusing, timers = timers, clock = { now })
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce, gateId = "no-such-gate")))
+      now = T0 + HOUR
+      timers.fireAll()
+      assertEquals(0, rig.aggregateRows().size)
+      assertEquals("kept, so the timer comes back", 1, timers.armed.size)
+      refusing.refused.clear()
+      timers.fireAll()
+      assertEquals(1, payload(rig.aggregateRows().single()).getValue("notOpen").jsonPrimitive.int)
+      assertEquals(0, timers.armed.size)
+    }
+
+  @Test
+  fun anAggregateRefusedForGoodHoldsBackNoOther() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      var now = T0
+      val refusing = RefusingStore(rig.store).apply { refusedAggregateStart = T0 }
+      val timers = CapturedTimers()
+      val host = rig.host(journal = refusing, timers = timers, clock = { now })
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce, gateId = "no-such-gate")))
+      now = T0 + HOUR + MINUTE
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce, gateId = "no-such-gate")))
+      now = T0 + 2 * HOUR
+      timers.fireAll()
+      assertEquals(
+        "the first hour's row is refused, and the second's still lands",
+        listOf(T0 + HOUR),
+        rig.aggregateRows().map { payload(it).getValue("intervalStart").jsonPrimitive.long },
+      )
+      assertEquals("the refused one is kept, so the timer comes back", 1, timers.armed.size)
+    }
+
+  @Test
+  fun theIngressTimerIsDueATickAfterTheHostsClock() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val now = T0 + 5 * MINUTE
+      val timers = CapturedTimers()
+      val host = rig.host(timers = timers, clock = { now })
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce, gateId = "no-such-gate")))
+      assertEquals(now + ApprovalAcceptor.DEFAULT_TICK_MS, timers.armed.single().fireAtEpochMs)
+    }
+
+  @Test
   fun aMarkedRowOfAnotherOriginNeverYieldsARelease() =
     onBothWorkflows { rig ->
       val nonce = rig.openGate()
@@ -1039,7 +1136,10 @@ class ApprovalAcceptTest {
       auth: LeadAuth = AUTH,
       timers: TimerService = TIMERS,
       journal: JournalStore = store,
+      clock: () -> Long = System::currentTimeMillis,
     ): AgentHost<*>
+
+    fun aggregateRows(): List<JournalEntry> = store.readAll().filter { it.kind == HostKinds.APPROVAL_DROPS_AGGREGATED }
 
     /** Drives a host until its gate is open, and returns the nonce minted for it. */
     fun openGate(): IssuedNonce = host().driveUntilQuiescent().host.issuedNonces.values.single()
@@ -1130,25 +1230,40 @@ class ApprovalAcceptTest {
         super.closing(kind, nonce)
       }
 
-    override fun host(faults: FaultInjector, auth: LeadAuth, timers: TimerService, journal: JournalStore): AgentHost<*> =
-      ticketLead(
+    // The host's constructor, not ticketLead, so a cell can pass its own clock: ticketLead is public,
+    // and the clock is a test seam.
+    override fun host(
+      faults: FaultInjector,
+      auth: LeadAuth,
+      timers: TimerService,
+      journal: JournalStore,
+      clock: () -> Long,
+    ): AgentHost<*> =
+      AgentHost(
         store = journal,
         cognition = ScriptedCognition(),
         podRunner = FakePodRunner(),
         podSpec = PodSpec.fixture(),
-        ticketSource = FileTicketSource(File(dir, "ticket.txt")),
+        workflow = TicketWorkflow(FileTicketSource(File(dir, "ticket.txt"))),
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
         leadAuth = auth,
         timers = timers,
         faults = faults,
+        clock = clock,
       )
   }
 
   private inner class GateRig : Rig("a workflow that is not the ticket workflow") {
     private val evidence = File(dir, "evidence.txt").apply { writeText("approve this\n") }
 
-    override fun host(faults: FaultInjector, auth: LeadAuth, timers: TimerService, journal: JournalStore): AgentHost<*> =
+    override fun host(
+      faults: FaultInjector,
+      auth: LeadAuth,
+      timers: TimerService,
+      journal: JournalStore,
+      clock: () -> Long,
+    ): AgentHost<*> =
       AgentHost(
         store = journal,
         cognition = ProposeTheGate,
@@ -1160,6 +1275,7 @@ class ApprovalAcceptTest {
         leadAuth = auth,
         timers = timers,
         faults = faults,
+        clock = clock,
       )
   }
 
@@ -1184,6 +1300,7 @@ class ApprovalAcceptTest {
     val refused = refused.toMutableSet()
     var refusedReleaseNonce: String? = null
     var refusedSummaryNonce: String? = null
+    var refusedAggregateStart: Long? = null
 
     override fun append(kind: String, payload: JsonObject, origin: String, idempotencyKey: String?): JournalEntry {
       if (kind in refused) throw IllegalStateException("the store refused a $kind append")
@@ -1192,6 +1309,9 @@ class ApprovalAcceptTest {
       }
       if (kind == HostKinds.APPROVAL_DROPS_SUMMARIZED && payload["nonce"] == JsonPrimitive(refusedSummaryNonce)) {
         throw IllegalStateException("the store refused the summary of nonce $refusedSummaryNonce")
+      }
+      if (kind == HostKinds.APPROVAL_DROPS_AGGREGATED && payload["intervalStart"] == JsonPrimitive(refusedAggregateStart)) {
+        throw IllegalStateException("the store refused the aggregate of the interval at $refusedAggregateStart")
       }
       return inner.append(kind, payload, origin, idempotencyKey)
     }
@@ -1286,6 +1406,13 @@ class ApprovalAcceptTest {
 
     /** Fires nothing; a ceremony host refuses only [TimerService.NOOP]. */
     val TIMERS = TimerService { _, _ -> }
+
+    /** A fixed instant for the cells that pass their own clock. */
+    const val T0 = 1_800_000_000_000L
+
+    const val MINUTE = 60_000L
+
+    const val HOUR = ApprovalAcceptor.AGGREGATE_INTERVAL_MS
 
     /** A carrier id long enough that its row exceeds [ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS]. */
     const val MAX_CHARS = ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS + 1

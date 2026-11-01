@@ -128,6 +128,11 @@ class AgentHost<S> internal constructor(
   /** How many bound-copy reads may stay blocked past their deadline, each holding a thread, before
    * the next read is refused unopened ([readBoundCopy]). */
   private val maxParkedBoundReads: Int = DEFAULT_MAX_PARKED_BOUND_READS,
+  /** The wall clock, in epoch milliseconds, that the approval boundary stamps and buckets its drop
+   * counts by and sets its timer's due time with ([ApprovalAcceptor]). It must be the clock [timers]
+   * measures due times against, as the system clock is for [ThreadTimerService]; a test that passes
+   * its own passes a timer service that ignores due times. */
+  private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
   /** What the host does for [workflow]. */
@@ -222,6 +227,7 @@ class AgentHost<S> internal constructor(
       ::escalate,
       timers,
       ApprovalAcceptor.DEFAULT_TICK_MS,
+      clock,
     ) { gateId, payloadDigest ->
       // offer, not put — same false-refusal reasoning as injectMail's doorbell.
       queue.offer(WakeEvent.AuthRelease(gateId, payloadDigest))

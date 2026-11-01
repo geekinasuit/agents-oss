@@ -120,8 +120,9 @@ enum class ApprovalAccept {
  * rejection over its key's allowance, or a row too large) is counted on that nonce in memory. Once
  * the nonce has closed, the next pass journals one `approval-drops-summarized` row for it with the
  * counts and the first dropped attempt's evidence, then forgets them ([flush]). The counts start
- * over at a restart; each row's `countsSince` shows when they started. Attempts that name no open
- * nonce are not counted here.
+ * over at a restart; each row's `countsSince` shows when they started. An attempt that names no open
+ * nonce is counted by the hour instead, from `countsSince`, and each hour with a count gets one
+ * `approval-drops-aggregated` row once it has ended ([flushAggregates]).
  *
  * The lock is taken before the store's own, never while holding it, so the lock order is always this
  * lock, then the store's.
@@ -147,6 +148,9 @@ internal class ApprovalAcceptor<S>(
   private val timers: TimerService,
   /** How long after it is armed the ingress timer fires. */
   private val tickMs: Long,
+  /** The wall clock, in epoch milliseconds: the timer's due time, `countsSince`, and the hour an
+   * attempt naming no open nonce is counted in. */
+  private val clock: () -> Long,
   /** Wakes the loop for the release of a gate on a digest, after the release is journaled. */
   private val ring: (gateId: String, payloadDigest: String) -> Unit,
 ) {
@@ -172,9 +176,13 @@ internal class ApprovalAcceptor<S>(
    * An entry is made only for a nonce some candidate named as the open nonce of an open gate. */
   private val drops = linkedMapOf<String, NonceDrops>()
 
-  /** When this acceptor started counting drops; every summary carries it, so counts a restart
-   * reset show as such. */
-  private val countsSince = System.currentTimeMillis()
+  /** When this acceptor started counting drops; every summary and aggregate carries it, so counts a
+   * restart reset show as such. The aggregate's intervals are laid out from it. */
+  private val countsSince = clock()
+
+  /** Interval index ([intervalOf]) → the attempts in it that named no open nonce, until its aggregate
+   * is journaled ([flushAggregates]). Only intervals with a count are present. */
+  private val notOpen = linkedMapOf<Long, Int>()
 
   /** Stops the acceptor: every later [accept] throws. The first reason is kept. */
   fun stop(reason: String) {
@@ -187,9 +195,9 @@ internal class ApprovalAcceptor<S>(
     synchronized(lock) {
       stoppedBecause?.let { throw IllegalStateException("approval refused: the approval boundary has stopped ($it)") }
       val host = flush(repair(advance()))
-      val gate = host.openGates[candidate.gateId] ?: return ApprovalAccept.NOT_OPEN
+      val gate = host.openGates[candidate.gateId] ?: return notOpenDropped()
       val open = host.openNonceFor(gate)
-      if (open == null || open.nonce != candidate.nonce) return ApprovalAccept.NOT_OPEN
+      if (open == null || open.nonce != candidate.nonce) return notOpenDropped()
       val evidence = evidenceOf(candidate)
       if (candidate.payloadDigest != open.payloadDigest) {
         return dropped(open, evidence, ApprovalAccept.WRONG_DIGEST) { wrongDigest++ }
@@ -307,9 +315,10 @@ internal class ApprovalAcceptor<S>(
 
   /** Whether the ingress timer must come back to [host]: some marked row the repair would release
    * ([repairable]) still lacks its release, as after a release that failed, or some nonce's drops are
-   * not summarized yet. A nonce that stays open keeps the timer coming back while its gate waits. */
+   * not summarized yet, or some hour's count of attempts naming no open nonce is not aggregated yet.
+   * A nonce that stays open, or an hour not yet over, keeps the timer coming back. */
   private fun workDue(host: HostState): Boolean =
-    drops.isNotEmpty() || marked.any { (nonce, m) -> repairable(host, nonce, m) }
+    drops.isNotEmpty() || notOpen.isNotEmpty() || marked.any { (nonce, m) -> repairable(host, nonce, m) }
 
   /** The repair and the summaries, catching what they do not handle themselves; the host as the
    * journal then stands, or null when the acceptor is stopped or a doorbell after a release threw. In
@@ -401,7 +410,7 @@ internal class ApprovalAcceptor<S>(
     if (timerArmed) return
     timerArmed = true
     try {
-      timers.arm(ArmedTimer(TIMER_ID, System.currentTimeMillis() + tickMs, TIMER_ACTION)) { onTimerDue() }
+      timers.arm(ArmedTimer(TIMER_ID, clock() + tickMs, TIMER_ACTION)) { onTimerDue() }
     } catch (x: Exception) {
       timerArmed = false
       throw x
@@ -547,6 +556,7 @@ internal class ApprovalAcceptor<S>(
    * Returns [host] unchanged: the rows are audit-only.
    */
   private fun flush(host: HostState): HostState {
+    flushAggregates()
     if (drops.isEmpty()) return host
     val open = host.openGates.values.mapNotNullTo(mutableSetOf()) { host.openNonceFor(it)?.nonce }
     for ((nonce, d) in drops.toList()) {
@@ -559,6 +569,57 @@ internal class ApprovalAcceptor<S>(
       drops.remove(nonce)
     }
     return host
+  }
+
+  /** Counts an attempt that named no open nonce in the current interval, arms the ingress timer so
+   * the interval's aggregate is written after it ends, and returns [ApprovalAccept.NOT_OPEN]. */
+  private fun notOpenDropped(): ApprovalAccept {
+    val interval = intervalOf(clock())
+    notOpen[interval] = (notOpen[interval] ?: 0) + 1
+    try {
+      armTimer()
+    } catch (_: Exception) {
+      // The next drop or failed release arms it.
+    }
+    return ApprovalAccept.NOT_OPEN
+  }
+
+  /**
+   * The index of the interval [epochMs] falls in: intervals of [AGGREGATE_INTERVAL_MS] laid out from
+   * [countsSince], by the wall clock, as decision 3 counts by the hour. A clock step moves counts
+   * between intervals but loses none: after a backward step an interval already counted waits until
+   * the clock passes its end again, and a step below [countsSince] gives a negative index, whose row's
+   * `intervalStart` is before its `countsSince`. The map stays one entry per counted index.
+   */
+  private fun intervalOf(epochMs: Long): Long = Math.floorDiv(epochMs - countsSince, AGGREGATE_INTERVAL_MS)
+
+  /**
+   * Writes one `approval-drops-aggregated` row for every interval that has ended with a count, and
+   * forgets it once the row is journaled. An interval with no count writes nothing, so a quiet hour
+   * leaves no row. A row the store refuses is kept for the next pass, and the others are still tried;
+   * it is not escalated, for the reason [flush] gives. One row an hour at most, so a sustained flood
+   * costs rows by the hour, not by the attempt.
+   */
+  private fun flushAggregates() {
+    if (notOpen.isEmpty()) return
+    val current = intervalOf(clock())
+    for ((interval, count) in notOpen.toList()) {
+      if (interval >= current) continue
+      try {
+        store.append(
+          HostKinds.APPROVAL_DROPS_AGGREGATED,
+          buildJsonObject {
+            put("notOpen", count)
+            put("intervalStart", countsSince + interval * AGGREGATE_INTERVAL_MS)
+            put("countsSince", countsSince)
+          },
+          origin = ORIGIN_AUTH_LAYER,
+        )
+      } catch (_: Exception) {
+        continue
+      }
+      notOpen.remove(interval)
+    }
   }
 
   private fun summaryOf(nonce: String, d: NonceDrops): JsonObject = buildJsonObject {
@@ -642,6 +703,9 @@ internal class ApprovalAcceptor<S>(
      * again, and pending drop counts are checked for a closed nonce, a minute after it is armed, if no
      * accept has done so first. */
     const val DEFAULT_TICK_MS = 60_000L
+
+    /** The interval an `approval-drops-aggregated` row counts over: an hour (operator, 2026-10-29). */
+    const val AGGREGATE_INTERVAL_MS = 3_600_000L
 
     /** The largest evidence a summary's `firstDropped` holds, as UTF-8 bytes of its JSON (4 KiB);
      * larger evidence is replaced by its length and hash. */
