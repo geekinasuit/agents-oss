@@ -37,7 +37,7 @@ import kotlinx.serialization.json.put
  *
  * THREADING (the single-writer discipline made concrete): one PROCESS writes the store,
  * and within it every store op is serialized by the store's internal lock. ARRIVAL facts
- * — injected mail, approvals, the auth stub's releases — are journaled AT THE ACCEPT BOUNDARY by the
+ * — injected mail and approvals — are journaled AT THE ACCEPT BOUNDARY by the
  * accepting thread (journal-then-doorbell, AGENCY-021): the entry is durable before
  * the inject call returns, and the queued [WakeEvent] is only a doorbell. DERIVED facts —
  * everything the pipeline concludes — are journaled by the loop thread, which refolds,
@@ -55,9 +55,10 @@ import kotlinx.serialization.json.put
  * workflow's mechanical steps ([Workflow.mechanicalStep]), its effects fired exactly once,
  * marking mail delivered. Cognition supplies judgment as typed proposals
  * (pod spawns, gate opens, status, escalation), journaled with origin = cognition before
- * execution. Gate releases enter only through the authorization seam ([AuthStub] until
- * the real ceremony) and are honored by the folds' provenance + digest checks, never by
- * this class's control flow.
+ * execution. Gate releases enter only through the approval accept boundary ([injectApproval]),
+ * which writes a release only for a verified quorum, and are honored by the folds' provenance,
+ * digest and quorum checks, never by this class's control flow. The pre-ceremony auth stub is
+ * test support only.
  */
 class AgentHost<S> internal constructor(
   private val store: JournalStore,
@@ -298,18 +299,20 @@ class AgentHost<S> internal constructor(
     queue.offer(WakeEvent.MailInject(message))
   }
 
+  /** The journal this host writes, for test support that journals a release outside the approval
+   * boundary (the auth stub). Internal: production code journals releases only through
+   * [injectApproval]. */
+  internal val journal: JournalStore
+    get() = store
+
   /**
-   * The in-process half of [AuthStub]: approval while the daemon runs (the real ceremony
-   * replaces this). Journal-then-ack (AGENCY-021): the release is appended — authorization
-   * provenance, via the same [AuthStub.appendRelease] the store-level surface uses —
-   * before this returns; the queued wake is only a doorbell, and a crash after accept no
-   * longer loses the approval (the next adopt re-folds it and the pipeline advances). The
-   * folds' teeth are unchanged: provenance + digest binding decide whether the release is
-   * honored, and a release accepted before its gate opened lands VISIBLY in
-   * [HostView.staleReleases] — re-approving remains safe.
+   * Wakes the loop for a release test support journaled outside the approval boundary, after the
+   * `after-gate-released` fault point kept from the pre-ceremony path (no test arms it today). A wake
+   * releases nothing: the folds' provenance, digest and
+   * quorum rules decide whether the release is honored, and a release journaled before its gate
+   * opened lands visibly in [HostView.staleReleases]. Internal: the approval boundary rings its own.
    */
-  fun injectAuthRelease(gateId: String, payloadDigest: String) {
-    AuthStub.appendRelease(store, gateId, payloadDigest)
+  internal fun ringForRelease(gateId: String, payloadDigest: String) {
     faults.at("after-gate-released")
     // offer, not put — same false-refusal reasoning as injectMail's doorbell.
     queue.offer(WakeEvent.AuthRelease(gateId, payloadDigest))

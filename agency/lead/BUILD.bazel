@@ -10,9 +10,9 @@ load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
 # provenance (auth layer) + digest binding in the folds. Between wakes the loop
 # blocks: idle is structural, zero model spend.
 #
-# Deliberate stubs, each replaced by later work: the AuthStub ceremony (a real
-# authorization surface), FakePodRunner (real launcher + resume re-attach), and the
-# mailbox surface.
+# Deliberate stubs, each replaced by later work: FakePodRunner (real launcher + resume
+# re-attach) and the mailbox surface. Releases come from the approval accept boundary; the
+# pre-ceremony AuthStub is test support (:auth_stub_test_support), testonly.
 #
 # The pod descriptor + engine seam live in //agency/pod (the lead depends on it,
 # never the reverse); the daemon holds a required lead-owned PodSpec and
@@ -32,7 +32,6 @@ kt_jvm_library(
         "AgentHost.kt",
         "ApprovalAcceptor.kt",
         "ApprovalClassifier.kt",
-        "AuthStub.kt",
         "ClaudeCognition.kt",
         "Cognition.kt",
         "CognitionProtocol.kt",
@@ -97,9 +96,11 @@ kt_jvm_library(
 # associates (not deps) on :lead, since it reads the host's records, which are internal to it.
 kt_jvm_library(
     name = "lead_fixture_lib",
+    testonly = True,
     srcs = ["LeadFixture.kt"],
     associates = [":lead"],
     deps = [
+        ":auth_stub_test_support",
         "//agency/pod",
         "//agency/shared/journal",
         "//agency/shared/journal:fixture_lib",
@@ -110,6 +111,7 @@ kt_jvm_library(
 
 java_binary(
     name = "lead_fixture",
+    testonly = True,
     main_class = "com.geekinasuit.agency.lead.LeadFixture",
     runtime_deps = [
         ":lead_fixture_lib",
@@ -163,6 +165,7 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.WakeLoopTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
+        ":auth_stub_test_support",
         "//agency/pod",
         "//agency/shared/journal",
         "@maven//:junit_junit",
@@ -183,6 +186,7 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.BoundArtifactTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
+        ":auth_stub_test_support",
         ":fifo_test_support",
         "//agency/pod",
         "//agency/shared/journal",
@@ -262,6 +266,23 @@ kt_jvm_library(
     ],
 )
 
+# The pre-ceremony release: AuthStub and the injectAuthRelease extension, for tests and the lead
+# fixture. testonly keeps this helper out of production targets; it does not make an
+# authorization-layer append impossible, since JournalStore.append is public. The safeguard is the
+# folds: under a ceremony auth a release must name a nonce and meet the quorum. associates (not
+# deps) on :host, since the extension uses the host's internal journal and doorbell.
+kt_jvm_library(
+    name = "auth_stub_test_support",
+    testonly = True,
+    srcs = ["AuthStub.kt"],
+    associates = [":host"],
+    deps = [
+        "//agency/shared/journal",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
 # A workflow that is not the ticket workflow, on :host alone, for cells that must hold for any
 # workflow. associates (not deps) on :host, since the Workflow and fold contract is internal to it.
 kt_jvm_library(
@@ -314,6 +335,7 @@ kt_jvm_library(
     srcs = ["GoldenJournalTest.kt"],
     associates = [":lead"],
     deps = [
+        ":auth_stub_test_support",
         ":ceremony_test_support",
         "//agency/pod",
         "//agency/shared/journal",
@@ -347,6 +369,7 @@ kt_jvm_library(
     srcs = ["PromptGoldenTest.kt"],
     associates = [":lead"],
     deps = [
+        ":auth_stub_test_support",
         ":ceremony_test_support",
         "//agency/pod",
         "//agency/shared/harness",
@@ -470,6 +493,7 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.GuardsTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
+        ":auth_stub_test_support",
         ":ceremony_test_support",
         "//agency/pod",
         "//agency/shared/journal",
@@ -509,6 +533,7 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.PodSpawnBatchTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
+        ":auth_stub_test_support",
         "//agency/pod",
         "//agency/shared/journal",
         "@maven//:junit_junit",
@@ -550,6 +575,7 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.NonceMintTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
+        ":auth_stub_test_support",
         # A ceremony auth makes hasApprovers hold, which is what gates the mint.
         ":ceremony_test_support",
         "//agency/pod",
