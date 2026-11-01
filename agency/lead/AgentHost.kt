@@ -221,7 +221,7 @@ class AgentHost<S> internal constructor(
       faults,
       ::escalate,
       timers,
-      ApprovalAcceptor.DEFAULT_RETRY_DELAY_MS,
+      ApprovalAcceptor.DEFAULT_TICK_MS,
     ) { gateId, payloadDigest ->
       // offer, not put — same false-refusal reasoning as injectMail's doorbell.
       queue.offer(WakeEvent.AuthRelease(gateId, payloadDigest))

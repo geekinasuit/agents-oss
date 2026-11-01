@@ -1,6 +1,7 @@
 package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.pod.PodSpec
+import com.geekinasuit.agency.pod.sha256HexBytes
 import com.geekinasuit.agency.shared.auth.AllowList
 import com.geekinasuit.agency.shared.auth.ApprovalEvidence
 import com.geekinasuit.agency.shared.auth.ApprovalVerifier
@@ -24,7 +25,11 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -230,6 +235,30 @@ class ApprovalAcceptTest {
       assertEquals(target, rowUnderOperator(forged).length)
       assertDropped(rig, ApprovalAccept.OVERSIZED, host.injectApproval(forged))
       assertEquals("the same size verified fits", ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce, carrier = carrier)))
+      // The drop is counted at the rejected row's own bound, and an accept alone (no timer fires
+      // here) writes the summary once the nonce has closed.
+      rig.store.append(HostKinds.NONCE_CONSUMED, buildJsonObject { put("nonce", nonce.nonce) }, ORIGIN_SUBSTRATE)
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce)))
+      assertEquals(1, payload(rig.summaryRows().single()).getValue("oversized").jsonPrimitive.int)
+    }
+
+  @Test
+  fun aMarkedRowIsBoundAsItIsJournaled() =
+    onBothWorkflows { rig ->
+      // The marked row adds `completesQuorum` to the approval's row: an approval sized so its row
+      // fits the bound exactly is dropped when it completes the quorum.
+      val nonce = rig.openGate()
+      val host = rig.host()
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      val oneCharCarrier = rowUnder(candidate(nonce, publicKey = "pk-second", carrier = "c"), "second").toString().length
+      val carrier = "c".repeat(ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS - oneCharCarrier + 1)
+      val completing = candidate(nonce, publicKey = "pk-second", carrier = carrier)
+      assertEquals(ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS, rowUnder(completing, "second").toString().length)
+      assertEquals(ApprovalAccept.OVERSIZED, host.injectApproval(completing))
+      assertEquals(0, rig.releaseRows().size)
+      rig.store.append(HostKinds.NONCE_CONSUMED, buildJsonObject { put("nonce", nonce.nonce) }, ORIGIN_SUBSTRATE)
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce)))
+      assertEquals(1, payload(rig.summaryRows().single()).getValue("oversized").jsonPrimitive.int)
     }
 
   @Test
@@ -637,6 +666,186 @@ class ApprovalAcceptTest {
     }
 
   @Test
+  fun aSummaryLandsAfterTheReleaseThatClosesItsNonceWithEachKindOfDrop() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val timers = CapturedTimers()
+      val host = rig.host(timers = timers)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      val original = rig.approvalRows().single().seq
+      // A redelivery carrying a field the evidence does not know: a duplicate once re-serialized.
+      val padded = candidate(nonce, carrier = "carrier-2").let { it.copy(evidence = JsonObject(it.evidence + ("junk" to JsonPrimitive("x")))) }
+      assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(padded))
+      assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(nonce)))
+      assertEquals(ApprovalAccept.WRONG_DIGEST, host.injectApproval(candidate(nonce, digest = "2".repeat(64))))
+      assertEquals(ApprovalAccept.REJECTED, host.injectApproval(candidate(nonce, signature = "forged")))
+      assertEquals(ApprovalAccept.REJECTED_OVER_ALLOWANCE, host.injectApproval(candidate(nonce, signature = "forged-2")))
+      assertEquals(ApprovalAccept.REJECTED, host.injectApproval(candidate(nonce, publicKey = "pk-stranger", signature = "forged")))
+      assertEquals(ApprovalAccept.REJECTED_OVER_ALLOWANCE, host.injectApproval(candidate(nonce, publicKey = "pk-stranger-2", signature = "forged")))
+      assertEquals(ApprovalAccept.OVERSIZED, host.injectApproval(candidate(nonce, carrier = "c".repeat(MAX_CHARS))))
+      assertEquals("none while the nonce is open", 0, rig.summaryRows().size)
+      assertEquals(ApprovalAccept.RELEASED, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
+      val release = rig.releaseRows().single().seq
+      timers.fireAll()
+      val row = rig.summaryRows().single()
+      assertEquals(ORIGIN_AUTH_LAYER, row.origin)
+      assertTrue("after the row that closed the nonce", row.seq > release)
+      val s = payload(row)
+      assertEquals(JsonPrimitive(nonce.gateId), s["gateId"])
+      assertEquals(JsonPrimitive(nonce.nonce), s["nonce"])
+      assertEquals(JsonPrimitive(nonce.payloadDigest), s["payloadDigest"])
+      assertTrue(s.getValue("countsSince").jsonPrimitive.long > 0)
+      assertEquals(2, s.getValue("duplicates").jsonPrimitive.int)
+      assertEquals(listOf(original), s.getValue("originalSeqs").jsonArray.map { it.jsonPrimitive.long })
+      assertEquals(1, s.getValue("wrongDigest").jsonPrimitive.int)
+      assertEquals(1, s.getValue("oversized").jsonPrimitive.int)
+      assertEquals(
+        "the journaled rejection is not a drop; the next one on the key is",
+        listOf(Triple("test", "pk-operator", 1)),
+        s.getValue("rejectedOverAllowance").jsonArray.map {
+          val o = it.jsonObject
+          Triple(o.getValue("schemeId").jsonPrimitive.content, o.getValue("publicKey").jsonPrimitive.content, o.getValue("count").jsonPrimitive.int)
+        },
+      )
+      assertEquals(1, s.getValue("rejectedOverAllowanceUnlisted").jsonPrimitive.int)
+      assertEquals(
+        "the first drop's evidence, re-serialized: the carrier's extra field is gone",
+        ApprovalEvidence.fromJson(padded.evidence).toJson(),
+        s.getValue("firstDropped"),
+      )
+      assertEquals("nothing left to summarize", 0, timers.armed.size)
+    }
+
+  @Test
+  fun aSummaryLandsAfterEachOtherKindOfClosingAndNotBefore() {
+    for (closing in listOf("nonce consumed", "re-opened on another digest", "shadowed by a newer nonce", "scope end")) {
+      onBothWorkflows { rig ->
+        val nonce = rig.openGate()
+        val close = rig.closing(closing, nonce) ?: return@onBothWorkflows
+        val timers = CapturedTimers()
+        val host = rig.host(timers = timers)
+        assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+        assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(nonce)))
+        timers.fireAll()
+        assertEquals("$closing: the nonce is open, so no summary yet", 0, rig.summaryRows().size)
+        assertEquals("$closing: and the timer comes back for it", 1, timers.armed.size)
+        val closingSeq = close()
+        timers.fireAll()
+        val row = rig.summaryRows().single()
+        assertTrue("$closing: after the closing row", row.seq > closingSeq)
+        assertEquals(1, payload(row).getValue("duplicates").jsonPrimitive.int)
+        assertEquals("$closing: nothing left to summarize", 0, timers.armed.size)
+      }
+    }
+  }
+
+  @Test
+  fun noSummaryIsWrittenWhenNothingWasDropped() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val timers = CapturedTimers()
+      val host = rig.host(timers = timers)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      assertEquals(ApprovalAccept.RELEASED, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
+      assertEquals("nothing dropped arms nothing", 0, timers.armed.size)
+      host.injectApproval(candidate(nonce, gateId = "another-pass"))
+      rig.host().driveUntilQuiescent()
+      assertEquals(0, rig.summaryRows().size)
+    }
+
+  @Test
+  fun evidenceOverTheCapIsSummarizedByItsLengthAndHash() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val timers = CapturedTimers()
+      val host = rig.host(timers = timers)
+      val big = candidate(nonce, carrier = "c".repeat(MAX_CHARS))
+      assertEquals(ApprovalAccept.OVERSIZED, host.injectApproval(big))
+      rig.store.append(HostKinds.NONCE_CONSUMED, buildJsonObject { put("nonce", nonce.nonce) }, ORIGIN_SUBSTRATE)
+      timers.fireAll()
+      val bytes = ApprovalEvidence.fromJson(big.evidence).toJson().toString().toByteArray(Charsets.UTF_8)
+      val first = payload(rig.summaryRows().single()).getValue("firstDropped").jsonObject
+      assertEquals(bytes.size, first.getValue("length").jsonPrimitive.int)
+      assertEquals(sha256HexBytes(bytes), first.getValue("sha256").jsonPrimitive.content)
+      assertFalse("no evidence over the cap is kept", "publicKey" in first)
+    }
+
+  @Test
+  fun theCapIsOnBytesNotChars() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val timers = CapturedTimers()
+      val host = rig.host(timers = timers)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      // Two bytes a char: under the cap in chars, over it in bytes. The carrier id is signed by
+      // nothing, so the redelivery is the recorded approval's duplicate.
+      val wide = candidate(nonce, carrier = "é".repeat(2500))
+      val text = ApprovalEvidence.fromJson(wide.evidence).toJson().toString()
+      assertTrue(text.length <= ApprovalAcceptor.MAX_FIRST_DROPPED_BYTES)
+      assertTrue(text.toByteArray(Charsets.UTF_8).size > ApprovalAcceptor.MAX_FIRST_DROPPED_BYTES)
+      assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(wide))
+      rig.store.append(HostKinds.NONCE_CONSUMED, buildJsonObject { put("nonce", nonce.nonce) }, ORIGIN_SUBSTRATE)
+      timers.fireAll()
+      val first = payload(rig.summaryRows().single()).getValue("firstDropped").jsonObject
+      assertEquals(text.toByteArray(Charsets.UTF_8).size, first.getValue("length").jsonPrimitive.int)
+    }
+
+  @Test
+  fun aSummaryRefusedForGoodHoldsBackNoOther() =
+    onBothWorkflows { rig ->
+      val first = rig.openGate()
+      val refusing = RefusingStore(rig.store)
+      refusing.refusedSummaryNonce = first.nonce
+      val timers = CapturedTimers()
+      val host = rig.host(journal = refusing, timers = timers)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(first)))
+      assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(first)))
+      // A journal the lead did not write: the first nonce is consumed, a second is issued on the gate's
+      // digest, gets a drop of its own, and is consumed too. Both are closed for good.
+      rig.store.append(HostKinds.NONCE_CONSUMED, buildJsonObject { put("nonce", first.nonce) }, ORIGIN_SUBSTRATE)
+      val second = first.copy(nonce = "${first.nonce}-2")
+      rig.store.append(
+        HostKinds.NONCE_ISSUED,
+        buildJsonObject {
+          put("nonce", second.nonce)
+          put("gateId", second.gateId)
+          put("payloadDigest", second.payloadDigest)
+        },
+        ORIGIN_SUBSTRATE,
+      )
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(second)))
+      assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(second)))
+      rig.store.append(HostKinds.NONCE_CONSUMED, buildJsonObject { put("nonce", second.nonce) }, ORIGIN_SUBSTRATE)
+      timers.fireAll()
+      assertEquals(
+        "the first nonce's summary is refused, and the second's still lands",
+        listOf(JsonPrimitive(second.nonce)),
+        rig.summaryRows().map { payload(it)["nonce"] },
+      )
+      assertEquals("the refused one is kept, so the timer comes back", 1, timers.armed.size)
+    }
+
+  @Test
+  fun aSummaryTheStoreRefusesIsKeptForTheNextPass() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val refusing = RefusingStore(rig.store, HostKinds.APPROVAL_DROPS_SUMMARIZED)
+      val timers = CapturedTimers()
+      val host = rig.host(journal = refusing, timers = timers)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(nonce)))
+      rig.store.append(HostKinds.NONCE_CONSUMED, buildJsonObject { put("nonce", nonce.nonce) }, ORIGIN_SUBSTRATE)
+      timers.fireAll()
+      assertEquals(0, rig.summaryRows().size)
+      assertEquals("kept, so the timer comes back", 1, timers.armed.size)
+      assertEquals("and not escalated", 0, rig.store.readAll().count { it.kind == HostKinds.ESCALATED && "summar" in it.payloadJson })
+      refusing.refused.clear()
+      timers.fireAll()
+      assertEquals(1, rig.summaryRows().size)
+      assertEquals(0, timers.armed.size)
+    }
+
+  @Test
   fun aMarkedRowOfAnotherOriginNeverYieldsARelease() =
     onBothWorkflows { rig ->
       val nonce = rig.openGate()
@@ -651,7 +860,9 @@ class ApprovalAcceptTest {
       host.driveUntilQuiescent()
       assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(nonce)))
       assertEquals(0, rig.releaseRows().size)
-      assertEquals(0, timers.armed.size)
+      // The duplicate is a counted drop, which arms the timer for its summary; firing it repairs nothing.
+      timers.fireAll()
+      assertEquals(0, rig.releaseRows().size)
     }
 
   @Test
@@ -837,6 +1048,49 @@ class ApprovalAcceptTest {
 
     fun releaseRows(): List<JournalEntry> = store.readAll().filter { it.kind == KIND_GATE_RELEASED }
 
+    fun summaryRows(): List<JournalEntry> = store.readAll().filter { it.kind == HostKinds.APPROVAL_DROPS_SUMMARIZED }
+
+    /**
+     * A way to close [nonce] named [kind], as a function that appends the closing row and returns its
+     * seq; null when this workflow has no such closing (only the ticket workflow ends a scope).
+     */
+    open fun closing(kind: String, nonce: IssuedNonce): (() -> Long)? =
+      when (kind) {
+        "nonce consumed" -> {
+          { store.append(HostKinds.NONCE_CONSUMED, buildJsonObject { put("nonce", nonce.nonce) }, ORIGIN_SUBSTRATE).seq }
+        }
+        "re-opened on another digest" -> {
+          val gateKind = host().refold().host.openGates.getValue(nonce.gateId).gateKind
+          {
+            store.append(
+                HostKinds.GATE_OPENED,
+                buildJsonObject {
+                  put("gateId", nonce.gateId)
+                  put("payloadDigest", "4".repeat(64))
+                  put("gateKind", gateKind)
+                },
+                ORIGIN_SUBSTRATE,
+              )
+              .seq
+          }
+        }
+        "shadowed by a newer nonce" -> {
+          {
+            store.append(
+                HostKinds.NONCE_ISSUED,
+                buildJsonObject {
+                  put("nonce", "${nonce.nonce}-newer")
+                  put("gateId", nonce.gateId)
+                  put("payloadDigest", nonce.payloadDigest)
+                },
+                ORIGIN_SUBSTRATE,
+              )
+              .seq
+          }
+        }
+        else -> null
+      }
+
     /** The escalations that an approval's marked row may be journaled without its release. */
     fun releaseEscalations(): Int =
       store.readAll().count { it.kind == HostKinds.ESCALATED && "without its release" in it.payloadJson }
@@ -864,10 +1118,17 @@ class ApprovalAcceptTest {
       }
   }
 
-  private inner class TicketRig(ref: String = "t1") : Rig("the ticket workflow") {
+  private inner class TicketRig(private val ref: String = "t1") : Rig("the ticket workflow") {
     init {
       File(dir, "ticket.txt").writeText("$ref\n")
     }
+
+    override fun closing(kind: String, nonce: IssuedNonce): (() -> Long)? =
+      if (kind == "scope end") {
+        { store.append(LeadKinds.TICKET_DONE, buildJsonObject { put("ticketRef", ref) }, ORIGIN_SUBSTRATE).seq }
+      } else {
+        super.closing(kind, nonce)
+      }
 
     override fun host(faults: FaultInjector, auth: LeadAuth, timers: TimerService, journal: JournalStore): AgentHost<*> =
       ticketLead(
@@ -922,11 +1183,15 @@ class ApprovalAcceptTest {
   private class RefusingStore(private val inner: JournalStore, vararg refused: String) : JournalStore by inner {
     val refused = refused.toMutableSet()
     var refusedReleaseNonce: String? = null
+    var refusedSummaryNonce: String? = null
 
     override fun append(kind: String, payload: JsonObject, origin: String, idempotencyKey: String?): JournalEntry {
       if (kind in refused) throw IllegalStateException("the store refused a $kind append")
       if (kind == KIND_GATE_RELEASED && payload["nonce"] == JsonPrimitive(refusedReleaseNonce)) {
         throw IllegalStateException("the store refused the release of nonce $refusedReleaseNonce")
+      }
+      if (kind == HostKinds.APPROVAL_DROPS_SUMMARIZED && payload["nonce"] == JsonPrimitive(refusedSummaryNonce)) {
+        throw IllegalStateException("the store refused the summary of nonce $refusedSummaryNonce")
       }
       return inner.append(kind, payload, origin, idempotencyKey)
     }
@@ -1021,6 +1286,9 @@ class ApprovalAcceptTest {
 
     /** Fires nothing; a ceremony host refuses only [TimerService.NOOP]. */
     val TIMERS = TimerService { _, _ -> }
+
+    /** A carrier id long enough that its row exceeds [ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS]. */
+    const val MAX_CHARS = ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS + 1
 
     /** A nonce no journal here issues. */
     val UNISSUED = IssuedNonce(nonce = "n-unissued", gateId = "g-unissued", payloadDigest = "3".repeat(64), issuedSeq = 0)

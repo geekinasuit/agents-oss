@@ -107,8 +107,9 @@ object HostKinds {
   /**
    * The approval accept boundary's account of the attempts it dropped on one nonce, written once the
    * nonce has closed and only when something was dropped (payload: gateId, nonce, payloadDigest,
-   * countsSince, duplicates, originalSeqs, rejectedOverAllowance, wrongDigest, oversized,
-   * firstDropped). The keys `rejectedOverAllowance` counts under, and the evidence in `firstDropped`,
+   * countsSince, duplicates, originalSeqs, rejectedOverAllowance as a list of {schemeId, publicKey,
+   * count}, rejectedOverAllowanceUnlisted, wrongDigest, oversized, firstDropped when the first dropped
+   * attempt's evidence parsed). The keys `rejectedOverAllowance` counts under, and the evidence in `firstDropped`,
    * are as the attempts CLAIMED them and UNAUTHENTICATED: anyone can name a genuine approver's key on a
    * forgery, so a count under a key says nothing about that approver. AUTH-LAYER-authored, like
    * [APPROVAL_RECORDED], and AUDIT-ONLY: the fold records no state from it, so a binary that predates
