@@ -532,6 +532,31 @@ class ApprovalAcceptTest {
       assertEquals("the second folds stale: the gate is released once", listOf(secondRelease), stale)
     }
 
+  @Test
+  fun aQuorumOnAGateAlreadyReleasedOnItsDigestReleasesNothing() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val host = rig.host()
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      assertEquals(ApprovalAccept.RELEASED, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
+      // A journal the lead did not write: a second nonce on the (gate, digest) just released.
+      val second = nonce.copy(nonce = "${nonce.nonce}-2")
+      rig.store.append(
+        HostKinds.NONCE_ISSUED,
+        buildJsonObject {
+          put("nonce", second.nonce)
+          put("gateId", second.gateId)
+          put("payloadDigest", second.payloadDigest)
+        },
+        ORIGIN_SUBSTRATE,
+      )
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(second)))
+      val met = host.injectApproval(candidate(second, publicKey = "pk-second"))
+      assertEquals("the quorum is met, but the fold would fold a second release stale", ApprovalAccept.RECORDED, met)
+      assertEquals(1, rig.releaseRows().size)
+      assertEquals(listOf(null, JsonPrimitive(true), null, null), rig.approvalRows().map { payload(it)["completesQuorum"] })
+    }
+
   private fun payload(e: JournalEntry): JsonObject = Json.parseToJsonElement(e.payloadJson).jsonObject
 
   /** Waits until [loop] is blocked taking its next wake from the queue: its first wake is done. */

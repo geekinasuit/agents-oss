@@ -4,7 +4,6 @@ import com.geekinasuit.agency.lead.LeadAuth.Companion.UNLISTED_PRINCIPAL_ID
 import com.geekinasuit.agency.lead.PayloadReaders.str
 import com.geekinasuit.agency.shared.auth.ApprovalEvidence
 import com.geekinasuit.agency.shared.auth.SchemeKey
-import com.geekinasuit.agency.shared.auth.quorumSatisfied
 import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
 import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.JournalStore
@@ -25,8 +24,9 @@ data class ApprovalCandidate(val gateId: String, val nonce: String, val payloadD
 /** What [AgentHost.injectApproval] did with one [ApprovalCandidate]. Only [RECORDED], [RELEASED] and
  * [REJECTED] append. */
 enum class ApprovalAccept {
-  /** The approval re-verified and was new; its row is in the journal. It did not complete the gate's
-   * quorum. */
+  /** The approval re-verified and was new; its row is in the journal. It released nothing: it did not
+   * complete the gate's quorum, or the fold would not honor a release with it (the gate is already
+   * released on its digest). */
   RECORDED,
 
   /**
@@ -76,10 +76,11 @@ enum class ApprovalAccept {
  *    the journal does not hold yet is appended with the authorization layer's origin. A duplicate is
  *    dropped, since the journal holds it already. A rejected one is appended only as its claimed
  *    key's allowance on the nonce, below.
- * 6. When the verified approvers bound to the gate at the nonce, with the new approval, meet the
- *    quorum, the approval's row is marked `completesQuorum: true`, the gate's release naming the nonce
- *    is appended after it, and only then is the loop woken ([ring]), so the loop wakes to a journal
- *    that holds the release.
+ * 6. When a release naming the nonce would be honored with the verified approvers bound to the gate
+ *    at it plus the new approval ([honorsNonceRelease], the fold's own decision, so the quorum and
+ *    the single release per digest are judged as the fold judges them), the approval's row is marked
+ *    `completesQuorum: true`, the gate's release naming the nonce is appended after it, and only
+ *    then is the loop woken ([ring]), so the loop wakes to a journal that holds the release.
  *
  * The mark records the acceptor's own decision, under the auth in force when the row was appended.
  * The fold reads only the fields it names, so it ignores the mark. Only a verified-new approval
@@ -152,7 +153,7 @@ internal class ApprovalAcceptor<S>(
       when (val verdict = classifyApproval(host.verifiedApprovals, payload, UNJOURNALED_SEQ, auth)) {
         is ApprovalVerdict.VerifiedNew -> {
           val approvers = host.boundApprovers(gate, open.nonce) + verdict.approval.principalId
-          if (!quorumSatisfied(auth.quorum, approvers)) {
+          if (!honorsNonceRelease(host, gate.gateId, open.payloadDigest, open.nonce, approvers, auth)) {
             append(payload)
             return ApprovalAccept.RECORDED
           }

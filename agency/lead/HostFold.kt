@@ -739,17 +739,9 @@ private fun foldRelease(s: HostState, e: JournalEntry, p: JsonObject, auth: Lead
     consumed = s.consumedNonces
     nonceLess = s.nonceLessReleases + (gateId to e.seq)
   } else {
-    val issued = s.issuedNonces[nonce]
-    val faithful =
-      issued != null &&
-        issued.gateId == gateId &&
-        issued.payloadDigest == digest &&
-        nonce !in s.consumedNonces
-    if (!faithful) return stale()
-    // Quorum over the VERIFIED approvers bound to this gate at this nonce and digest. Placed
-    // after faithfulness so an unfaithful nonce folds stale before it, and the quorum check
-    // bites exactly the releases that would otherwise clear. Unmet → stale, visibly.
-    if (!quorumSatisfied(auth.quorum, boundApprovers(s.verifiedApprovals, gate, nonce))) return stale()
+    if (!honorsNonceRelease(s, gateId, digest, nonce, boundApprovers(s.verifiedApprovals, gate, nonce), auth)) {
+      return stale()
+    }
     consumed = s.consumedNonces + nonce
     nonceLess = s.nonceLessReleases
   }
@@ -763,6 +755,35 @@ private fun foldRelease(s: HostState, e: JournalEntry, p: JsonObject, auth: Lead
     ),
     HostOutcome.GateReleased(gate),
   )
+}
+
+/**
+ * Whether a release of [gateId] on [digest] naming [nonce] would be honored over [s], with
+ * [approvers] as the verified approvers bound to the gate at that nonce. The one decision
+ * [foldRelease] makes on the nonce path, shared with the approval accept boundary
+ * ([ApprovalAcceptor]) so the boundary writes no release its own view of the journal shows the fold
+ * would fold stale. A row appended between the boundary's decision and the fold can still leave it
+ * stale; the fold decides.
+ *
+ * The gate must be open on [digest] and not already released on it; the nonce must have been
+ * issued for this gate, bound at issue to [digest], and never consumed; and [approvers] must meet
+ * [auth]'s quorum. Faithfulness comes before the quorum, so an unfaithful nonce fails on it and the
+ * quorum bites exactly the releases that would otherwise clear.
+ */
+internal fun honorsNonceRelease(
+  s: HostState,
+  gateId: String,
+  digest: String?,
+  nonce: String,
+  approvers: Set<String>,
+  auth: LeadAuth,
+): Boolean {
+  val gate = s.openGates[gateId] ?: return false
+  if (digest != gate.payloadDigest) return false
+  if (gate.payloadDigest in s.releasedDigests[gateId].orEmpty()) return false
+  val issued = s.issuedNonces[nonce] ?: return false
+  if (issued.gateId != gateId || issued.payloadDigest != digest || nonce in s.consumedNonces) return false
+  return quorumSatisfied(auth.quorum, approvers)
 }
 
 /**
