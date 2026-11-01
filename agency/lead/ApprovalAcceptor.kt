@@ -2,6 +2,7 @@ package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.lead.LeadAuth.Companion.UNLISTED_PRINCIPAL_ID
 import com.geekinasuit.agency.lead.PayloadReaders.str
+import com.geekinasuit.agency.pod.sha256HexBytes
 import com.geekinasuit.agency.shared.auth.ApprovalEvidence
 import com.geekinasuit.agency.shared.auth.SchemeKey
 import com.geekinasuit.agency.shared.journal.ArmedTimer
@@ -12,8 +13,11 @@ import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
 import com.geekinasuit.agency.shared.journal.payloadObject
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 
 /**
  * One approval as a carrier delivers it: the gate, nonce and digest it claims to approve, and the
@@ -112,6 +116,13 @@ enum class ApprovalAccept {
  * The tally keeps only the nonces issued and not consumed, which bounds it by the scope's nonces and
  * the allow-list: a scope end clears the issued nonces.
  *
+ * Drops: a candidate that names a gate's open nonce and is dropped (a duplicate, a wrong digest, a
+ * rejection over its key's allowance, or a row too large) is counted on that nonce in memory. Once
+ * the nonce has closed, the next pass journals one `approval-drops-summarized` row for it with the
+ * counts and the first dropped attempt's evidence, then forgets them ([flush]). The counts start
+ * over at a restart; each row's `countsSince` shows when they started. Attempts that name no open
+ * nonce are not counted here.
+ *
  * The lock is taken before the store's own, never while holding it, so the lock order is always this
  * lock, then the store's.
  *
@@ -135,7 +146,7 @@ internal class ApprovalAcceptor<S>(
   /** Arms the ingress timer ([armTimer]). Its firing calls back into the acceptor, not the loop. */
   private val timers: TimerService,
   /** How long after it is armed the ingress timer fires. */
-  private val retryDelayMs: Long,
+  private val tickMs: Long,
   /** Wakes the loop for the release of a gate on a digest, after the release is journaled. */
   private val ring: (gateId: String, payloadDigest: String) -> Unit,
 ) {
@@ -157,6 +168,14 @@ internal class ApprovalAcceptor<S>(
   /** Whether the ingress timer is armed and has not fired yet. */
   private var timerArmed = false
 
+  /** Nonce → the attempts dropped on it while it was open, until its summary is journaled ([flush]).
+   * An entry is made only for a nonce some candidate named as the open nonce of an open gate. */
+  private val drops = linkedMapOf<String, NonceDrops>()
+
+  /** When this acceptor started counting drops; every summary carries it, so counts a restart
+   * reset show as such. */
+  private val countsSince = System.currentTimeMillis()
+
   /** Stops the acceptor: every later [accept] throws. The first reason is kept. */
   fun stop(reason: String) {
     synchronized(lock) { if (stoppedBecause == null) stoppedBecause = reason }
@@ -167,13 +186,16 @@ internal class ApprovalAcceptor<S>(
   fun accept(candidate: ApprovalCandidate): ApprovalAccept =
     synchronized(lock) {
       stoppedBecause?.let { throw IllegalStateException("approval refused: the approval boundary has stopped ($it)") }
-      val host = repair(advance())
+      val host = flush(repair(advance()))
       val gate = host.openGates[candidate.gateId] ?: return ApprovalAccept.NOT_OPEN
       val open = host.openNonceFor(gate)
       if (open == null || open.nonce != candidate.nonce) return ApprovalAccept.NOT_OPEN
-      if (candidate.payloadDigest != open.payloadDigest) return ApprovalAccept.WRONG_DIGEST
-      val payload = payloadOf(candidate)
-      if (!fits(payload)) return ApprovalAccept.OVERSIZED
+      val evidence = evidenceOf(candidate)
+      if (candidate.payloadDigest != open.payloadDigest) {
+        return dropped(open, evidence, ApprovalAccept.WRONG_DIGEST) { wrongDigest++ }
+      }
+      val payload = payloadOf(candidate, evidence)
+      if (!fits(payload)) return dropped(open, evidence, ApprovalAccept.OVERSIZED) { oversized++ }
       when (val verdict = classifyApproval(host.verifiedApprovals, payload, UNJOURNALED_SEQ, auth)) {
         is ApprovalVerdict.VerifiedNew -> {
           val approvers = host.boundApprovers(gate, open.nonce) + verdict.approval.principalId
@@ -182,7 +204,7 @@ internal class ApprovalAcceptor<S>(
             return ApprovalAccept.RECORDED
           }
           val markedRow = JsonObject(payload + ("completesQuorum" to JsonPrimitive(true)))
-          if (!fits(markedRow)) return ApprovalAccept.OVERSIZED
+          if (!fits(markedRow)) return dropped(open, evidence, ApprovalAccept.OVERSIZED) { oversized++ }
           // Once the marked row may be durable, a failure may leave a met quorum with no release. The
           // repair writes it: at the next accept, a redelivery of this one included, or when the
           // ingress timer fires. So the failure is escalated and thrown, and the acceptor goes on.
@@ -196,13 +218,20 @@ internal class ApprovalAcceptor<S>(
           wake(gate.gateId, open.payloadDigest)
           ApprovalAccept.RELEASED
         }
-        is ApprovalVerdict.VerifiedDuplicate -> ApprovalAccept.DUPLICATE
+        is ApprovalVerdict.VerifiedDuplicate ->
+          dropped(open, evidence, ApprovalAccept.DUPLICATE) {
+            duplicates++
+            originalSeqs += verdict.originalSeq
+          }
         is ApprovalVerdict.Rejected -> {
           if (verdict.claimedKey in rejectedBuckets[candidate.nonce].orEmpty()) {
-            return ApprovalAccept.REJECTED_OVER_ALLOWANCE
+            return dropped(open, evidence, ApprovalAccept.REJECTED_OVER_ALLOWANCE) {
+              val key = verdict.claimedKey
+              if (key == null) overAllowanceUnlisted++ else overAllowance[key] = (overAllowance[key] ?: 0) + 1
+            }
           }
           val row = JsonObject(payload + ("principalId" to JsonPrimitive(UNLISTED_PRINCIPAL_ID)))
-          if (!fits(row)) return ApprovalAccept.OVERSIZED
+          if (!fits(row)) return dropped(open, evidence, ApprovalAccept.OVERSIZED) { oversized++ }
           append(row)
           ApprovalAccept.REJECTED
         }
@@ -277,17 +306,19 @@ internal class ApprovalAcceptor<S>(
   }
 
   /** Whether the ingress timer must come back to [host]: some marked row the repair would release
-   * ([repairable]) still lacks its release, as after a release that failed. */
-  private fun workDue(host: HostState): Boolean = marked.any { (nonce, m) -> repairable(host, nonce, m) }
+   * ([repairable]) still lacks its release, as after a release that failed, or some nonce's drops are
+   * not summarized yet. A nonce that stays open keeps the timer coming back while its gate waits. */
+  private fun workDue(host: HostState): Boolean =
+    drops.isNotEmpty() || marked.any { (nonce, m) -> repairable(host, nonce, m) }
 
-  /** The repair, catching what it does not handle itself; the host as the journal then stands, or null
-   * when the acceptor is stopped or a doorbell after a release threw. In the second case a firing
-   * does not arm the timer again, as before the ingress timer; only the test fault seam can make a
-   * doorbell throw. */
+  /** The repair and the summaries, catching what they do not handle themselves; the host as the
+   * journal then stands, or null when the acceptor is stopped or a doorbell after a release threw. In
+   * the second case a firing does not arm the timer again, as before the ingress timer; only the test
+   * fault seam can make a doorbell throw. */
   private fun repairQuietly(): HostState? {
     if (stoppedBecause != null) return null
     return try {
-      repair(advance())
+      flush(repair(advance()))
     } catch (_: Exception) {
       // advance() has stopped the acceptor and escalated why. repair() handles a failed release
       // itself; only the doorbell after a release it wrote is outside that, and a lost doorbell loses
@@ -370,7 +401,7 @@ internal class ApprovalAcceptor<S>(
     if (timerArmed) return
     timerArmed = true
     try {
-      timers.arm(ArmedTimer(TIMER_ID, System.currentTimeMillis() + retryDelayMs, TIMER_ACTION)) { onTimerDue() }
+      timers.arm(ArmedTimer(TIMER_ID, System.currentTimeMillis() + tickMs, TIMER_ACTION)) { onTimerDue() }
     } catch (x: Exception) {
       timerArmed = false
       throw x
@@ -429,6 +460,130 @@ internal class ApprovalAcceptor<S>(
   private data class MarkedNonce(val gateId: String, val payloadDigest: String)
 
   /**
+   * The attempts dropped on one nonce, bound to [gateId] and [payloadDigest]. A rejected attempt
+   * journaled within its key's allowance is not a drop. [overAllowance] is keyed by the allow-listed
+   * key the attempt claimed, [overAllowanceUnlisted] counts the rest, so its size is bounded by the
+   * allow-list; the claims are unauthenticated.
+   */
+  private class NonceDrops(val gateId: String, val payloadDigest: String) {
+    var duplicates = 0
+    val originalSeqs = sortedSetOf<Long>()
+    val overAllowance = linkedMapOf<SchemeKey, Int>()
+    var overAllowanceUnlisted = 0
+    var wrongDigest = 0
+    var oversized = 0
+
+    /** Whether the first drop has been seen; its evidence, if it parsed, is [firstDropped]. */
+    var firstSeen = false
+    var firstDropped: JsonObject? = null
+  }
+
+  /** [c]'s evidence, or null when it does not parse. */
+  private fun evidenceOf(c: ApprovalCandidate): ApprovalEvidence? =
+    try {
+      ApprovalEvidence.fromJson(c.evidence)
+    } catch (_: Exception) {
+      null
+    }
+
+  /**
+   * Counts a candidate dropped on [open] with [count], keeps the evidence of the first one dropped
+   * there ([firstDroppedOf]), arms the ingress timer so the nonce's summary is written even if
+   * nothing else arrives, and returns [result]. A [TimerService] that refuses leaves that to the next
+   * drop or failed release.
+   */
+  private inline fun dropped(
+    open: IssuedNonce,
+    evidence: ApprovalEvidence?,
+    result: ApprovalAccept,
+    count: NonceDrops.() -> Unit,
+  ): ApprovalAccept {
+    val d = drops.getOrPut(open.nonce) { NonceDrops(open.gateId, open.payloadDigest) }
+    d.count()
+    if (!d.firstSeen) {
+      d.firstSeen = true
+      d.firstDropped = evidence?.let(::firstDroppedOf)
+    }
+    try {
+      armTimer()
+    } catch (_: Exception) {
+      // See the KDoc.
+    }
+    return result
+  }
+
+  /**
+   * The `firstDropped` field for [evidence]: the evidence as it re-serializes, with only the fields
+   * [ApprovalEvidence] knows (a carrier's other keys are signed by nothing), when that JSON's UTF-8
+   * bytes number at most [MAX_FIRST_DROPPED_BYTES]; otherwise their count and SHA-256 (an unpaired
+   * surrogate encodes as `?`), since cut evidence could not be verified again.
+   */
+  private fun firstDroppedOf(evidence: ApprovalEvidence): JsonObject {
+    val json = evidence.toJson()
+    val bytes = json.toString().toByteArray(Charsets.UTF_8)
+    if (bytes.size <= MAX_FIRST_DROPPED_BYTES) return json
+    return buildJsonObject {
+      put("length", bytes.size)
+      put("sha256", sha256HexBytes(bytes))
+    }
+  }
+
+  /**
+   * Writes the summary of every nonce with drops that has left the open set ([HostView.openNonceFor]
+   * of an open gate), and forgets its counts once the row is journaled. Each summary names its own
+   * nonce, so the order they are written in carries nothing. A nonce leaves the set when a release consumes it, a `nonce-consumed` row voids it, a
+   * scope end clears it, its gate re-opens on another digest, or a newer nonce shadows it; the
+   * summary lands at the first advance after the row that closed it. A summary the store refuses is
+   * kept for the next pass, and the others are still tried, so one that keeps failing holds back
+   * none. It is not escalated, unlike a failed release: a lost summary loses a count, never a gate's
+   * release, and the store failure that refused it shows wherever else it bites. A nonce that opens
+   * again after its summary gets a second summary for its later drops.
+   *
+   * A summary row is bounded however many attempts arrive: its keys are allow-listed, its
+   * `originalSeqs` hold at most one seq per allow-listed principal (a duplicate is matched on
+   * principal, nonce and digest), and `firstDropped` is at most [MAX_FIRST_DROPPED_BYTES] of
+   * evidence or a length and a hash.
+   *
+   * Returns [host] unchanged: the rows are audit-only.
+   */
+  private fun flush(host: HostState): HostState {
+    if (drops.isEmpty()) return host
+    val open = host.openGates.values.mapNotNullTo(mutableSetOf()) { host.openNonceFor(it)?.nonce }
+    for ((nonce, d) in drops.toList()) {
+      if (nonce in open) continue
+      try {
+        store.append(HostKinds.APPROVAL_DROPS_SUMMARIZED, summaryOf(nonce, d), origin = ORIGIN_AUTH_LAYER)
+      } catch (_: Exception) {
+        continue
+      }
+      drops.remove(nonce)
+    }
+    return host
+  }
+
+  private fun summaryOf(nonce: String, d: NonceDrops): JsonObject = buildJsonObject {
+    put("gateId", d.gateId)
+    put("nonce", nonce)
+    put("payloadDigest", d.payloadDigest)
+    put("countsSince", countsSince)
+    put("duplicates", d.duplicates)
+    putJsonArray("originalSeqs") { d.originalSeqs.forEach { add(it) } }
+    putJsonArray("rejectedOverAllowance") {
+      for ((key, n) in d.overAllowance) {
+        addJsonObject {
+          put("schemeId", key.schemeId)
+          put("publicKey", key.publicKey)
+          put("count", n)
+        }
+      }
+    }
+    put("rejectedOverAllowanceUnlisted", d.overAllowanceUnlisted)
+    put("wrongDigest", d.wrongDigest)
+    put("oversized", d.oversized)
+    d.firstDropped?.let { put("firstDropped", it) }
+  }
+
+  /**
    * The row for [c]: its fields, and the principal the key its evidence names resolves to in the
    * allow-list. A key not in the allow-list, or evidence that does not parse, resolves to no
    * principal, so the row carries [UNLISTED_PRINCIPAL_ID]; the fold rejects such a row on its key
@@ -439,13 +594,7 @@ internal class ApprovalAcceptor<S>(
    * Evidence that does not parse is written as an empty object, for the same reason; the row is
    * rejected either way.
    */
-  private fun payloadOf(c: ApprovalCandidate): JsonObject {
-    val evidence =
-      try {
-        ApprovalEvidence.fromJson(c.evidence)
-      } catch (_: Exception) {
-        null
-      }
+  private fun payloadOf(c: ApprovalCandidate, evidence: ApprovalEvidence?): JsonObject {
     val principalId =
       evidence?.let { auth.allowList.principalFor(SchemeKey(it.schemeId, it.publicKey))?.principalId }
         ?: UNLISTED_PRINCIPAL_ID
@@ -489,9 +638,14 @@ internal class ApprovalAcceptor<S>(
     /** The ingress timer's action, carried for the [TimerService] seam; nothing reads it. */
     const val TIMER_ACTION = "approval-ingress"
 
-    /** The ingress timer's delay in a real run: a release that failed on a store error is tried again
-     * a minute later, if no accept has repaired it first. */
-    const val DEFAULT_RETRY_DELAY_MS = 60_000L
+    /** The ingress timer's period in a real run: a release that failed on a store error is tried
+     * again, and pending drop counts are checked for a closed nonce, a minute after it is armed, if no
+     * accept has done so first. */
+    const val DEFAULT_TICK_MS = 60_000L
+
+    /** The largest evidence a summary's `firstDropped` holds, as UTF-8 bytes of its JSON (4 KiB);
+     * larger evidence is replaced by its length and hash. */
+    const val MAX_FIRST_DROPPED_BYTES = 4096
 
     /** The seq [classifyApproval] is given for a candidate not journaled yet. The acceptor reads
      * only the verdict's kind, never this seq. */
