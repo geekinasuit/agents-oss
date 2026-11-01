@@ -84,7 +84,7 @@ internal data class HostState(
   val unverifiedApprovals: List<Pair<Long, String>> = emptyList(),
   override val pods: Map<String, PodRecord> = emptyMap(),
   override val pendingSpawnIntents: Map<String, Long> = emptyMap(), // taskRef → intent seq: spawn journaled, POD_SPAWNED not yet
-  val misOriginedEntries: List<Pair<Long, String>> = emptyList(), // (seq, kind): substrate-authored kind with a non-substrate origin — never honored
+  val misOriginedEntries: List<Pair<Long, String>> = emptyList(), // (seq, kind): a substrate- or auth-layer-authored kind with another origin — never honored
   val statusTail: List<String> = emptyList(),
   override val escalations: List<String> = emptyList(),
   /** Gate id → the digests the gate was escalated on this scope as holding up the stage it guards.
@@ -230,12 +230,17 @@ internal val HOST_SUBSTRATE_KINDS =
     HostKinds.NONCE_CONSUMED,
   )
 
-/** Every kind the host folds: its substrate-only kinds, plus approvals (authored by the
- * authorization layer), cognition turns (authored by cognition), and the shared journal's gate
- * releases, which the host's release fold reads. A workflow's kinds must be disjoint from these
- * ([requireKindPartition]). */
+/** The kinds whose one legitimate author is the authorization layer: approvals, and the approval
+ * boundary's audit rows. A row of one with any other origin is never honored and lands in
+ * [HostState.misOriginedEntries] (see the provenance gate in [hostStep]). */
+internal val AUTH_LAYER_KINDS =
+  setOf(HostKinds.APPROVAL_RECORDED, HostKinds.APPROVAL_DROPS_SUMMARIZED, HostKinds.APPROVAL_DROPS_AGGREGATED)
+
+/** Every kind the host folds: its substrate-only kinds, plus the authorization layer's kinds,
+ * cognition turns (authored by cognition), and the shared journal's gate releases, which the host's
+ * release fold reads. A workflow's kinds must be disjoint from these ([requireKindPartition]). */
 internal val HOST_KINDS: Set<String> =
-  HOST_SUBSTRATE_KINDS + setOf(HostKinds.APPROVAL_RECORDED, HostKinds.COGNITION_PROPOSED, KIND_GATE_RELEASED)
+  HOST_SUBSTRATE_KINDS + AUTH_LAYER_KINDS + setOf(HostKinds.COGNITION_PROPOSED, KIND_GATE_RELEASED)
 
 /**
  * A workflow's half of the lead fold: the kinds it owns, its own state [W] and how each entry
@@ -368,7 +373,8 @@ internal fun hostStep(
   // Same teeth, different sole author: an approval accumulates toward quorum, so its one
   // legitimate origin is the authorization layer — approval-shaped entries from anywhere
   // else (cognition, a pod, an import) are quorum-stuffing and land visibly, never counted.
-  if (e.kind == HostKinds.APPROVAL_RECORDED && e.origin != ORIGIN_AUTH_LAYER) {
+  // The boundary's audit rows share that author, so a forged one lands visibly too.
+  if (e.kind in AUTH_LAYER_KINDS && e.origin != ORIGIN_AUTH_LAYER) {
     return rejected(s, e)
   }
   val p = payloadObject(e.payloadJson)
@@ -616,8 +622,8 @@ internal fun hostStep(
       )
     }
     // Workflow, shared and unknown kinds: not the host's business. Also the state-inert lead kinds
-    // (POD_EVENT): journaled audit rows the fold deliberately never consumes — their origin was
-    // already policed by the gate above.
+    // (POD_EVENT, and the approval boundary's APPROVAL_DROPS_* audit rows): journaled audit rows the
+    // fold deliberately never consumes — their origin was already policed by the gate above.
     else -> folded(s)
   }
 }
