@@ -214,7 +214,15 @@ class AgentHost<S> internal constructor(
 
   /** The approval accept boundary ([injectApproval]). Stopped when [runLoop] exits. */
   private val approvals =
-    ApprovalAcceptor(store, leadAuth, workflow.fold, faults, ::escalate) { gateId, payloadDigest ->
+    ApprovalAcceptor(
+      store,
+      leadAuth,
+      workflow.fold,
+      faults,
+      ::escalate,
+      timers,
+      ApprovalAcceptor.DEFAULT_RETRY_DELAY_MS,
+    ) { gateId, payloadDigest ->
       // offer, not put — same false-refusal reasoning as injectMail's doorbell.
       queue.offer(WakeEvent.AuthRelease(gateId, payloadDigest))
     }
@@ -309,12 +317,13 @@ class AgentHost<S> internal constructor(
    * is dropped, and the result says why. A host whose loop has exited, or whose view of the journal
    * failed, refuses by throwing, and appends nothing. One more throw is not a refusal: an approval
    * that completes the quorum and fails before its release is journaled throws with its row (and an
-   * escalation) already in the journal, and the host then refuses every later approval until it
-   * restarts.
+   * escalation, once per nonce) possibly already in the journal. The host writes that release itself:
+   * at the next approval it is given, whatever it is, or when a retry timer fires.
    *
    * An approval that completes the gate's quorum also journals the gate's release, then rings the
    * loop's doorbell, so the loop wakes to a journal that holds it. An approval that completes no
-   * quorum rings nothing: it changes nothing the loop acts on.
+   * quorum rings nothing: it changes nothing the loop acts on. A release that a crash cut short is
+   * written when the restarted host adopts the journal.
    */
   fun injectApproval(candidate: ApprovalCandidate): ApprovalAccept = approvals.accept(candidate)
 
@@ -531,6 +540,10 @@ class AgentHost<S> internal constructor(
       origin = ORIGIN_SUBSTRATE,
     )
     queue.put(WakeEvent.Adopted)
+    // A release a crash cut short after its approval's marked row lands now, before the loop takes its
+    // first wake, which stays Adopted; the release's own doorbell follows it. The repair never throws,
+    // so it cannot stop the loop.
+    approvals.prime()
   }
 
   /**
