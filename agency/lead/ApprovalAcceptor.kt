@@ -91,7 +91,7 @@ enum class ApprovalAccept {
  *
  * The repair ([repair]) writes the release a marked row lacks, when a crash or a failed append came
  * between the two. It runs before each [accept] decides, when the host adopts the journal ([prime]),
- * and when the retry timer fires, which a failed release arms. It releases only on a marked row whose
+ * and when the ingress timer fires, which a failed release arms. It releases only on a marked row whose
  * own approval still verifies under the auth in force, and only where the fold would honor the
  * release now ([honorsNonceRelease]); it wakes the loop once per release it writes.
  *
@@ -132,9 +132,9 @@ internal class ApprovalAcceptor<S>(
   private val fold: WorkflowFold<S, *>,
   private val faults: FaultInjector,
   private val escalate: (String) -> Unit,
-  /** Arms the retry timer ([armRetry]). Its firing calls back into the acceptor, not the loop. */
+  /** Arms the ingress timer ([armTimer]). Its firing calls back into the acceptor, not the loop. */
   private val timers: TimerService,
-  /** How long after a release fails the retry timer fires. */
+  /** How long after it is armed the ingress timer fires. */
   private val retryDelayMs: Long,
   /** Wakes the loop for the release of a gate on a digest, after the release is journaled. */
   private val ring: (gateId: String, payloadDigest: String) -> Unit,
@@ -154,8 +154,8 @@ internal class ApprovalAcceptor<S>(
   /** Nonces whose failed release has been escalated ([releaseFailed]). */
   private val repairEscalated = mutableSetOf<String>()
 
-  /** Whether the retry timer is armed and has not fired yet. */
-  private var retryArmed = false
+  /** Whether the ingress timer is armed and has not fired yet. */
+  private var timerArmed = false
 
   /** Stops the acceptor: every later [accept] throws. The first reason is kept. */
   fun stop(reason: String) {
@@ -185,7 +185,7 @@ internal class ApprovalAcceptor<S>(
           if (!fits(markedRow)) return ApprovalAccept.OVERSIZED
           // Once the marked row may be durable, a failure may leave a met quorum with no release. The
           // repair writes it: at the next accept, a redelivery of this one included, or when the
-          // retry timer fires. So the failure is escalated and thrown, and the acceptor goes on.
+          // ingress timer fires. So the failure is escalated and thrown, and the acceptor goes on.
           try {
             append(markedRow)
             journalRelease(gate.gateId, open.payloadDigest, open.nonce)
@@ -256,23 +256,50 @@ internal class ApprovalAcceptor<S>(
     synchronized(lock) { repairQuietly() }
   }
 
-  /** The retry timer's firing: the repair, as at [prime]. */
-  private fun onRetryDue() {
+  /**
+   * The ingress timer's firing: the repair, as at [prime], then the timer again while work is still
+   * due ([workDue]). So a firing whose own re-arm the [TimerService] refused, inside the pass, arms
+   * here instead. A refusal here leaves the timer unarmed until the next failed release arms it;
+   * nothing is left on this thread to report to.
+   */
+  private fun onTimerDue() {
     synchronized(lock) {
-      retryArmed = false
-      repairQuietly()
+      timerArmed = false
+      val host = repairQuietly() ?: return
+      if (workDue(host)) {
+        try {
+          armTimer()
+        } catch (_: Exception) {
+          // See the KDoc: the next failed release arms it.
+        }
+      }
     }
   }
 
-  private fun repairQuietly() {
-    if (stoppedBecause != null) return
-    try {
+  /** Whether the ingress timer must come back to [host]: some marked row the repair would release
+   * ([repairable]) still lacks its release, as after a release that failed. */
+  private fun workDue(host: HostState): Boolean = marked.any { (nonce, m) -> repairable(host, nonce, m) }
+
+  /** The repair, catching what it does not handle itself; the host as the journal then stands, or null
+   * when the acceptor is stopped or a doorbell after a release threw. In the second case a firing
+   * does not arm the timer again, as before the ingress timer; only the test fault seam can make a
+   * doorbell throw. */
+  private fun repairQuietly(): HostState? {
+    if (stoppedBecause != null) return null
+    return try {
       repair(advance())
     } catch (_: Exception) {
       // advance() has stopped the acceptor and escalated why. repair() handles a failed release
       // itself; only the doorbell after a release it wrote is outside that, and a lost doorbell loses
       // nothing the next wake does not fold.
+      null
     }
+  }
+
+  /** Whether the repair would release [nonce]'s marked row [m] over [host] now. */
+  private fun repairable(host: HostState, nonce: String, m: MarkedNonce): Boolean {
+    val gate = host.openGates[m.gateId] ?: return false
+    return honorsNonceRelease(host, m.gateId, m.payloadDigest, nonce, host.boundApprovers(gate, nonce), auth)
   }
 
   /**
@@ -283,7 +310,7 @@ internal class ApprovalAcceptor<S>(
    * the auth in force no longer meets, is not repaired, and no row that was never marked is: a
    * loosened auth alone releases nothing.
    *
-   * A release that fails is escalated and left to the retry timer, and the repair goes on to the next
+   * A release that fails is escalated and left to the ingress timer, and the repair goes on to the next
    * marked nonce, so a release that keeps failing for one nonce does not hold back another; the next
    * advance shows whether it landed. The view is not advanced after a failure, so if the failed
    * release landed after all, a later marked nonce on the same gate and digest (a journal the lead
@@ -293,8 +320,7 @@ internal class ApprovalAcceptor<S>(
   private fun repair(host: HostState): HostState {
     var h = host
     for ((nonce, m) in marked.toList()) {
-      val gate = h.openGates[m.gateId] ?: continue
-      if (!honorsNonceRelease(h, m.gateId, m.payloadDigest, nonce, h.boundApprovers(gate, nonce), auth)) continue
+      if (!repairable(h, nonce, m)) continue
       try {
         journalRelease(m.gateId, m.payloadDigest, nonce)
       } catch (x: Exception) {
@@ -310,7 +336,7 @@ internal class ApprovalAcceptor<S>(
   /**
    * A marked row on [nonce] may be journaled without its release, for [x]: escalates that once per
    * nonce for the life of this acceptor, since an untrusted caller drives every retry, and arms the
-   * retry timer.
+   * ingress timer.
    */
   private fun releaseFailed(gateId: String, nonce: String, x: Exception) {
     // The nonce is noted only once its escalation is journaled, so a store that refuses the
@@ -327,27 +353,26 @@ internal class ApprovalAcceptor<S>(
       }
     }
     try {
-      armRetry()
+      armTimer()
     } catch (timerFailure: Exception) {
       x.addSuppressed(timerFailure)
     }
   }
 
   /**
-   * Arms the retry timer unless it is armed already. A [TimerService] that throws leaves it unarmed,
-   * so the next failure tries again. The timer must fire after [arm][TimerService.arm] returns, as
-   * [ThreadTimerService] does: one that fired inside it would retry a release that keeps failing with
-   * no delay at all.
+   * Arms the ingress timer unless it is armed already. A [TimerService] that throws leaves it
+   * unarmed, so the next failed release, or the end of a firing with work still due, tries again.
+   * The timer must fire after [arm][TimerService.arm]
+   * returns, as [ThreadTimerService] does: one that fired inside it would retry a release that keeps
+   * failing with no delay at all.
    */
-  private fun armRetry() {
-    if (retryArmed) return
-    retryArmed = true
+  private fun armTimer() {
+    if (timerArmed) return
+    timerArmed = true
     try {
-      timers.arm(ArmedTimer(RETRY_TIMER_ID, System.currentTimeMillis() + retryDelayMs, RETRY_TIMER_ACTION)) {
-        onRetryDue()
-      }
+      timers.arm(ArmedTimer(TIMER_ID, System.currentTimeMillis() + retryDelayMs, TIMER_ACTION)) { onTimerDue() }
     } catch (x: Exception) {
-      retryArmed = false
+      timerArmed = false
       throw x
     }
   }
@@ -457,14 +482,14 @@ internal class ApprovalAcceptor<S>(
      */
     const val MAX_APPROVAL_ROW_CHARS = 4096
 
-    /** The retry timer's id. It is never journaled: a restart repairs at adopt, so a lost timer
+    /** The ingress timer's id. It is never journaled: a restart repairs at adopt, so a lost timer
      * loses nothing. */
-    const val RETRY_TIMER_ID = "approval-release-retry"
+    const val TIMER_ID = "approval-ingress"
 
-    /** The retry timer's action, carried for the [TimerService] seam; nothing reads it. */
-    const val RETRY_TIMER_ACTION = "approval-release-retry"
+    /** The ingress timer's action, carried for the [TimerService] seam; nothing reads it. */
+    const val TIMER_ACTION = "approval-ingress"
 
-    /** The retry timer's delay in a real run: a release that failed on a store error is tried again
+    /** The ingress timer's delay in a real run: a release that failed on a store error is tried again
      * a minute later, if no accept has repaired it first. */
     const val DEFAULT_RETRY_DELAY_MS = 60_000L
 

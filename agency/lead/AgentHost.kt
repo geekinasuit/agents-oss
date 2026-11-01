@@ -318,7 +318,7 @@ class AgentHost<S> internal constructor(
    * failed, refuses by throwing, and appends nothing. One more throw is not a refusal: an approval
    * that completes the quorum and fails before its release is journaled throws with its row (and an
    * escalation, once per nonce) possibly already in the journal. The host writes that release itself:
-   * at the next approval it is given, whatever it is, or when a retry timer fires.
+   * at the next approval it is given, whatever it is, or when its ingress timer fires.
    *
    * An approval that completes the gate's quorum also journals the gate's release, then rings the
    * loop's doorbell, so the loop wakes to a journal that holds it. An approval that completes no

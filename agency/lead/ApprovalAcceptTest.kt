@@ -481,7 +481,7 @@ class ApprovalAcceptTest {
       val host = rig.host(faults = failOnce, timers = timers)
       assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
       assertThrows(RuntimeException::class.java) { host.injectApproval(candidate(nonce, publicKey = "pk-second")) }
-      assertEquals(listOf(ApprovalAcceptor.RETRY_TIMER_ID), timers.armed.map { it.id })
+      assertEquals(listOf(ApprovalAcceptor.TIMER_ID), timers.armed.map { it.id })
       timers.fireAll()
       assertEquals(1, rig.releaseRows().size)
       assertEquals("nothing left to retry", 0, timers.armed.size)
@@ -548,10 +548,30 @@ class ApprovalAcceptTest {
       )
       assertEquals(0, timers.armed.size)
       assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
-      assertEquals("armed at the next failure", listOf(ApprovalAcceptor.RETRY_TIMER_ID), timers.armed.map { it.id })
+      assertEquals("armed at the next failure", listOf(ApprovalAcceptor.TIMER_ID), timers.armed.map { it.id })
       refusing.refused.clear()
       timers.fireAll()
       assertEquals(1, rig.releaseRows().size)
+    }
+
+  @Test
+  fun aFiringWhoseOwnReArmIsRefusedArmsTheTimerOnceItsPassEnds() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val refusing = RefusingStore(rig.store, KIND_GATE_RELEASED)
+      val timers = CapturedTimers()
+      val host = rig.host(journal = refusing, timers = timers)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      assertThrows(IllegalStateException::class.java) { host.injectApproval(candidate(nonce, publicKey = "pk-second")) }
+      assertEquals(1, timers.armed.size)
+      // The firing's repair fails again, and the timer service refuses the arm that failure asks for.
+      timers.failNextArm = true
+      timers.fireAll()
+      assertEquals("the release is still owed, so the firing arms the timer itself", listOf(ApprovalAcceptor.TIMER_ID), timers.armed.map { it.id })
+      refusing.refused.clear()
+      timers.fireAll()
+      assertEquals(1, rig.releaseRows().size)
+      assertEquals("nothing owed, so nothing armed", 0, timers.armed.size)
     }
 
   @Test
@@ -580,6 +600,12 @@ class ApprovalAcceptTest {
       refusing.refusedReleaseNonce = first.nonce
       timers.fireAll()
       assertEquals(JsonPrimitive(second.nonce), payload(rig.releaseRows().single())["nonce"])
+      // The first nonce's marked row is still live, but the gate is now released on its digest, so the
+      // repair would release nothing more: the timer is armed by the first nonce's failed release in
+      // that pass, and the next firing finds no work and does not arm again.
+      assertEquals("armed by the first nonce's failed release", 1, timers.armed.size)
+      timers.fireAll()
+      assertEquals("a marked row the repair would not release keeps no timer", 0, timers.armed.size)
     }
 
   @Test
