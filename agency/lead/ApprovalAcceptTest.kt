@@ -9,9 +9,11 @@ import com.geekinasuit.agency.shared.auth.QuorumGroup
 import com.geekinasuit.agency.shared.auth.SchemeKey
 import com.geekinasuit.agency.shared.auth.SignerLeaf
 import com.geekinasuit.agency.shared.auth.committedPreimage
+import com.geekinasuit.agency.shared.journal.ArmedTimer
 import com.geekinasuit.agency.shared.journal.ChainBrokenException
 import com.geekinasuit.agency.shared.journal.EffectReceiver
 import com.geekinasuit.agency.shared.journal.JournalEntry
+import com.geekinasuit.agency.shared.journal.JournalStore
 import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
 import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
@@ -412,23 +414,37 @@ class ApprovalAcceptTest {
   }
 
   @Test
-  fun aCrashBetweenTheApprovalAndTheReleaseLeavesTheMarkedRowAndNoRelease() =
+  fun aCrashBetweenTheApprovalAndTheReleaseIsRepairedWhenTheHostRestarts() =
     onBothWorkflows { rig ->
-      val nonce = rig.openGate()
-      assertEquals(ApprovalAccept.RECORDED, rig.host().injectApproval(candidate(nonce)))
-      val crash = FaultInjector { if (it == ApprovalAcceptor.FAULT_BEFORE_RELEASE) throw RuntimeException("crash") }
-      assertThrows(RuntimeException::class.java) {
-        rig.host(faults = crash).injectApproval(candidate(nonce, publicKey = "pk-second"))
-      }
-      assertEquals(JsonPrimitive(true), payload(rig.approvalRows().last())["completesQuorum"])
-      assertEquals(0, rig.releaseRows().size)
-      val replay = rig.host().injectApproval(candidate(nonce, publicKey = "pk-second"))
-      assertEquals("the nonce is still open, and a replay releases nothing here", ApprovalAccept.DUPLICATE, replay)
-      assertEquals(0, rig.releaseRows().size)
+      val nonce = rig.crashBetweenTheRows()
+      val restarted = rig.host()
+      val folded = restarted.driveUntilQuiescent()
+      val release = rig.releaseRows().single()
+      assertEquals(ORIGIN_AUTH_LAYER, release.origin)
+      assertEquals(JsonPrimitive(nonce.nonce), payload(release)["nonce"])
+      assertTrue("the fold honors it", folded.host.approvedOnCurrentDigest(nonce.gateId))
+      // The pipeline advances past the release. The loop's Adopted wake folds it whether or not the
+      // repair's doorbell rings, so this does not observe the doorbell; the live-loop cells do.
+      assertTrue(
+        "the loop decided again after the release",
+        rig.store.readAll().any { it.seq > release.seq && it.kind == HostKinds.COGNITION_PROPOSED },
+      )
+      assertEquals("a later accept repairs nothing more", ApprovalAccept.NOT_OPEN, restarted.injectApproval(candidate(nonce)))
+      assertEquals(1, rig.releaseRows().size)
     }
 
   @Test
-  fun aReleaseThatFailsOnALiveHostStopsTheBoundaryAndIsEscalated() =
+  fun aCrashBetweenTheApprovalAndTheReleaseIsRepairedByAReplayOfTheApproval() =
+    onBothWorkflows { rig ->
+      val nonce = rig.crashBetweenTheRows()
+      val replay = rig.host().injectApproval(candidate(nonce, publicKey = "pk-second"))
+      assertEquals("the repair runs first and consumes the nonce the replay names", ApprovalAccept.NOT_OPEN, replay)
+      assertEquals(1, rig.releaseRows().size)
+      assertTrue(rig.host().refold().host.approvedOnCurrentDigest(nonce.gateId))
+    }
+
+  @Test
+  fun aReleaseThatFailsOnALiveHostIsWrittenByTheNextAcceptAndTheBoundaryGoesOn() =
     onBothWorkflows { rig ->
       val nonce = rig.openGate()
       var failed = false
@@ -441,18 +457,197 @@ class ApprovalAcceptTest {
       val host = rig.host(faults = failOnce)
       assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
       assertThrows(RuntimeException::class.java) { host.injectApproval(candidate(nonce, publicKey = "pk-second")) }
-      val retry = assertThrows(IllegalStateException::class.java) {
-        host.injectApproval(candidate(nonce, publicKey = "pk-second"))
-      }
-      assertTrue("a redelivery is refused, not taken as a duplicate", "approval boundary stopped" in retry.message!!)
-      assertEquals(
-        "one escalation",
-        1,
-        rig.rawKindsAndPayloads().count { (kind, payload) ->
-          kind == HostKinds.ESCALATED && "approval boundary stopped" in payload
-        },
-      )
       assertEquals(0, rig.releaseRows().size)
+      val retry = host.injectApproval(candidate(nonce, publicKey = "pk-second"))
+      assertEquals("the release is written first, and it consumes the nonce the redelivery names", ApprovalAccept.NOT_OPEN, retry)
+      assertEquals(1, rig.releaseRows().size)
+      assertEquals("one escalation", 1, rig.releaseEscalations())
+      val released = rig.host().refold().host
+      assertTrue(released.approvedOnCurrentDigest(nonce.gateId))
+    }
+
+  @Test
+  fun aReleaseThatFailsWithNoLaterAcceptIsWrittenWhenTheRetryTimerFires() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      var failed = false
+      val failOnce = FaultInjector {
+        if (it == ApprovalAcceptor.FAULT_BEFORE_RELEASE && !failed) {
+          failed = true
+          throw RuntimeException("the release append failed")
+        }
+      }
+      val timers = CapturedTimers()
+      val host = rig.host(faults = failOnce, timers = timers)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      assertThrows(RuntimeException::class.java) { host.injectApproval(candidate(nonce, publicKey = "pk-second")) }
+      assertEquals(listOf(ApprovalAcceptor.RETRY_TIMER_ID), timers.armed.map { it.id })
+      timers.fireAll()
+      assertEquals(1, rig.releaseRows().size)
+      assertEquals("nothing left to retry", 0, timers.armed.size)
+    }
+
+  @Test
+  fun aReleaseThatKeepsFailingIsEscalatedOnceAndRetriedUntilItLands() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      var failing = true
+      val faults = FaultInjector {
+        if (it == ApprovalAcceptor.FAULT_BEFORE_RELEASE && failing) throw RuntimeException("the release append failed")
+      }
+      val timers = CapturedTimers()
+      val host = rig.host(faults = faults, timers = timers)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      assertThrows(RuntimeException::class.java) { host.injectApproval(candidate(nonce, publicKey = "pk-second")) }
+      repeat(5) {
+        assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
+        timers.fireAll()
+        assertEquals("the timer is armed again after each failed retry", 1, timers.armed.size)
+      }
+      assertEquals(0, rig.releaseRows().size)
+      assertEquals("one escalation, however many retries fail", 1, rig.releaseEscalations())
+      failing = false
+      timers.fireAll()
+      assertEquals(1, rig.releaseRows().size)
+      assertEquals(0, timers.armed.size)
+    }
+
+  @Test
+  fun anEscalationTheStoreRefusesIsAskedForAgainAtTheNextFailure() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val refusing = RefusingStore(rig.store, KIND_GATE_RELEASED, HostKinds.ESCALATED)
+      val host = rig.host(journal = refusing, timers = CapturedTimers())
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      assertThrows(IllegalStateException::class.java) { host.injectApproval(candidate(nonce, publicKey = "pk-second")) }
+      assertEquals(0, rig.releaseEscalations())
+      refusing.refused -= HostKinds.ESCALATED
+      assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
+      assertEquals("the escalation lands once the store takes it", 1, rig.releaseEscalations())
+      assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
+      assertEquals("and only once", 1, rig.releaseEscalations())
+      refusing.refused.clear()
+      assertEquals(ApprovalAccept.NOT_OPEN, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
+      assertEquals(1, rig.releaseRows().size)
+    }
+
+  @Test
+  fun aTimerServiceThatRefusesLeavesTheRetryToBeArmedAtTheNextFailure() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val refusing = RefusingStore(rig.store, KIND_GATE_RELEASED)
+      val timers = CapturedTimers().apply { failNextArm = true }
+      val host = rig.host(journal = refusing, timers = timers)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      val failed = assertThrows(IllegalStateException::class.java) { host.injectApproval(candidate(nonce, publicKey = "pk-second")) }
+      assertTrue("the release's failure is what the caller sees", "refused a $KIND_GATE_RELEASED" in failed.message!!)
+      assertEquals(
+        "carrying the timer's failure",
+        listOf("the timer service refused"),
+        failed.suppressed.map { it.message },
+      )
+      assertEquals(0, timers.armed.size)
+      assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
+      assertEquals("armed at the next failure", listOf(ApprovalAcceptor.RETRY_TIMER_ID), timers.armed.map { it.id })
+      refusing.refused.clear()
+      timers.fireAll()
+      assertEquals(1, rig.releaseRows().size)
+    }
+
+  @Test
+  fun aReleaseThatKeepsFailingForOneNonceDoesNotHoldBackAnother() =
+    onBothWorkflows { rig ->
+      // A journal the lead did not write: a second nonce on the gate's digest. The first nonce's
+      // marked row comes first, and its release is refused for good.
+      val first = rig.crashBetweenTheRows()
+      val second = first.copy(nonce = "${first.nonce}-2")
+      rig.store.append(
+        HostKinds.NONCE_ISSUED,
+        buildJsonObject {
+          put("nonce", second.nonce)
+          put("gateId", second.gateId)
+          put("payloadDigest", second.payloadDigest)
+        },
+        ORIGIN_SUBSTRATE,
+      )
+      val refusing = RefusingStore(rig.store, KIND_GATE_RELEASED)
+      val timers = CapturedTimers()
+      val host = rig.host(journal = refusing, timers = timers)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(second)))
+      assertThrows(IllegalStateException::class.java) { host.injectApproval(candidate(second, publicKey = "pk-second")) }
+      assertEquals("both nonces carry a marked row and no release", 0, rig.releaseRows().size)
+      refusing.refused.clear()
+      refusing.refusedReleaseNonce = first.nonce
+      timers.fireAll()
+      assertEquals(JsonPrimitive(second.nonce), payload(rig.releaseRows().single())["nonce"])
+    }
+
+  @Test
+  fun aRetriedReleaseWakesAnIdleLoop() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      assertEquals(ApprovalAccept.RECORDED, rig.host().injectApproval(candidate(nonce)))
+      var failed = false
+      val failOnce = FaultInjector {
+        if (it == ApprovalAcceptor.FAULT_BEFORE_RELEASE && !failed) {
+          failed = true
+          throw RuntimeException("the release append failed")
+        }
+      }
+      val timers = CapturedTimers()
+      val host = rig.host(faults = failOnce, timers = timers)
+      val loop = Thread { host.runLoop() }
+      loop.start()
+      try {
+        awaitIdle(loop)
+        assertThrows(RuntimeException::class.java) { host.injectApproval(candidate(nonce, publicKey = "pk-second")) }
+        timers.fireAll()
+        val release = rig.releaseRows().single().seq
+        awaitRowAfter(rig, release, "the loop never woke to the retried release")
+      } finally {
+        host.shutdown()
+        loop.join(10_000)
+      }
+    }
+
+  @Test
+  fun aMarkedRowOfAnotherOriginNeverYieldsARelease() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      // A journal the lead did not write: two genuine approvals that meet the quorum, neither marked,
+      // and a copy of one marked as completing it under the substrate's origin.
+      val operator = rowUnder(candidate(nonce), "operator")
+      rig.store.append(HostKinds.APPROVAL_RECORDED, operator, ORIGIN_AUTH_LAYER)
+      rig.store.append(HostKinds.APPROVAL_RECORDED, rowUnder(candidate(nonce, publicKey = "pk-second"), "second"), ORIGIN_AUTH_LAYER)
+      rig.store.append(HostKinds.APPROVAL_RECORDED, marked(operator), ORIGIN_SUBSTRATE)
+      val timers = CapturedTimers()
+      val host = rig.host(timers = timers)
+      host.driveUntilQuiescent()
+      assertEquals(ApprovalAccept.DUPLICATE, host.injectApproval(candidate(nonce)))
+      assertEquals(0, rig.releaseRows().size)
+      assertEquals(0, timers.armed.size)
+    }
+
+  @Test
+  fun aMarkedRowWhoseApproverWasRevokedIsNotRepairedUnderALoosenedSpec() =
+    onBothWorkflows { rig ->
+      val nonce = rig.crashBetweenTheRows()
+      // The second, whose approval completed the quorum, is revoked, and one approver now suffices:
+      // the operator's unmarked approval alone meets it, but no marked row still verifies.
+      val revokedAndLoosened = authOf(listOf(OPERATOR, THIRD), 1, "operator", "third")
+      rig.host(auth = revokedAndLoosened).driveUntilQuiescent()
+      assertEquals(0, rig.releaseRows().size)
+    }
+
+  @Test
+  fun aMarkedRowWhoseQuorumNoLongerHoldsIsNotRepaired() =
+    onBothWorkflows { rig ->
+      val nonce = rig.crashBetweenTheRows()
+      val allThree = authOf(listOf(OPERATOR, SECOND, THIRD), 3, "operator", "second", "third")
+      val host = rig.host(auth = allThree)
+      host.driveUntilQuiescent()
+      assertEquals(0, rig.releaseRows().size)
+      assertEquals("positive control: the third completes it", ApprovalAccept.RELEASED, host.injectApproval(candidate(nonce, publicKey = "pk-third")))
     }
 
   @Test
@@ -602,7 +797,12 @@ class ApprovalAcceptTest {
     val dir: File = tmp.newFolder()
     val store = SqliteStore(dir.absolutePath, componentId = "lead")
 
-    abstract fun host(faults: FaultInjector = FaultInjector.NONE, auth: LeadAuth = AUTH): AgentHost<*>
+    abstract fun host(
+      faults: FaultInjector = FaultInjector.NONE,
+      auth: LeadAuth = AUTH,
+      timers: TimerService = TIMERS,
+      journal: JournalStore = store,
+    ): AgentHost<*>
 
     /** Drives a host until its gate is open, and returns the nonce minted for it. */
     fun openGate(): IssuedNonce = host().driveUntilQuiescent().host.issuedNonces.values.single()
@@ -610,6 +810,22 @@ class ApprovalAcceptTest {
     fun approvalRows(): List<JournalEntry> = store.readAll().filter { it.kind == HostKinds.APPROVAL_RECORDED }
 
     fun releaseRows(): List<JournalEntry> = store.readAll().filter { it.kind == KIND_GATE_RELEASED }
+
+    /** The escalations that an approval's marked row may be journaled without its release. */
+    fun releaseEscalations(): Int =
+      store.readAll().count { it.kind == HostKinds.ESCALATED && "without its release" in it.payloadJson }
+
+    /** Opens the gate, records the operator's approval, and crashes the second's, which completes the
+     * quorum, after its marked row and before its release. Returns the gate's nonce. */
+    fun crashBetweenTheRows(): IssuedNonce {
+      val nonce = openGate()
+      assertEquals(ApprovalAccept.RECORDED, host().injectApproval(candidate(nonce)))
+      val crash = FaultInjector { if (it == ApprovalAcceptor.FAULT_BEFORE_RELEASE) throw RuntimeException("crash") }
+      assertThrows(RuntimeException::class.java) { host(faults = crash).injectApproval(candidate(nonce, publicKey = "pk-second")) }
+      assertEquals(JsonPrimitive(true), payload(approvalRows().last())["completesQuorum"])
+      assertEquals(0, releaseRows().size)
+      return nonce
+    }
 
     /** Every row's kind and payload, read past the chain check, for a journal that no longer verifies. */
     fun rawKindsAndPayloads(): List<Pair<String, String>> =
@@ -627,9 +843,9 @@ class ApprovalAcceptTest {
       File(dir, "ticket.txt").writeText("$ref\n")
     }
 
-    override fun host(faults: FaultInjector, auth: LeadAuth): AgentHost<*> =
+    override fun host(faults: FaultInjector, auth: LeadAuth, timers: TimerService, journal: JournalStore): AgentHost<*> =
       ticketLead(
-        store = store,
+        store = journal,
         cognition = ScriptedCognition(),
         podRunner = FakePodRunner(),
         podSpec = PodSpec.fixture(),
@@ -637,7 +853,7 @@ class ApprovalAcceptTest {
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
         leadAuth = auth,
-        timers = TIMERS,
+        timers = timers,
         faults = faults,
       )
   }
@@ -645,9 +861,9 @@ class ApprovalAcceptTest {
   private inner class GateRig : Rig("a workflow that is not the ticket workflow") {
     private val evidence = File(dir, "evidence.txt").apply { writeText("approve this\n") }
 
-    override fun host(faults: FaultInjector, auth: LeadAuth): AgentHost<*> =
+    override fun host(faults: FaultInjector, auth: LeadAuth, timers: TimerService, journal: JournalStore): AgentHost<*> =
       AgentHost(
-        store = store,
+        store = journal,
         cognition = ProposeTheGate,
         podRunner = FakePodRunner(),
         podSpec = PodSpec.fixture(),
@@ -655,21 +871,66 @@ class ApprovalAcceptTest {
         workdir = dir,
         effects = EffectReceiver(dir.absolutePath),
         leadAuth = auth,
-        timers = TIMERS,
+        timers = timers,
         faults = faults,
       )
   }
 
   /** The row [c] would be journaled as if its key resolved to the operator. */
-  private fun rowUnderOperator(c: ApprovalCandidate): String =
-    buildJsonObject {
-        put("gateId", c.gateId)
-        put("principalId", "operator")
-        put("nonce", c.nonce)
-        put("payloadDigest", c.payloadDigest)
-        put("evidence", c.evidence)
+  private fun rowUnderOperator(c: ApprovalCandidate): String = rowUnder(c, "operator").toString()
+
+  /** The row [c] would be journaled as if its key resolved to [principalId]. */
+  private fun rowUnder(c: ApprovalCandidate, principalId: String): JsonObject = buildJsonObject {
+    put("gateId", c.gateId)
+    put("principalId", principalId)
+    put("nonce", c.nonce)
+    put("payloadDigest", c.payloadDigest)
+    put("evidence", c.evidence)
+  }
+
+  /** [row] marked as completing its gate's quorum. */
+  private fun marked(row: JsonObject): JsonObject = JsonObject(row + ("completesQuorum" to JsonPrimitive(true)))
+
+  /** [inner], except that an append of a kind in [refused], or a release naming [refusedReleaseNonce],
+   * throws and writes nothing. */
+  private class RefusingStore(private val inner: JournalStore, vararg refused: String) : JournalStore by inner {
+    val refused = refused.toMutableSet()
+    var refusedReleaseNonce: String? = null
+
+    override fun append(kind: String, payload: JsonObject, origin: String, idempotencyKey: String?): JournalEntry {
+      if (kind in refused) throw IllegalStateException("the store refused a $kind append")
+      if (kind == KIND_GATE_RELEASED && payload["nonce"] == JsonPrimitive(refusedReleaseNonce)) {
+        throw IllegalStateException("the store refused the release of nonce $refusedReleaseNonce")
       }
-      .toString()
+      return inner.append(kind, payload, origin, idempotencyKey)
+    }
+  }
+
+  /** Records every timer armed, and fires them only when a cell says so. */
+  private class CapturedTimers : TimerService {
+    private val pending = mutableListOf<Pair<ArmedTimer, (String) -> Unit>>()
+
+    /** When set, the next [arm] throws instead of arming. */
+    var failNextArm = false
+
+    val armed: List<ArmedTimer>
+      get() = pending.map { it.first }
+
+    override fun arm(timer: ArmedTimer, onDue: (String) -> Unit) {
+      if (failNextArm) {
+        failNextArm = false
+        throw IllegalStateException("the timer service refused")
+      }
+      pending += timer to onDue
+    }
+
+    /** Fires every timer armed so far, once; a timer armed while they fire waits for the next call. */
+    fun fireAll() {
+      val due = pending.toList()
+      pending.clear()
+      for ((timer, onDue) in due) onDue(timer.id)
+    }
+  }
 
   /** A candidate approving [n], by the allow-listed operator unless a field is overridden. The
    * evidence's own gate and digest agree with the candidate's, and so does its nonce unless
