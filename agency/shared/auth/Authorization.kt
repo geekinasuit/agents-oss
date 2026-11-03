@@ -85,6 +85,9 @@ class Principal(val principalId: String, val role: String, keys: List<SchemeKey>
  * the custodian-collapse guarantee is only as strong as that pre-entry normalization.
  */
 class AllowList(principals: List<Principal>) {
+  /** The principals, in the order given (snapshotted, as [Principal.keys] is). */
+  val principals: List<Principal> = principals.toList()
+
   private val byId: Map<String, Principal>
   private val byKey: Map<SchemeKey, Principal>
 

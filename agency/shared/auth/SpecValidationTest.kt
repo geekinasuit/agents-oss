@@ -2,6 +2,7 @@ package com.geekinasuit.agency.shared.auth
 
 import java.security.MessageDigest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -196,5 +197,15 @@ class SpecValidationTest {
       authSpecPreimage(listOf(keysForward), oneOfOne("p")),
       authSpecPreimage(listOf(keysReversed), oneOfOne("p")),
     )
+  }
+
+  // 10 — the spec hash names the rules: the sha256 of their canonical preimage, the same for the
+  // same rules however the allow-list was assembled, and different when only the quorum differs.
+  @Test
+  fun specHashIsTheSha256OfTheCanonicalPreimage() {
+    val forward = AllowList(principals)
+    assertEquals(sha256(authSpecPreimage(principals, quorum)), authSpecHash(forward, quorum))
+    assertEquals(authSpecHash(forward, quorum), authSpecHash(AllowList(principals.reversed()), quorum))
+    assertNotEquals(authSpecHash(forward, quorum), authSpecHash(forward, oneOfOne("ops")))
   }
 }

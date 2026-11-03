@@ -8,6 +8,10 @@ object HostKinds {
   const val RUN_STARTED = "run-started"
   const val STATUS_WRITTEN = "status-written"
   const val ESCALATED = "escalated"
+  /** A gate opened (payload: gateId, gateKind, payloadDigest, authSpecHash). `authSpecHash` is
+   * [LeadAuth.specHash] as the gate opened: which allow-list and quorum were in force then (not which
+   * verifier), for the audit. The fold never reads it, so a gate's verdict is re-decided under the
+   * auth in force at each fold, and an older row without it folds the same. */
   const val GATE_OPENED = "gate-opened"
   const val GATE_OPEN_NOTIFIED = "gate-open-notified"
   const val POD_SPAWNED = "pod-spawned"

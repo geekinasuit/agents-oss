@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.shared.auth
 
+import java.security.MessageDigest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -111,6 +112,17 @@ fun authSpecPreimage(principals: List<Principal>, quorum: QuorumNode): String {
     }
   return CANONICAL.encodeToString(JsonArray.serializer(), root)
 }
+
+/**
+ * The name of an allow-list and quorum: lowercase hex SHA-256 of the UTF-8 bytes of their
+ * [authSpecPreimage]. Recomputed from the parsed rules rather than kept from the signed bytes, so
+ * every holder of the same rules gets the same hash; it equals the hash of the bytes the root signed
+ * whenever the signer signed the canonical form. An audit name only, never an input to a verdict.
+ */
+fun authSpecHash(allowList: AllowList, quorum: QuorumNode): String =
+  MessageDigest.getInstance("SHA-256")
+    .digest(authSpecPreimage(allowList.principals, quorum).toByteArray(Charsets.UTF_8))
+    .joinToString("") { "%02x".format(it) }
 
 /**
  * Parses a canonical [authSpecPreimage] serialization back into an [AllowList] + [QuorumNode],

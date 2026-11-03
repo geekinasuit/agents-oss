@@ -4,6 +4,7 @@ import com.geekinasuit.agency.shared.auth.AllowList
 import com.geekinasuit.agency.shared.auth.ApprovalVerifier
 import com.geekinasuit.agency.shared.auth.QuorumNode
 import com.geekinasuit.agency.shared.auth.RejectingVerifier
+import com.geekinasuit.agency.shared.auth.authSpecHash
 import com.geekinasuit.agency.shared.auth.oneOfOne
 import com.geekinasuit.agency.shared.journal.foldFaultMessage
 import com.geekinasuit.agency.shared.journal.requireContract
@@ -102,6 +103,12 @@ class LeadAuth(
    * iff this holds — one predicate, read at both the write and the fold. */
   val hasApprovers: Boolean
     get() = !allowList.isEmpty()
+
+  /** The [authSpecHash] of this auth's allow-list and quorum, which the daemon records on each gate
+   * it opens. It names who may approve and how many must; it does not cover the [verifier], so two
+   * auths differing only in their verifier share it. Audit only; a fold re-decides every verdict
+   * under the auth in force at that fold, whatever hash a gate recorded. */
+  val specHash: String = authSpecHash(allowList, quorum)
 
   companion object {
     /** The principal an approval row names when its key resolves to none, and on every row whose

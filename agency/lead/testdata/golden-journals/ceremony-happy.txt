@@ -9,7 +9,7 @@
 9 pod-result-recorded substrate key=null {"podId":"pod#1","artifactPath":"<DIR>/artifacts/plan-t1","boundPath":"<DIR>/artifacts-bound/pod#1","resultDigest":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428","costUsd":0.0}
 10 plan-artifact-recorded substrate key=null {"path":"<DIR>/artifacts-bound/pod#1","sha256":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428"}
 11 cognition-proposed cognition key=null {"strategy":"scripted","reasoning":"plan artifact recorded; opening the plan-approval gate on its digest","proposals":[{"type":"gate-open","gateKind":"plan-approval","payloadDigest":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428"},{"type":"status","status":"plan ready for approval: t1"}]}
-12 gate-opened substrate key=null {"gateId":"plan-approval:t1","gateKind":"plan-approval","payloadDigest":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428"}
+12 gate-opened substrate key=null {"gateId":"plan-approval:t1","gateKind":"plan-approval","payloadDigest":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428","authSpecHash":"68f952e8c7b435de7021644e9ca812fb1c8c0d8c5aa1c234617cb63d352727c4"}
 13 nonce-issued substrate key=null {"nonce":"nonce#1","gateId":"plan-approval:t1","payloadDigest":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428"}
 14 escalated substrate key=null {"reason":"gate-open notify had no sink for plan-approval:t1 (plan-approval) — gate is open and blocking, operator not notified"}
 15 gate-open-notified substrate key=null {"gateId":"plan-approval:t1","payloadDigest":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428","nonce":"nonce#1","outcome":"no-sink"}
@@ -24,7 +24,7 @@
 24 pod-result-recorded substrate key=null {"podId":"pod#2","artifactPath":"<DIR>/artifacts/execute-t1","boundPath":"<DIR>/artifacts-bound/pod#2","resultDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48","costUsd":0.0}
 25 commit-proposed substrate key=null {"manifestPath":"<DIR>/artifacts-bound/pod#2","manifestDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48"}
 26 cognition-proposed cognition key=null {"strategy":"scripted","reasoning":"commit manifest proposed; opening the commit-approval gate on its digest","proposals":[{"type":"gate-open","gateKind":"commit-approval","payloadDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48"},{"type":"status","status":"commit ready for approval: t1"}]}
-27 gate-opened substrate key=null {"gateId":"commit-approval:t1","gateKind":"commit-approval","payloadDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48"}
+27 gate-opened substrate key=null {"gateId":"commit-approval:t1","gateKind":"commit-approval","payloadDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48","authSpecHash":"68f952e8c7b435de7021644e9ca812fb1c8c0d8c5aa1c234617cb63d352727c4"}
 28 nonce-issued substrate key=null {"nonce":"nonce#2","gateId":"commit-approval:t1","payloadDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48"}
 29 escalated substrate key=null {"reason":"gate-open notify had no sink for commit-approval:t1 (commit-approval) — gate is open and blocking, operator not notified"}
 30 gate-open-notified substrate key=null {"gateId":"commit-approval:t1","payloadDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48","nonce":"nonce#2","outcome":"no-sink"}

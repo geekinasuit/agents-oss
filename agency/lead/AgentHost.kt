@@ -1675,6 +1675,7 @@ class AgentHost<S> internal constructor(
               put("gateId", gateId)
               put("gateKind", p.gateKind)
               put("payloadDigest", expected)
+              put("authSpecHash", leadAuth.specHash)
             },
             origin = ORIGIN_SUBSTRATE,
           )
