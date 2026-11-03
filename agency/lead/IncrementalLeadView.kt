@@ -2,18 +2,18 @@ package com.geekinasuit.agency.lead
 
 import com.geekinasuit.agency.shared.journal.ChainCursor
 import com.geekinasuit.agency.shared.journal.JournalEntry
-import com.geekinasuit.agency.shared.journal.JournalStore
+import com.geekinasuit.agency.shared.journal.JournalReader
 
 /**
  * The host's records and the workflow's state over [store]'s journal, kept current by folding only
- * the entries appended since the last [advance]: a verified tail read ([JournalStore.readAfter]) from
+ * the entries appended since the last [advance]: a verified tail read ([JournalReader.readAfter]) from
  * a retained cursor, each entry through the same step a cold fold takes ([LeadFoldStepper]). While
  * the journal only grows, [host] and [lead] after every [advance] equal [foldHostAndLead] over
- * [JournalStore.readAll].
+ * [JournalReader.readAll].
  *
- * Entries already folded are not verified again: [JournalStore.readAfter] checks only the cursor's
+ * Entries already folded are not verified again: [JournalReader.readAfter] checks only the cursor's
  * stored hash and epoch. So an in-place change to an entry the view has folded, one that leaves the
- * cursor's stored hash alone, goes unseen here while a cold fold of [JournalStore.readAll] refuses
+ * cursor's stored hash alone, goes unseen here while a cold fold of [JournalReader.readAll] refuses
  * the journal. Verifying the whole chain stays the job of a full read; the host loop does one on
  * every wake.
  *
@@ -28,7 +28,7 @@ import com.geekinasuit.agency.shared.journal.JournalStore
  * Not thread-safe: the caller serializes calls.
  */
 internal class IncrementalLeadView<S, W>(
-  private val store: JournalStore,
+  private val store: JournalReader,
   auth: LeadAuth,
   fold: WorkflowFold<S, W>,
 ) {
