@@ -16,6 +16,7 @@ import com.geekinasuit.agency.nostr.RelayConfig
 import com.geekinasuit.agency.nostr.RelayConnection
 import com.geekinasuit.agency.nostr.RelayMessage
 import com.geekinasuit.agency.nostr.encodeApproval
+import com.geekinasuit.agency.shared.text.inert
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintStream
@@ -238,55 +239,6 @@ object ApprovalTool {
     out.println("----- end -----")
   }
 
-  /**
-   * Text from the lead or the relay, shown inert, so it can neither drive the terminal nor reorder or
-   * hide what the approver reads. A code point is shown as itself only when it is a letter, mark,
-   * number, punctuation mark, symbol or space separator ([SHOWN_CATEGORIES]) and not a default
-   * ignorable code point ([isDefaultIgnorable]), which renders as nothing. Every other code point —
-   * controls, format characters, line and paragraph separators, surrogates, private use, unassigned
-   * — is shown as an escape: \uXXXX, or \u{XXXXX} above U+FFFF. A backslash is shown as \\, so an
-   * escape in the text cannot pass for one this made. With [keepLines], newline and tab are kept.
-   *
-   * It walks code points, so a character outside the Basic Multilingual Plane is judged whole. A code
-   * point the running JDK's Unicode tables do not know is unassigned, so it is escaped.
-   */
-  internal fun inert(text: String, keepLines: Boolean = false): String = buildString {
-    text.codePoints().forEach { cp ->
-      when {
-        cp == '\\'.code -> append("\\\\")
-        keepLines && (cp == '\n'.code || cp == '\t'.code) -> appendCodePoint(cp)
-        Character.getType(cp) in SHOWN_CATEGORIES && !isDefaultIgnorable(cp) -> appendCodePoint(cp)
-        cp > 0xFFFF -> append("\\u{%x}".format(cp))
-        else -> append("\\u%04x".format(cp))
-      }
-    }
-  }
-
-  /** Whether [cp] is a Default_Ignorable_Code_Point, per DerivedCoreProperties.txt of Unicode 15.0
-   * (the version JDK 21 implements): code points a renderer shows as nothing. */
-  internal fun isDefaultIgnorable(cp: Int): Boolean = DEFAULT_IGNORABLE.any { cp in it }
-
-  private val DEFAULT_IGNORABLE: List<IntRange> =
-    listOf(
-      0x00AD..0x00AD,
-      0x034F..0x034F,
-      0x061C..0x061C,
-      0x115F..0x1160,
-      0x17B4..0x17B5,
-      0x180B..0x180F,
-      0x200B..0x200F,
-      0x202A..0x202E,
-      0x2060..0x206F,
-      0x3164..0x3164,
-      0xFE00..0xFE0F,
-      0xFEFF..0xFEFF,
-      0xFFA0..0xFFA0,
-      0xFFF0..0xFFF8,
-      0x1BCA0..0x1BCA3,
-      0x1D173..0x1D17A,
-      0xE0000..0xE0FFF,
-    )
-
   private fun usage(err: PrintStream, why: String): Int {
     err.println("approval: $why")
     err.println(
@@ -303,23 +255,6 @@ object ApprovalTool {
     random.nextBytes(bytes)
     return bytes.joinToString("") { "%02x".format(it) }
   }
-
-  // The general categories inert() shows as themselves: letters, marks, numbers, punctuation,
-  // symbols, and the space separator.
-  internal val SHOWN_CATEGORIES: Set<Int> =
-    setOf(
-        Character.UPPERCASE_LETTER, Character.LOWERCASE_LETTER, Character.TITLECASE_LETTER,
-        Character.MODIFIER_LETTER, Character.OTHER_LETTER,
-        Character.NON_SPACING_MARK, Character.COMBINING_SPACING_MARK, Character.ENCLOSING_MARK,
-        Character.DECIMAL_DIGIT_NUMBER, Character.LETTER_NUMBER, Character.OTHER_NUMBER,
-        Character.CONNECTOR_PUNCTUATION, Character.DASH_PUNCTUATION, Character.START_PUNCTUATION,
-        Character.END_PUNCTUATION, Character.INITIAL_QUOTE_PUNCTUATION, Character.FINAL_QUOTE_PUNCTUATION,
-        Character.OTHER_PUNCTUATION,
-        Character.MATH_SYMBOL, Character.CURRENCY_SYMBOL, Character.MODIFIER_SYMBOL, Character.OTHER_SYMBOL,
-        Character.SPACE_SEPARATOR,
-      )
-      .map { it.toInt() }
-      .toSet()
 
   private const val SUBSCRIPTION_ID = "notices"
   private val TIMEOUT: Duration = Duration.ofSeconds(10)

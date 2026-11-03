@@ -116,10 +116,6 @@ class ApprovalToolTest {
   }
 
   @Test
-  fun theTranscribedIgnorableTableHasUnicodesCount() =
-    assertEquals(4174, DEFAULT_IGNORABLE_15_0.sumOf { it.last - it.first + 1 })
-
-  @Test
   fun theRestatedCountsMatchWhatIsShown() =
     FakeRelay().use { inbox ->
       val artifact = "A\rB\n" + String(Character.toChars(0xE0041))
@@ -225,34 +221,18 @@ class ApprovalToolTest {
     }
 
   @Test
-  fun everyCodePointIsShownAsItselfExactlyWhenItIsVisibleText() {
-    for (cp in 0..Character.MAX_CODE_POINT) {
-      val s = String(Character.toChars(cp))
-      val shown = ApprovalTool.inert(s)
-      when {
-        cp == '\\'.code -> assertEquals("\\\\", shown)
-        Character.getType(cp) in VISIBLE_CATEGORIES && DEFAULT_IGNORABLE_15_0.none { cp in it } ->
-          assertEquals("U+%04X is shown as itself".format(cp), s, shown)
-        else -> {
-          val escape = if (cp > 0xFFFF) "\\u{%x}".format(cp) else "\\u%04x".format(cp)
-          assertEquals("U+%04X is escaped".format(cp), escape, shown)
-        }
-      }
-    }
-  }
-
-  @Test
   fun variationSelectorsAndUnassignedIgnorablesCannotHideText() =
     FakeRelay().use { relay ->
-      // "hi" smuggled as one variation selector per byte, plus reserved default-ignorables.
+      // "hi" smuggled as one variation selector per byte, plus reserved default-ignorables and a
+      // blank braille cell.
       val smuggled = "hi".map { String(Character.toChars(0xE0100 + it.code - 0x10)) }.joinToString("") +
-        Char(0xFE0F) + String(Character.toChars(0xE0080)) + Char(0x2065) + Char(0xFFF0) + Char(0x3164)
+        Char(0xFE0F) + String(Character.toChars(0xE0080)) + Char(0x2065) + Char(0xFFF0) + Char(0x3164) + Char(0x2800)
       val artifact = "plan$smuggled."
       relay.replays(noticeWrap(GateOpenNotice("plan-approval:t1", sha256Hex(artifact), "h".repeat(64), artifact)))
       val r = run(listOf(relay), "", "inbox", *flags())
       assertEquals(r.err, 0, r.code)
       val shownArtifact = r.out.substringAfter("----- artifact -----\n").substringBefore("\n----- end -----")
-      assertTrue(shownArtifact, shownArtifact.startsWith("plan\\u{e0158}\\u{e0159}\\ufe0f\\u{e0080}\\u2065\\ufff0\\u3164."))
+      assertTrue(shownArtifact, shownArtifact.startsWith("plan\\u{e0158}\\u{e0159}\\ufe0f\\u{e0080}\\u2065\\ufff0\\u3164\\u2800."))
     }
 
   @Test
@@ -303,34 +283,6 @@ class ApprovalToolTest {
     val AUX = "0".repeat(64)
     const val ARTIFACT = "Plan: wire the reader.\nThen stop."
     val NOTICE = GateOpenNotice("plan-approval:t1", sha256Hex(ARTIFACT), "n".repeat(64), ARTIFACT)
-
-    // The display rule, restated independently of the tool: letters, marks, numbers, punctuation,
-    // symbols and the space separator are visible text...
-    val VISIBLE_CATEGORIES: Set<Int> =
-      listOf(
-          Character.UPPERCASE_LETTER, Character.LOWERCASE_LETTER, Character.TITLECASE_LETTER,
-          Character.MODIFIER_LETTER, Character.OTHER_LETTER, Character.NON_SPACING_MARK,
-          Character.COMBINING_SPACING_MARK, Character.ENCLOSING_MARK, Character.DECIMAL_DIGIT_NUMBER,
-          Character.LETTER_NUMBER, Character.OTHER_NUMBER, Character.CONNECTOR_PUNCTUATION,
-          Character.DASH_PUNCTUATION, Character.START_PUNCTUATION, Character.END_PUNCTUATION,
-          Character.INITIAL_QUOTE_PUNCTUATION, Character.FINAL_QUOTE_PUNCTUATION,
-          Character.OTHER_PUNCTUATION, Character.MATH_SYMBOL, Character.CURRENCY_SYMBOL,
-          Character.MODIFIER_SYMBOL, Character.OTHER_SYMBOL, Character.SPACE_SEPARATOR,
-        )
-        .map { it.toInt() }
-        .toSet()
-
-    // ...unless Unicode 15.0's DerivedCoreProperties.txt lists them as Default_Ignorable_Code_Point,
-    // transcribed line for line (Total code points: 4174).
-    val DEFAULT_IGNORABLE_15_0: List<IntRange> =
-      listOf(
-        0x00AD..0x00AD, 0x034F..0x034F, 0x061C..0x061C, 0x115F..0x1160, 0x17B4..0x17B5,
-        0x180B..0x180D, 0x180E..0x180E, 0x180F..0x180F, 0x200B..0x200F, 0x202A..0x202E,
-        0x2060..0x2064, 0x2065..0x2065, 0x2066..0x206F, 0x3164..0x3164, 0xFE00..0xFE0F,
-        0xFEFF..0xFEFF, 0xFFA0..0xFFA0, 0xFFF0..0xFFF8, 0x1BCA0..0x1BCA3, 0x1D173..0x1D17A,
-        0xE0000..0xE0000, 0xE0001..0xE0001, 0xE0002..0xE001F, 0xE0020..0xE007F, 0xE0080..0xE00FF,
-        0xE0100..0xE01EF, 0xE01F0..0xE0FFF,
-      )
 
     fun bytes(hex: String) = ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 

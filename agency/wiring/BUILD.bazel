@@ -22,6 +22,7 @@ kt_jvm_library(
         "//agency/lead:host",
         "//agency/nostr",
         "//agency/nostr:relay",
+        "//agency/shared/text",
     ],
 )
 
