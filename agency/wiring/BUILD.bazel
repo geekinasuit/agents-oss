@@ -1,0 +1,33 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+
+# Wiring: the adapters that join the lead host to the nostr substrate. Neither side depends on the
+# other (the lead never sees a nostr type; nostr never sees the host), so the pieces that need both
+# live here, and a deployment links them from here.
+
+kt_jvm_library(
+    name = "wiring",
+    srcs = ["NostrGateOpenSink.kt"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//agency/lead:host",
+        "//agency/nostr",
+        "//agency/nostr:relay",
+    ],
+)
+
+# Scripted notifiers for the outcome mapping, and one cell through the real RelayNotifier, which
+# signs: it needs the secp256k1 native at runtime.
+kt_jvm_test(
+    name = "nostr_gate_open_sink_test",
+    size = "small",
+    srcs = ["NostrGateOpenSinkTest.kt"],
+    test_class = "com.geekinasuit.agency.wiring.NostrGateOpenSinkTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":wiring",
+        "//agency/lead:host",
+        "//agency/nostr",
+        "//agency/nostr:relay",
+        "@maven//:junit_junit",
+    ],
+)
