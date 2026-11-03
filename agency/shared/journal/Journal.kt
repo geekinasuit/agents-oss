@@ -21,12 +21,9 @@ import kotlinx.serialization.json.JsonObject
  * second writing process is a design violation (contention handling arrives only if a
  * store ever legitimately gains one).
  */
-interface JournalStore : AutoCloseable {
+interface JournalStore : JournalReader {
   val componentId: String
   val chainKind: String
-
-  /** The chain-context tag stamped on (and hashed into) every v3 entry of this store. */
-  val chainContext: String
 
   /**
    * Appends one entry (assigns seq, salts + commits the payload, chains the hash, signs via
@@ -40,6 +37,38 @@ interface JournalStore : AutoCloseable {
    * or if [kind], [origin] or [idempotencyKey] holds an unpaired surrogate ([appendRaw]).
    */
   fun append(kind: String, payload: JsonObject, origin: String, idempotencyKey: String? = null): JournalEntry
+
+  /** Raw read without verify/upcast — fixture generation and chain checks only. */
+  fun readRaw(): List<JournalEntry>
+
+  /**
+   * Appends a pre-built entry verbatim (legacy/fixture writer only — no salting, no epoch logic).
+   *
+   * THROWS [IllegalArgumentException], writing nothing, if a text field holds an unpaired
+   * surrogate. Such a field has no UTF-8 encoding: a UTF-8 store would keep a different string
+   * from the one the entry was hashed over, and the hash's lenient encoding gives it the bytes of
+   * the same field with `?` in its place.
+   */
+  fun appendRaw(entry: JournalEntry)
+}
+
+/**
+ * The read side of a journal: what a fold, a view or an outside reader needs, and nothing that
+ * writes. [JournalStore] extends it; a reader that is not the writing store implements only this.
+ *
+ * An implementation that is not the writing store reads another process's file, so it keeps the
+ * guarantees [readAfter] states with a read transaction of its own: the cursor check and the tail
+ * read see one snapshot, which the writer's in-process lock cannot give it. Such a reader runs as the
+ * component's owner, since the store's directory is owner-only (AGENCY-008).
+ */
+interface JournalReader : AutoCloseable {
+  /**
+   * The chain-context tag every v3 entry must carry, the one the reads verify against. It is the
+   * expected tag, supplied by whoever opened the reader (e.g. [chainContextOf] of the component the
+   * caller means to read), never read from the journal: a context taken from the file would make the
+   * anti-splice check pass for any file.
+   */
+  val chainContext: String
 
   /**
    * Reads the full journal: verifies the hash chain over the RAW stored form (per-version
@@ -63,19 +92,6 @@ interface JournalStore : AutoCloseable {
    * them that leaves that stored hash alone goes unseen here; [readAll] sees it.
    */
   fun readAfter(from: ChainCursor): TailRead
-
-  /** Raw read without verify/upcast — fixture generation and chain checks only. */
-  fun readRaw(): List<JournalEntry>
-
-  /**
-   * Appends a pre-built entry verbatim (legacy/fixture writer only — no salting, no epoch logic).
-   *
-   * THROWS [IllegalArgumentException], writing nothing, if a text field holds an unpaired
-   * surrogate. Such a field has no UTF-8 encoding: a UTF-8 store would keep a different string
-   * from the one the entry was hashed over, and the hash's lenient encoding gives it the bytes of
-   * the same field with `?` in its place.
-   */
-  fun appendRaw(entry: JournalEntry)
 
   /**
    * The chain head (last seq + hash) — cheap, public, and the retention surface for
