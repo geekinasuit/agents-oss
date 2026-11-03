@@ -33,6 +33,15 @@ fun interface ApprovalVerifier {
    * ([APPROVAL_DOMAIN_TAG]) is enforced by [parseCommitted], which the fold runs first.
    */
   fun verifies(schemeId: String, publicKey: String, signature: String, preimage: String): Boolean
+
+  /**
+   * Why [publicKey], or [signature] when given, is not in a spelling this verifier accepts for
+   * [schemeId]; null when it is, or when the verifier holds no spelling rule for that scheme. A
+   * verifier that refuses a spelling in [verifies] says so here, so a refusal can name the spelling
+   * rather than read as a bad signature, and a key that could never verify (an allow-list entry, a
+   * pinned root) can be refused where it is loaded. The reason names the rule, never the value.
+   */
+  fun spellingRefusal(schemeId: String, publicKey: String, signature: String?): String? = null
 }
 
 /**

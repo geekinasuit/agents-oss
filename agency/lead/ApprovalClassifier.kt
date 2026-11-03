@@ -71,6 +71,9 @@ internal fun classifyApproval(
     evidence.signedPreimage ?: return rejected("carries no signed preimage — cannot re-verify (fail-closed)")
   val committed =
     parseCommitted(preimage) ?: return rejected("has a preimage that is not a canonical committed approval")
+  auth.verifier.spellingRefusal(evidence.schemeId, committed.publicKey, evidence.signature)?.let {
+    return rejected("is spelled in a form its scheme refuses: $it")
+  }
   if (!auth.verifier.verifies(evidence.schemeId, committed.publicKey, evidence.signature, preimage))
     return rejected("has a signature that does not verify over its preimage")
   val principal =

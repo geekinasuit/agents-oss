@@ -35,6 +35,13 @@ import java.security.MessageDigest
  * that safe, but it is a "loads fine, never authorizes anything" failure that surfaces at the
  * worst moment, so the contract is asserted in the tests rather than left implicit.
  *
+ * The key and signature are matched in one spelling only: lowercase hex, 64 and 128 digits. The
+ * allow-list compares keys as stored strings, so a key in any other spelling, even one naming the
+ * same point, could verify here and then match no entry, or let two entries name one custodian.
+ * Refusing it here keeps lowercase the only spelling that verifies. [spellingRefusal] names the rule,
+ * so the classifier can say a rejected approval was misspelled, and a spec load can refuse an
+ * allow-list entry or pinned root that could never verify.
+ *
  * Total and fail-closed: a malformed key, signature, or an unparseable preimage folds to
  * `false`, never a throw — a verification that cannot run is not a pass. So does a preimage
  * holding an unpaired surrogate: it has no UTF-8 encoding, so no signature is over it, and a
@@ -44,6 +51,8 @@ import java.security.MessageDigest
  */
 object Bip340ApprovalVerifier : ApprovalVerifier {
   private const val SCHEME_ID = "bip340"
+  private val CANONICAL_KEY = Regex("[0-9a-f]{64}")
+  private val CANONICAL_SIGNATURE = Regex("[0-9a-f]{128}")
 
   override fun verifies(
     schemeId: String,
@@ -52,6 +61,7 @@ object Bip340ApprovalVerifier : ApprovalVerifier {
     preimage: String,
   ): Boolean {
     if (schemeId != SCHEME_ID) return false
+    if (spellingRefusal(schemeId, publicKey, signature) != null) return false
     return try {
       val bytes = utf8OrNull(preimage) ?: return false
       val message = MessageDigest.getInstance("SHA-256").digest(bytes)
@@ -60,4 +70,13 @@ object Bip340ApprovalVerifier : ApprovalVerifier {
       false
     }
   }
+
+  override fun spellingRefusal(schemeId: String, publicKey: String, signature: String?): String? =
+    when {
+      schemeId != SCHEME_ID -> null
+      !CANONICAL_KEY.matches(publicKey) -> "a bip340 public key is 64 lowercase hex digits"
+      signature != null && !CANONICAL_SIGNATURE.matches(signature) ->
+        "a bip340 signature is 128 lowercase hex digits"
+      else -> null
+    }
 }
