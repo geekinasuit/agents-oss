@@ -38,7 +38,9 @@ import java.security.MessageDigest
  * The key and signature are matched in one spelling only: lowercase hex, 64 and 128 digits. The
  * allow-list compares keys as stored strings, so a key in any other spelling, even one naming the
  * same point, could verify here and then match no entry, or let two entries name one custodian.
- * Refusing it here keeps lowercase the only spelling that verifies. [spellingRefusal] names the rule,
+ * Refusing it here keeps lowercase the only spelling that verifies. [spellingRefusal] also refuses
+ * a key that is spelled right but names no point on the curve, which no signature can verify under.
+ * It names the rule,
  * so the classifier can say a rejected approval was misspelled, and a spec load can refuse an
  * allow-list entry or pinned root that could never verify.
  *
@@ -75,6 +77,7 @@ object Bip340ApprovalVerifier : ApprovalVerifier {
     when {
       schemeId != SCHEME_ID -> null
       !CANONICAL_KEY.matches(publicKey) -> "a bip340 public key is 64 lowercase hex digits"
+      !Bip340.isXonlyPubkey(publicKey) -> "a bip340 public key names a point on secp256k1"
       signature != null && !CANONICAL_SIGNATURE.matches(signature) ->
         "a bip340 signature is 128 lowercase hex digits"
       else -> null
