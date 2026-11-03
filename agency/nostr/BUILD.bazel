@@ -23,6 +23,8 @@ load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
 kt_jvm_library(
     name = "nostr",
     srcs = [
+        # The approval carrier: an approval gift-wrapped to the lead, decoded by shape alone.
+        "ApprovalCarrier.kt",
         "Bip340.kt",
         "Bip340ApprovalVerifier.kt",
         "GateOpenNotice.kt",
@@ -456,6 +458,21 @@ kt_jvm_test(
         ":nostr",
         "//agency/shared/auth",
         "@maven//:junit_junit",
+    ],
+)
+
+# The approval carrier round trip (encode, gift-wrap, unwrap, decode) signs and encrypts, so it
+# needs the native at runtime; the refusal cells build rumors directly.
+kt_jvm_test(
+    name = "approval_carrier_test",
+    size = "small",
+    srcs = ["ApprovalCarrierTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.ApprovalCarrierTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":nostr",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
 )
 
