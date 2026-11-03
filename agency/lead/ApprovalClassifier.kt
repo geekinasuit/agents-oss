@@ -72,7 +72,7 @@ internal fun classifyApproval(
   val committed =
     parseCommitted(preimage) ?: return rejected("has a preimage that is not a canonical committed approval")
   auth.verifier.spellingRefusal(evidence.schemeId, committed.publicKey, evidence.signature)?.let {
-    return rejected("is spelled in a form its scheme refuses: $it")
+    return rejected("names a key or signature its scheme refuses: $it")
   }
   if (!auth.verifier.verifies(evidence.schemeId, committed.publicKey, evidence.signature, preimage))
     return rejected("has a signature that does not verify over its preimage")

@@ -67,7 +67,7 @@ class ApprovalClassifierTest {
     val auth = LeadAuth(AUTH.allowList, spelled, oneOfOne("operator"))
     assertEquals(ApprovalVerdict.VerifiedNew::class, classifyApproval(emptyMap(), payload(), seq = 7, auth)::class)
     assertEquals(
-      ApprovalVerdict.Rejected("is spelled in a form its scheme refuses: keys are lowercase", null),
+      ApprovalVerdict.Rejected("names a key or signature its scheme refuses: keys are lowercase", null),
       classifyApproval(emptyMap(), payload(publicKey = OPERATOR_KEY.uppercase()), seq = 7, auth),
     )
   }

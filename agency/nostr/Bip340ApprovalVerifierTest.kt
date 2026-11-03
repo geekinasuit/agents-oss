@@ -179,6 +179,13 @@ class Bip340ApprovalVerifierTest {
       "a bip340 signature is 128 lowercase hex digits",
       Bip340ApprovalVerifier.spellingRefusal("bip340", pubkey, sig.uppercase()),
     )
+    // Spelled right, but not the x-coordinate of any point on the curve (the next line checks that).
+    val offCurve = "0".repeat(63) + "5"
+    assertEquals(false, Bip340.isXonlyPubkey(offCurve))
+    assertEquals(
+      "a bip340 public key names a point on secp256k1",
+      Bip340ApprovalVerifier.spellingRefusal("bip340", offCurve, null),
+    )
   }
 
   @Test

@@ -9,6 +9,8 @@ kt_jvm_library(
     srcs = [
         # Carries approvals from a relay to the host's accept boundary.
         "ApprovalIngress.kt",
+        # The operator's spec tool (auth_spec below).
+        "AuthSpecTool.kt",
         "NostrGateOpenSink.kt",
     ],
     visibility = ["//visibility:public"],
@@ -16,6 +18,31 @@ kt_jvm_library(
         "//agency/lead:host",
         "//agency/nostr",
         "//agency/nostr:relay",
+    ],
+)
+
+# The operator's authorization-spec tool: prints the root's public key to pin, and signs a spec
+# the lead loads. Run where the root key lives, never on the lead's host.
+java_binary(
+    name = "auth_spec",
+    main_class = "com.geekinasuit.agency.wiring.AuthSpecTool",
+    runtime_deps = [
+        ":wiring",
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "auth_spec_tool_test",
+    size = "small",
+    srcs = ["AuthSpecToolTest.kt"],
+    test_class = "com.geekinasuit.agency.wiring.AuthSpecToolTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":wiring",
+        "//agency/nostr",
+        "//agency/shared/auth",
+        "@maven//:junit_junit",
     ],
 )
 

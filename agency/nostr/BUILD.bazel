@@ -25,6 +25,8 @@ kt_jvm_library(
     srcs = [
         # The approval carrier: an approval gift-wrapped to the lead, decoded by shape alone.
         "ApprovalCarrier.kt",
+        # Signing an authorization spec with a bip340 root key, and its file form.
+        "AuthSpecSigning.kt",
         "Bip340.kt",
         "Bip340ApprovalVerifier.kt",
         "GateOpenNotice.kt",
@@ -454,6 +456,21 @@ kt_jvm_test(
     size = "small",
     srcs = ["ListeningNeverAuthorizesTest.kt"],
     test_class = "com.geekinasuit.agency.nostr.ListeningNeverAuthorizesTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        ":nostr",
+        "//agency/shared/auth",
+        "@maven//:junit_junit",
+    ],
+)
+
+# Signing an authorization spec and loading it back under the root signs and verifies, so it needs
+# the native at runtime.
+kt_jvm_test(
+    name = "auth_spec_signing_test",
+    size = "small",
+    srcs = ["AuthSpecSigningTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.AuthSpecSigningTest",
     runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
     deps = [
         ":nostr",
