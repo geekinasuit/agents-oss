@@ -81,6 +81,32 @@ class SqliteStoreTest {
     }
   }
 
+  @Test
+  fun aStoreThatOnlyReadsSeesWhatAnotherStoreOnTheSameFileCommitsLater() {
+    val dir = newDir()
+    SqliteStore(dir, componentId = "lead").use { writer ->
+      SqliteStore(dir, componentId = "lead").use { reader ->
+        assertEquals(1, reader.readAll().size)
+        val cursor = reader.readAfter(ChainCursor.START).cursor
+        writer.append("note", buildJsonObject { put("n", 1) }, origin = ORIGIN_SUBSTRATE)
+        writer.append("note", buildJsonObject { put("n", 2) }, origin = ORIGIN_SUBSTRATE)
+        assertEquals("readAll is not held to its first snapshot", 3, reader.readAll().size)
+        assertEquals(listOf(2L, 3L), reader.readAfter(cursor).entries.map { it.seq })
+        assertEquals(writer.chainHead(), reader.chainHead())
+      }
+      // Nor is a store held to the snapshot it opened on: its first read sees what came after.
+      SqliteStore(dir, componentId = "lead").use { late ->
+        writer.append("note", buildJsonObject { put("n", 9) }, origin = ORIGIN_SUBSTRATE)
+        assertEquals(writer.chainHead(), late.chainHead())
+        assertEquals(4, late.readAll().size)
+      }
+      // A read on the writer's own connection leaves no snapshot behind to fail its next append.
+      writer.readAll()
+      writer.append("note", buildJsonObject { put("n", 3) }, origin = ORIGIN_SUBSTRATE)
+      assertEquals(5, writer.readAll().size)
+    }
+  }
+
   // An unpaired surrogate, and a string that holds one between two ASCII letters.
   private val lone = Char(0xD800)
   private val withLone = "a" + lone + "b"

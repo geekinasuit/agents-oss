@@ -35,7 +35,7 @@ class SqliteStore(
    * from caller threads while the daemon loop appends derived facts — one connection, one
    * chain, so seq assignment + prevHash linkage must be atomic per append, and a read
    * must never interleave with a half-committed append. Monitor is reentrant
-   * (appendBuilt → chainHead). Cross-PROCESS writers remain a design violation — this
+   * (appendBuilt → appendRaw). Cross-PROCESS writers remain a design violation — this
    * lock arbitrates threads within the single writing process only. */
   private val ioLock = Any()
 
@@ -69,8 +69,14 @@ class SqliteStore(
       )
     }
     conn.autoCommit = false
-    if (chainHead().first == 0L) {
-      appendBuilt(KIND_GENESIS, genesisPayload(componentId, chainKind), ORIGIN_SUBSTRATE, null)
+    // The empty check and the genesis insert share one transaction, as appendBuilt's head read and
+    // insert do; on a journal that is not empty, the check's transaction ends here.
+    synchronized(ioLock) {
+      if (readHead(conn).first == 0L) {
+        appendBuilt(KIND_GENESIS, genesisPayload(componentId, chainKind), ORIGIN_SUBSTRATE, null)
+      } else {
+        conn.commit()
+      }
     }
   }
 
@@ -78,7 +84,10 @@ class SqliteStore(
     appendBuilt(kind, storedPayloadJson(payload), origin, idempotencyKey)
 
   private fun appendBuilt(kind: String, payloadJson: String, origin: String, idempotencyKey: String?): JournalEntry = synchronized(ioLock) {
-    val (lastSeq, lastHash) = chainHead()
+    // Read inside the transaction the insert below commits: should another connection commit an
+    // append in between, which the single-writer rule forbids, the insert fails on the stale
+    // snapshot instead of linking past that append.
+    val (lastSeq, lastHash) = readHead(conn)
     val seq = lastSeq + 1
     val salt = newSaltHex(rng)
     val commitment = payloadCommitment(salt, payloadJson)
@@ -144,82 +153,28 @@ class SqliteStore(
     }
   }
 
-  override fun readRaw(): List<JournalEntry> = readRawAfter(Long.MIN_VALUE)
-
-  private fun readRawAfter(afterSeq: Long): List<JournalEntry> = synchronized(ioLock) {
-    val out = mutableListOf<JournalEntry>()
-    conn.prepareStatement(
-      """SELECT seq, schema_version, kind, chain_context, origin, key_epoch, salt,
-           payload_commitment, payload, idempotency_key, prev_hash, hash, sig
-         FROM journal WHERE seq > ? ORDER BY seq"""
-    ).use { ps ->
-      ps.setLong(1, afterSeq)
-      ps.executeQuery().use { rs ->
-        while (rs.next()) {
-          out.add(
-            JournalEntry(
-              seq = rs.getLong(1),
-              schemaVersion = rs.getInt(2),
-              kind = rs.getString(3),
-              chainContext = rs.getString(4),
-              origin = rs.getString(5),
-              keyEpoch = rs.getInt(6),
-              salt = rs.getString(7),
-              payloadCommitment = rs.getString(8),
-              payloadJson = rs.getString(9),
-              idempotencyKey = rs.getString(10),
-              prevHash = rs.getString(11),
-              hash = rs.getString(12),
-              sig = rs.getString(13),
-            )
-          )
-        }
-      }
-    }
-    return out
-  }
+  override fun readRaw(): List<JournalEntry> = reading { readRowsAfter(conn, Long.MIN_VALUE) }
 
   override fun readAll(): List<JournalEntry> = verifyAndUpcast(readRaw(), chainContext)
 
   override fun readAfter(from: ChainCursor): TailRead {
-    val raw = synchronized(ioLock) {
-      requireCursorStored(from)
-      readRawAfter(from.seq)
+    val raw = reading {
+      requireCursorStored(conn, from)
+      readRowsAfter(conn, from.seq)
     }
     return verifyAndUpcastAfter(raw, chainContext, from)
   }
 
-  /** The entry at [from] must still be stored with [from]'s hash, and [from]'s key epoch must be the
-   * chain's epoch after it: the stored epoch of the last v3 entry at or before it, or 0 when there
-   * is none, since the epoch rules skip older entries. Without this, a store truncated below the
-   * cursor reads as an empty tail until it grows past the cursor's seq, and a cursor's epoch would
-   * set where the tail's epoch rules start. */
-  private fun requireCursorStored(from: ChainCursor) {
-    if (from == ChainCursor.START) return
-    val hash =
-      conn.prepareStatement("SELECT hash FROM journal WHERE seq = ?").use { ps ->
-        ps.setLong(1, from.seq)
-        ps.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
-      }
-    if (hash == null) throw ChainBrokenException(from.seq, "the cursor's entry is not in the store")
-    if (hash != from.hash) throw ChainBrokenException(from.seq, "the cursor's hash is not the stored hash")
-    val epoch =
-      conn.prepareStatement(
-        "SELECT key_epoch FROM journal WHERE seq <= ? AND schema_version >= 3 ORDER BY seq DESC LIMIT 1"
-      ).use { ps ->
-        ps.setLong(1, from.seq)
-        ps.executeQuery().use { rs -> if (rs.next()) rs.getInt(1) else 0 }
-      }
-    if (epoch != from.keyEpoch) {
-      throw EpochRuleException(from.seq, "the cursor's epoch ${from.keyEpoch} is not the stored epoch $epoch")
-    }
-  }
+  override fun chainHead(): Pair<Long, String> = reading { readHead(conn) }
 
-  override fun chainHead(): Pair<Long, String> = synchronized(ioLock) {
-    conn.createStatement().use { st ->
-      st.executeQuery("SELECT seq, hash FROM journal ORDER BY seq DESC LIMIT 1").use { rs ->
-        return if (rs.next()) rs.getLong(1) to rs.getString(2) else 0L to GENESIS_HASH
-      }
+  // One read, in one transaction that ends here: with autoCommit off, a read would otherwise leave
+  // its transaction open, and this connection would go on seeing that snapshot, blind to rows
+  // another connection on the same file commits later.
+  private fun <T> reading(block: () -> T): T = synchronized(ioLock) {
+    try {
+      block()
+    } finally {
+      conn.commit()
     }
   }
 
