@@ -76,6 +76,8 @@ kt_jvm_library(
     srcs = [
         "CognitionSelection.kt",
         "LeadState.kt",
+        # A ticket lead's status, as a reader beside it folds its journal.
+        "LeadStatus.kt",
         "TicketLead.kt",
         "TicketWorkflow.kt",
         "TicketWorkflowProtocol.kt",
@@ -467,6 +469,24 @@ kt_jvm_test(
     test_class = "com.geekinasuit.agency.lead.IncrementalLeadViewTest",
     runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
     deps = [
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# deps (not associates) on :lead: the status is read through the public API, as a tool outside the
+# module reads it.
+kt_jvm_test(
+    name = "lead_status_test",
+    size = "small",
+    srcs = ["LeadStatusTest.kt"],
+    test_class = "com.geekinasuit.agency.lead.LeadStatusTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":ceremony_test_support",
+        ":lead",
         "//agency/shared/journal",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
