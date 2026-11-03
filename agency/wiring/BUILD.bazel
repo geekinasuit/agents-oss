@@ -15,14 +15,56 @@ kt_jvm_library(
         "AuthSpecTool.kt",
         # Key files and flags, shared by the operator's tools.
         "KeyFiles.kt",
+        # The auth a lead folds under, from its signed spec file and pinned root.
+        "LeadAuthFiles.kt",
+        # The operator's status tool (lead_status below).
+        "LeadStatusTool.kt",
         "NostrGateOpenSink.kt",
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//agency/lead",
         "//agency/lead:host",
         "//agency/nostr",
         "//agency/nostr:relay",
+        "//agency/shared/auth",
+        "//agency/shared/journal",
         "//agency/shared/text",
+    ],
+)
+
+# The operator's status tool: prints a ticket lead's status from its journal, opened read-only
+# beside the running lead. Run as the lead's OS user, on the lead's host.
+java_binary(
+    name = "lead_status",
+    main_class = "com.geekinasuit.agency.wiring.LeadStatusTool",
+    runtime_deps = [
+        ":wiring",
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm",
+        "@maven//:org_xerial_sqlite_jdbc",
+    ],
+)
+
+# Over journals one store writes and a signed spec the real signer makes, so it verifies with the
+# bip340 verifier (native at runtime) and reads sqlite (at runtime).
+kt_jvm_test(
+    name = "lead_status_tool_test",
+    size = "small",
+    srcs = ["LeadStatusToolTest.kt"],
+    test_class = "com.geekinasuit.agency.wiring.LeadStatusToolTest",
+    runtime_deps = [
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm",
+        "@maven//:org_xerial_sqlite_jdbc",
+    ],
+    deps = [
+        ":wiring",
+        "//agency/lead",
+        "//agency/nostr",
+        "//agency/shared/auth",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
 )
 
