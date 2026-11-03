@@ -22,6 +22,10 @@ kt_jvm_library(
         "Fold.kt",
         "FoldFault.kt",
         "Journal.kt",
+        # A read-only view for a process that is not the writer.
+        "SqliteJournalReader.kt",
+        # The table reads both share.
+        "SqliteRows.kt",
         "SqliteStore.kt",
         "Upcast.kt",
     ],
@@ -79,6 +83,19 @@ kt_jvm_test(
         ":journal",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "sqlite_journal_reader_test",
+    size = "small",
+    srcs = ["SqliteJournalReaderTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.journal.SqliteJournalReaderTest",
+    runtime_deps = ["@maven//:org_xerial_sqlite_jdbc"],
+    deps = [
+        ":journal",
+        "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
 )
