@@ -11,7 +11,7 @@
 10 pod-result-recorded substrate key=null {"podId":"pod#1","artifactPath":"<DIR>/artifacts/plan-t1","boundPath":"<DIR>/artifacts-bound/pod#1","resultDigest":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428","costUsd":0.0}
 11 plan-artifact-recorded substrate key=null {"path":"<DIR>/artifacts-bound/pod#1","sha256":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428"}
 12 cognition-proposed cognition key=null {"strategy":"scripted","reasoning":"plan artifact recorded; opening the plan-approval gate on its digest","proposals":[{"type":"gate-open","gateKind":"plan-approval","payloadDigest":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428"},{"type":"status","status":"plan ready for approval: t1"}]}
-13 gate-opened substrate key=null {"gateId":"plan-approval:t1","gateKind":"plan-approval","payloadDigest":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428"}
+13 gate-opened substrate key=null {"gateId":"plan-approval:t1","gateKind":"plan-approval","payloadDigest":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428","authSpecHash":"259f49a24b5e6f010b9350c2d9a8b15afd984925bbf34eccaaf20e0a2279dd6c"}
 14 status-written substrate key=null {"status":"plan ready for approval: t1"}
 15 gate-released auth-layer key=null {"gateId":"plan-approval:t1","payloadDigest":"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428"}
 16 run-started substrate key=null {"workspacePath":"<DIR>","capabilityDesc":"scripted/none","leadVersion":"dev","cognition":"scripted","adoptedFromSeq":15}
@@ -22,7 +22,7 @@
 21 pod-result-recorded substrate key=null {"podId":"pod#2","artifactPath":"<DIR>/artifacts/execute-t1","boundPath":"<DIR>/artifacts-bound/pod#2","resultDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48","costUsd":0.0}
 22 commit-proposed substrate key=null {"manifestPath":"<DIR>/artifacts-bound/pod#2","manifestDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48"}
 23 cognition-proposed cognition key=null {"strategy":"scripted","reasoning":"commit manifest proposed; opening the commit-approval gate on its digest","proposals":[{"type":"gate-open","gateKind":"commit-approval","payloadDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48"},{"type":"status","status":"commit ready for approval: t1"}]}
-24 gate-opened substrate key=null {"gateId":"commit-approval:t1","gateKind":"commit-approval","payloadDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48"}
+24 gate-opened substrate key=null {"gateId":"commit-approval:t1","gateKind":"commit-approval","payloadDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48","authSpecHash":"259f49a24b5e6f010b9350c2d9a8b15afd984925bbf34eccaaf20e0a2279dd6c"}
 25 status-written substrate key=null {"status":"commit ready for approval: t1"}
 26 gate-released auth-layer key=null {"gateId":"commit-approval:t1","payloadDigest":"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48"}
 27 run-started substrate key=null {"workspacePath":"<DIR>","capabilityDesc":"scripted/none","leadVersion":"dev","cognition":"scripted","adoptedFromSeq":26}

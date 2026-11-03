@@ -6,11 +6,15 @@ import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonUnquotedLiteral
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -92,6 +96,39 @@ class NonceMintTest {
     val open = f.host.openGates[planGateId]
     assertNotNull("the plan gate is open", open)
     assertEquals("openNonceFor resolves the minted nonce", nonce, f.host.openNonceFor(open!!))
+    store.close()
+  }
+
+  @Test
+  fun aGateOpenRecordsTheSpecHashOfTheAuthInForce() {
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+
+    // Non-vacuous: the two auths name different rules, so a row carrying either hash, or a fixed
+    // one, fails one of the two checks.
+    assertNotEquals(ceremonyAuth().specHash, LeadAuth.DENY_ALL.specHash)
+    assertEquals(listOf(ceremonyAuth().specHash), gateOpenSpecHashes(store))
+    store.close()
+  }
+
+  @Test
+  fun aGatesRecordedSpecHashDecidesNothingAtALaterFold() {
+    // The gate opened under the ceremony auth records its hash. Re-folded under DENY_ALL, whose
+    // hash differs, the gate is still open on its digest: the fold reads the auth in force, never
+    // the recorded hash.
+    val dir = tmp.newFolder()
+    val store = SqliteStore(dir.absolutePath, componentId = "lead")
+    val pre = daemon(dir, store, ceremonyAuth()).driveUntilQuiescent()
+    assertEquals(listOf(ceremonyAuth().specHash), gateOpenSpecHashes(store))
+
+    val f = daemon(dir, store, LeadAuth.DENY_ALL).refold()
+    assertEquals(
+      "the gate is open on the same digest",
+      pre.host.openGates[PLAN_GATE]?.payloadDigest,
+      f.host.openGates[PLAN_GATE]?.payloadDigest,
+    )
+    assertNotNull(f.host.openGates[PLAN_GATE])
     store.close()
   }
 
@@ -920,6 +957,13 @@ class NonceMintTest {
   /** The nonces issued for the plan gate, in issue order. */
   private fun planNonces(host: HostState): List<IssuedNonce> =
     host.issuedNonces.values.filter { it.gateId == PLAN_GATE }.sortedBy { it.issuedSeq }
+
+  /** The `authSpecHash` of each gate-opened row, in journal order. */
+  private fun gateOpenSpecHashes(store: SqliteStore): List<String?> =
+    store
+      .readAll()
+      .filter { it.kind == LeadKinds.GATE_OPENED }
+      .map { Json.parseToJsonElement(it.payloadJson).jsonObject["authSpecHash"]?.jsonPrimitive?.content }
 
   /** The escalations that report [gateId] as stalled: open with no nonce a release can name. */
   private fun stalls(host: HostState, gateId: String): List<String> =
