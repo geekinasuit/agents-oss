@@ -62,19 +62,13 @@ fun encodeApproval(
   sealAuxRandHex: String,
   wrapAuxRandHex: String,
 ): GiftWrapEncoding {
-  val content = buildJsonObject {
-    put("gateId", carrier.gateId)
-    put("nonce", carrier.nonce)
-    put("payloadDigest", carrier.payloadDigest)
-    put("evidence", JsonObject(carrier.evidence - CARRIER_ARTIFACT_ID))
-  }
   val rumor =
     Rumor(
       pubkey = Bip340.xonlyPubkeyFromKeyBytes(approverKeyBytes),
       createdAt = createdAt,
       kind = APPROVAL_RUMOR_KIND,
       tags = listOf(listOf("p", lead.hex)),
-      content = content.toString(),
+      content = approvalContent(carrier),
     )
   return Nip59.wrap(
     senderKey = approverKeyBytes,
@@ -118,6 +112,31 @@ fun decodeApproval(rumor: Rumor): ApprovalCarrier? {
   val evidence = obj["evidence"] as? JsonObject ?: return null
   return ApprovalCarrier(gateId, nonce, payloadDigest, JsonObject(evidence + (CARRIER_ARTIFACT_ID to JsonPrimitive(rumor.id))))
 }
+
+/**
+ * Whether the lead's [decodeApproval] would accept the content [encodeApproval] writes for [carrier]:
+ * within its size and depth bounds and of the right shape. An approver checks this before publishing,
+ * since a carrier the lead cannot decode is dropped there without a trace the approver can see.
+ */
+fun carrierDecodes(carrier: ApprovalCarrier): Boolean =
+  try {
+    decodeApproval(Rumor(ANY_PUBKEY, 0, APPROVAL_RUMOR_KIND, emptyList(), approvalContent(carrier))) != null
+  } catch (_: IllegalArgumentException) {
+    false // a string with no UTF-8 encoding, which no rumor can carry
+  }
+
+/** The rumor content [encodeApproval] writes for [carrier]. */
+private fun approvalContent(carrier: ApprovalCarrier): String =
+  buildJsonObject {
+      put("gateId", carrier.gateId)
+      put("nonce", carrier.nonce)
+      put("payloadDigest", carrier.payloadDigest)
+      put("evidence", JsonObject(carrier.evidence - CARRIER_ARTIFACT_ID))
+    }
+    .toString()
+
+// decodeApproval reads only the kind and content; a rumor needs some author to be built.
+private val ANY_PUBKEY = "0".repeat(64)
 
 private const val CARRIER_ARTIFACT_ID = "carrierArtifactId"
 

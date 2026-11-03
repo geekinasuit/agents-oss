@@ -11,7 +11,8 @@ import com.geekinasuit.agency.lead.TimerService
 import com.geekinasuit.agency.lead.gateIdFor
 import com.geekinasuit.agency.lead.ticketLead
 import com.geekinasuit.agency.nostr.APPROVAL_RUMOR_KIND
-import com.geekinasuit.agency.nostr.ApprovalCarrier
+import com.geekinasuit.agency.nostr.ApprovalSigning
+import com.geekinasuit.agency.nostr.GateOpenNotice
 import com.geekinasuit.agency.nostr.Bip340
 import com.geekinasuit.agency.nostr.Bip340ApprovalVerifier
 import com.geekinasuit.agency.nostr.FakeRelay
@@ -35,15 +36,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertThrows
 import com.geekinasuit.agency.pod.PodSpec
 import com.geekinasuit.agency.shared.auth.AllowList
-import com.geekinasuit.agency.shared.auth.ApprovalEvidence
 import com.geekinasuit.agency.shared.auth.Principal
 import com.geekinasuit.agency.shared.auth.SchemeKey
-import com.geekinasuit.agency.shared.auth.committedPreimage
 import com.geekinasuit.agency.shared.auth.oneOfOne
 import com.geekinasuit.agency.shared.journal.EffectReceiver
 import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
-import java.security.MessageDigest
 import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.serialization.json.JsonPrimitive
@@ -313,21 +311,10 @@ class ApprovalIngressTest {
     digest: String,
     lead: RecipientKey = RecipientKey.of(Bip340.xonlyPubkeyHex(LEAD_SECRET)),
   ): NostrEvent {
-    val preimage = committedPreimage(APPROVER_PUB, gateId, digest, nonce)
-    val evidence =
-      ApprovalEvidence(
-          schemeId = "bip340",
-          publicKey = APPROVER_PUB,
-          signature = Bip340.signHex(sha256Hex(preimage), APPROVER_SECRET, AUX),
-          carrierArtifactId = "set-by-the-lead",
-          gateId = gateId,
-          payloadDigest = digest,
-          nonce = nonce,
-          signedPreimage = preimage,
-        )
-        .toJson()
-    val encoding =
-      encodeApproval(bytes(APPROVER_SECRET), lead, ApprovalCarrier(gateId, nonce, digest, evidence), 1_700_000_000, 1_699_999_000, AUX, AUX)
+    // Signed the way an approver's client signs, so the end-to-end cell runs that output through the
+    // lead's classifier.
+    val carrier = ApprovalSigning.sign(GateOpenNotice(gateId, digest, nonce, "the artifact"), bytes(APPROVER_SECRET), AUX)
+    val encoding = encodeApproval(bytes(APPROVER_SECRET), lead, carrier, 1_700_000_000, 1_699_999_000, AUX, AUX)
     return (encoding as GiftWrapEncoding.Wrapped).event
   }
 
@@ -353,8 +340,5 @@ class ApprovalIngressTest {
     val AUX = "0".repeat(64)
 
     fun bytes(hex: String) = ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
-
-    fun sha256Hex(s: String): String =
-      MessageDigest.getInstance("SHA-256").digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
   }
 }
