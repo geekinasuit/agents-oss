@@ -2,8 +2,9 @@ package com.geekinasuit.agency.shared.text
 
 /**
  * Whether [text] has something for a person to read: at least one code point that is a letter,
- * number, punctuation mark, or symbol, other than the few that show nothing to read
- * ([NOTHING_TO_READ]).
+ * number, punctuation mark, or symbol, other than the few of those that show nothing
+ * ([showsNothing]): the Hangul fillers, and the graphic characters the standard names or describes
+ * as blank. The rest of what [showsNothing] lists is outside these categories.
  *
  * No other code point is text to read, alone or in any combination: separators and whitespace;
  * control and format characters, zero-width ones such as U+200B and U+FEFF among them; marks, which
@@ -19,7 +20,7 @@ package com.geekinasuit.agency.shared.text
  */
 fun hasReadableText(text: String): Boolean =
   text.codePoints().anyMatch {
-    Character.getType(it) in READABLE_CATEGORIES && it !in NOTHING_TO_READ
+    Character.getType(it) in READABLE_CATEGORIES && !showsNothing(it)
   }
 
 /** The general categories of letters, numbers, punctuation marks, and symbols. */
@@ -47,17 +48,3 @@ private val READABLE_CATEGORIES: Set<Int> =
     )
     .map { it.toInt() }
     .toSet()
-
-/**
- * Code points in those categories that show a reader nothing to read. The four Hangul fillers
- * (U+115F, U+1160, U+3164, U+FFA0) are the only letters, numbers, punctuation marks, or symbols
- * that Unicode lists as default-ignorable, which a renderer shows as nothing unless it supports
- * them. The rest are graphic characters that the standard names or describes as blank, which that
- * list does not include: U+2800 BRAILLE PATTERN BLANK, a braille cell with no dots raised;
- * U+13441 EGYPTIAN HIEROGLYPH FULL BLANK and U+13442 EGYPTIAN HIEROGLYPH HALF BLANK; and U+1D159
- * MUSICAL SYMBOL NULL NOTEHEAD, which has no appearance of its own. Outside music rendering the
- * standard asks only for a placeholder for it, such as a dotted box, which is no more to read than
- * the box drawn for a private-use code point.
- */
-private val NOTHING_TO_READ: Set<Int> =
-  setOf(0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x13441, 0x13442, 0x1D159)

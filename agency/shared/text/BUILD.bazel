@@ -1,18 +1,32 @@
 load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
 
 # Whether text has something for a person to read: the check a gate-open artifact passes before the
-# lead announces it and before a notice is built from it. And the strict UTF-8 encoder: text that
-# is hashed or signed is encoded only when it has a UTF-8 encoding, by the journal, the pod digests
-# and the nostr codec alike. Dependency-free and substrate-neutral, like //agency/shared/json, so
-# those packages share one rule and none depends on another for it.
+# lead announces it and before a notice is built from it. Text made inert for a terminal, as the
+# operator's tools print it. Both read one table of code points that show nothing. And the strict
+# UTF-8 encoder: text that is hashed or signed is encoded only when it has a UTF-8 encoding, by the
+# journal, the pod digests and the nostr codec alike. Dependency-free and substrate-neutral, like
+# //agency/shared/json, so those packages share one rule and none depends on another for it.
 
 kt_jvm_library(
     name = "text",
     srcs = [
+        "InertText.kt",
         "ReadableText.kt",
+        "ShowsNothing.kt",
         "Utf8.kt",
     ],
     visibility = ["//visibility:public"],
+)
+
+kt_jvm_test(
+    name = "inert_text_test",
+    size = "small",
+    srcs = ["InertTextTest.kt"],
+    test_class = "com.geekinasuit.agency.shared.text.InertTextTest",
+    deps = [
+        ":text",
+        "@maven//:junit_junit",
+    ],
 )
 
 kt_jvm_test(

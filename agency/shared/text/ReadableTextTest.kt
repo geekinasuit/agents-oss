@@ -100,6 +100,30 @@ class ReadableTextTest {
   }
 
   @Test
+  fun eachCodePointAloneIsReadableExactlyWhenItIsALetterNumberPunctuationOrSymbolThatShowsSomething() {
+    // The rule restated independently of the code: the readable categories, less the four Hangul
+    // fillers and the four graphic blanks.
+    val readableCategories =
+      listOf(
+          Character.UPPERCASE_LETTER, Character.LOWERCASE_LETTER, Character.TITLECASE_LETTER,
+          Character.MODIFIER_LETTER, Character.OTHER_LETTER, Character.DECIMAL_DIGIT_NUMBER,
+          Character.LETTER_NUMBER, Character.OTHER_NUMBER, Character.CONNECTOR_PUNCTUATION,
+          Character.DASH_PUNCTUATION, Character.START_PUNCTUATION, Character.END_PUNCTUATION,
+          Character.INITIAL_QUOTE_PUNCTUATION, Character.FINAL_QUOTE_PUNCTUATION,
+          Character.OTHER_PUNCTUATION, Character.MATH_SYMBOL, Character.CURRENCY_SYMBOL,
+          Character.MODIFIER_SYMBOL, Character.OTHER_SYMBOL,
+        )
+        .map { it.toInt() }
+        .toSet()
+    val blank = setOf(0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x13441, 0x13442, 0x1D159)
+    val wrong =
+      (0..Character.MAX_CODE_POINT).filter { cp ->
+        hasReadableText(text(cp)) != (Character.getType(cp) in readableCategories && cp !in blank)
+      }
+    assertTrue("judged wrongly: ${wrong.take(20).map { "U+%04X".format(it) }}", wrong.isEmpty())
+  }
+
+  @Test
   fun anyReadableCodePointIsSomethingToRead() {
     // Each readable general category has a case of its own, so a rule that drops one fails here.
     val cases =
