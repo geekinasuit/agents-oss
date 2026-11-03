@@ -79,47 +79,7 @@ object AuthSpecTool {
     }
   }
 
-  // Read as bytes, not a String, so the key's text is in arrays this zeroes, not in a String no code
-  // can overwrite. ASCII whitespace around the key is dropped; anything else, inside it included, is
-  // left for SecretKeyHex to refuse. The key must also name a secp256k1 scalar, which the native would
-  // otherwise refuse with an exception of its own.
-  private fun readKey(path: String): SecretKeyHex {
-    val raw = File(path).readBytes()
-    var start = 0
-    var end = raw.size
-    while (start < end && raw[start].isAsciiSpace()) start++
-    while (end > start && raw[end - 1].isAsciiSpace()) end--
-    val chars = CharArray(end - start) { raw[start + it].toInt().toChar() }
-    try {
-      val key = SecretKeyHex.ofHex(chars)
-      if (!key.useKeyBytes { Bip340.isValidSecretKeyBytes(it) }) {
-        key.clear()
-        throw IllegalArgumentException(
-          "the root key is 64 hex characters but not a secp256k1 secret key (zero, or not below the curve order)"
-        )
-      }
-      return key
-    } finally {
-      raw.fill(0)
-      chars.fill(Char(0))
-    }
-  }
-
-  private fun Byte.isAsciiSpace(): Boolean = this == ' '.code.toByte() || this == '\t'.code.toByte() ||
-    this == '\n'.code.toByte() || this == '\r'.code.toByte()
-
-  private fun flagsOf(args: List<String>, allowed: Set<String>): Map<String, String> {
-    require(args.size % 2 == 0) { "each flag needs a value" }
-    val flags = mutableMapOf<String, String>()
-    for ((flag, value) in args.chunked(2)) {
-      require(flag in allowed) { "'$flag' is not a flag of this command" }
-      require(flags.put(flag, value) == null) { "'$flag' is given twice" }
-    }
-    return flags
-  }
-
-  private fun Map<String, String>.required(flag: String): String =
-    this[flag] ?: throw IllegalArgumentException("missing $flag")
+  private fun readKey(path: String): SecretKeyHex = readSecretKeyFile(path)
 
   private fun usage(err: PrintStream, why: String): Int {
     err.println("auth_spec: $why")

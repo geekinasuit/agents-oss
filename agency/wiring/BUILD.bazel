@@ -9,8 +9,12 @@ kt_jvm_library(
     srcs = [
         # Carries approvals from a relay to the host's accept boundary.
         "ApprovalIngress.kt",
+        # The approver's tool (approval below).
+        "ApprovalTool.kt",
         # The operator's spec tool (auth_spec below).
         "AuthSpecTool.kt",
+        # Key files and flags, shared by the operator's tools.
+        "KeyFiles.kt",
         "NostrGateOpenSink.kt",
     ],
     visibility = ["//visibility:public"],
@@ -43,6 +47,34 @@ kt_jvm_test(
         "//agency/nostr",
         "//agency/shared/auth",
         "@maven//:junit_junit",
+    ],
+)
+
+# The approver's tool: reads the lead's gate-open notices and approves one, after the approver types
+# back part of its digest. Run where the approver's key lives.
+java_binary(
+    name = "approval",
+    main_class = "com.geekinasuit.agency.wiring.ApprovalTool",
+    runtime_deps = [
+        ":wiring",
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm",
+    ],
+)
+
+kt_jvm_test(
+    name = "approval_tool_test",
+    size = "small",
+    srcs = ["ApprovalToolTest.kt"],
+    associates = [":wiring"],
+    test_class = "com.geekinasuit.agency.wiring.ApprovalToolTest",
+    runtime_deps = ["@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm"],
+    deps = [
+        "//agency/nostr",
+        "//agency/nostr:fake_relay",
+        "//agency/nostr:relay",
+        "//agency/shared/auth",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
 )
 
