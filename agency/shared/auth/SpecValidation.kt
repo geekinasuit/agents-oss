@@ -197,13 +197,19 @@ private fun specString(el: JsonElement, field: String): String {
  * then parses the allow-list + quorum from those bytes. The verification key is [pinnedRoot] and
  * ONLY [pinnedRoot]: nothing inside the spec can supply or influence it (the A4-8 closure).
  * Fail-closed all the way down — an unverified signature and an unparseable preimage both yield
- * [SpecLoadResult.Refused], and [RejectingVerifier] (the honest default) refuses every spec.
+ * [SpecLoadResult.Refused], and [RejectingVerifier] (the honest default) refuses every spec. So does a
+ * pinned root or an allow-listed key that [verifier]'s [ApprovalVerifier.spellingRefusal] says could
+ * never verify: such a spec would load and then authorize nothing under that key, found only when an
+ * approval fails.
  */
 fun loadAuthorizationSpec(
   spec: AuthorizationSpec,
   pinnedRoot: SchemeKey,
   verifier: ApprovalVerifier,
 ): SpecLoadResult {
+  verifier.spellingRefusal(pinnedRoot.schemeId, pinnedRoot.publicKey, signature = null)?.let {
+    return SpecLoadResult.Refused("the pinned root key could never verify: $it")
+  }
   val verified =
     verifier.verifies(
       pinnedRoot.schemeId,
@@ -214,5 +220,14 @@ fun loadAuthorizationSpec(
   if (!verified) {
     return SpecLoadResult.Refused("root signature does not verify against the pinned root key")
   }
-  return parseAuthSpec(spec.specPreimage)
+  val loaded = parseAuthSpec(spec.specPreimage)
+  if (loaded !is SpecLoadResult.Loaded) return loaded
+  for (p in loaded.allowList.principals) {
+    for (k in p.keys) {
+      verifier.spellingRefusal(k.schemeId, k.publicKey, signature = null)?.let {
+        return SpecLoadResult.Refused("principal '${p.principalId}' holds a key that could never verify: $it")
+      }
+    }
+  }
+  return loaded
 }

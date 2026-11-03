@@ -141,6 +141,47 @@ class Bip340ApprovalVerifierTest {
   }
 
   @Test
+  fun `a key or signature spelled in uppercase is refused though it names the same bytes`() {
+    // Hex decoding reads either case, so without the spelling check an uppercase key verifies and
+    // then matches no allow-list entry, which compares stored strings.
+    val pubkey = Bip340.xonlyPubkeyHex(secretKey)
+    val preimage = committedPreimage(pubkey, "gate-1", "digest-1", "nonce-1")
+    val sig = signOver(preimage, secretKey)
+    assertTrue("control: the lowercase spellings verify", Bip340ApprovalVerifier.verifies("bip340", pubkey, sig, preimage))
+    val upperKeyPreimage = committedPreimage(pubkey.uppercase(), "gate-1", "digest-1", "nonce-1")
+    assertFalse(
+      Bip340ApprovalVerifier.verifies("bip340", pubkey.uppercase(), signOver(upperKeyPreimage, secretKey), upperKeyPreimage)
+    )
+    assertFalse(Bip340ApprovalVerifier.verifies("bip340", pubkey, sig.uppercase(), preimage))
+
+    // Hex decoding also reads Unicode digits, so a key respelled with a fullwidth digit names the
+    // same bytes; it is refused too, which a fix that only lowercased would miss.
+    val fullwidth = pubkey.replaceFirst('0', Char(0xFF10))
+    assertTrue("the respelling changed the key", fullwidth != pubkey)
+    val fullwidthPreimage = committedPreimage(fullwidth, "gate-1", "digest-1", "nonce-1")
+    assertFalse(
+      Bip340ApprovalVerifier.verifies("bip340", fullwidth, signOver(fullwidthPreimage, secretKey), fullwidthPreimage)
+    )
+  }
+
+  @Test
+  fun `the spelling refusal names the rule for a misspelled key or signature and nothing else`() {
+    val pubkey = Bip340.xonlyPubkeyHex(secretKey)
+    val sig = signOver(committedPreimage(pubkey, "gate-1", "digest-1", "nonce-1"), secretKey)
+    assertNull(Bip340ApprovalVerifier.spellingRefusal("bip340", pubkey, sig))
+    assertNull("a key alone", Bip340ApprovalVerifier.spellingRefusal("bip340", pubkey, null))
+    assertNull("another scheme holds no rule here", Bip340ApprovalVerifier.spellingRefusal("ed25519", "X", "Y"))
+    assertEquals(
+      "a bip340 public key is 64 lowercase hex digits",
+      Bip340ApprovalVerifier.spellingRefusal("bip340", pubkey.uppercase(), sig),
+    )
+    assertEquals(
+      "a bip340 signature is 128 lowercase hex digits",
+      Bip340ApprovalVerifier.spellingRefusal("bip340", pubkey, sig.uppercase()),
+    )
+  }
+
+  @Test
   fun `a hex-valid key or signature of the wrong length is refused, not thrown`() {
     val pubkey = Bip340.xonlyPubkeyHex(secretKey)
     val preimage = committedPreimage(pubkey, "gate-1", "digest-1", "nonce-1")

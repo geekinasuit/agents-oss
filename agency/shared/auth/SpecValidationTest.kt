@@ -199,6 +199,41 @@ class SpecValidationTest {
     )
   }
 
+  // 11 — a pinned root or an allow-listed key the verifier's spelling rule refuses could never
+  // verify, so the spec is refused at load rather than loading and authorizing nothing under it.
+  @Test
+  fun aKeyTheVerifierCouldNeverAcceptIsRefusedAtLoad() {
+    val spelled =
+      object : ApprovalVerifier {
+        override fun verifies(schemeId: String, publicKey: String, signature: String, preimage: String) =
+          testVerifier.verifies(schemeId, publicKey, signature, preimage)
+
+        override fun spellingRefusal(schemeId: String, publicKey: String, signature: String?) =
+          if (publicKey == publicKey.lowercase()) null else "keys are lowercase"
+      }
+    val preimage = authSpecPreimage(principals, quorum)
+    loaded(loadAuthorizationSpec(signedBy(rootKey, preimage), rootKey, spelled))
+
+    val upperRoot = SchemeKey("bip340", "ROOT-PUB")
+    assertEquals(
+      "the pinned root key could never verify: keys are lowercase",
+      refused(loadAuthorizationSpec(signedBy(upperRoot, preimage), upperRoot, spelled)).reason,
+    )
+
+    // The bad key is the second of its principal's keys, on the second principal in canonical order,
+    // so a check that looked only at a first key or a first principal would let it load.
+    val misspelled =
+      listOf(
+        Principal("aaa-first", "approver", listOf(SchemeKey("bip340", "first-pub"))),
+        Principal("council", "approver", listOf(SchemeKey("bip340", "a-council-pub"), SchemeKey("bip340", "zz-council-PUB"))),
+      )
+    val badPreimage = authSpecPreimage(misspelled, quorum)
+    assertEquals(
+      "principal 'council' holds a key that could never verify: keys are lowercase",
+      refused(loadAuthorizationSpec(signedBy(rootKey, badPreimage), rootKey, spelled)).reason,
+    )
+  }
+
   // 10 — the spec hash names the rules: the sha256 of their canonical preimage, the same for the
   // same rules however the allow-list was assembled, and different when only the quorum differs.
   @Test

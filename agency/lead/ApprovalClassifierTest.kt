@@ -54,6 +54,25 @@ class ApprovalClassifierTest {
   }
 
   @Test
+  fun aKeyItsSchemeRefusesToSpellIsRejectedNamingTheSpellingNotTheSignature() {
+    // The verifier accepts every signature, so only its spelling rule can refuse: the reason names
+    // the spelling, and the misspelled key matches no entry, so it counts in the unlisted bucket.
+    val spelled =
+      object : ApprovalVerifier {
+        override fun verifies(schemeId: String, publicKey: String, signature: String, preimage: String) = true
+
+        override fun spellingRefusal(schemeId: String, publicKey: String, signature: String?) =
+          if (publicKey == publicKey.lowercase()) null else "keys are lowercase"
+      }
+    val auth = LeadAuth(AUTH.allowList, spelled, oneOfOne("operator"))
+    assertEquals(ApprovalVerdict.VerifiedNew::class, classifyApproval(emptyMap(), payload(), seq = 7, auth)::class)
+    assertEquals(
+      ApprovalVerdict.Rejected("is spelled in a form its scheme refuses: keys are lowercase", null),
+      classifyApproval(emptyMap(), payload(publicKey = OPERATOR_KEY.uppercase()), seq = 7, auth),
+    )
+  }
+
+  @Test
   fun anUnlistedKeyIsCountedInTheUnlistedBucket() {
     val verdict = classifyApproval(emptyMap(), payload(publicKey = "pk-stranger"), seq = 7, AUTH)
     assertEquals(ApprovalVerdict.Rejected("is signed by a key not in the allow-list", null), verdict)
