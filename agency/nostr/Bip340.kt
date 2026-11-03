@@ -27,10 +27,10 @@ object Bip340 {
    * a 65-byte uncompressed point; BIP-340 names a key by its 32-byte x coordinate alone. */
   fun xonlyPubkeyHex(secretKeyHex: String): String = xonlyPubkeyFromKeyBytes(Hex.decode(secretKeyHex))
 
-  /** [xonlyPubkeyHex] over key bytes the caller already holds, so a clearable-key signer (the
-   * NIP-42 auth path with a #42 SecretKeyHex) never renders the secret to a hex String. Same native
-   * `pubkeyCreate`, only reachable by bytes. */
-  internal fun xonlyPubkeyFromKeyBytes(secretKey: ByteArray): String {
+  /** [xonlyPubkeyHex] over key bytes the caller already holds, so a clearable-key holder (a #42
+   * SecretKeyHex, through its useKeyBytes) never renders the secret to a hex String. Same native
+   * `pubkeyCreate`, reached by bytes. */
+  fun xonlyPubkeyFromKeyBytes(secretKey: ByteArray): String {
     val full = secp.pubkeyCreate(secretKey)
     return Hex.encode(full.copyOfRange(1, 33))
   }

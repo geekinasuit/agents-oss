@@ -229,7 +229,8 @@ kt_jvm_library(
     name = "fake_relay",
     testonly = True,
     srcs = ["FakeRelay.kt"],
-    visibility = ["//visibility:private"],
+    # The approval ingress's cells in //agency/wiring drive a subscription over it too.
+    visibility = ["//agency/wiring:__pkg__"],
 )
 
 # WebSocket-level test doubles for RelayConnection, reached through its injectable HttpClient. A
