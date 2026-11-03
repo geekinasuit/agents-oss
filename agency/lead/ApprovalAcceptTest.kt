@@ -172,11 +172,27 @@ class ApprovalAcceptTest {
       assertEquals(ApprovalAccept.REJECTED, rig.host().injectApproval(candidate(nonce, signature = "forged")))
       val row = Json.parseToJsonElement(rig.approvalRows().single().payloadJson).jsonObject
       assertEquals(JsonPrimitive(LeadAuth.UNLISTED_PRINCIPAL_ID), row.getValue("principalId"))
+      assertEquals(JsonPrimitive(FORGED_REASON), row.getValue("rejectedReason"))
       val claimed = row.getValue("evidence").jsonObject.getValue("publicKey")
       assertEquals("the key it claims stays in its evidence", JsonPrimitive("pk-operator"), claimed)
       val folded = rig.host().refold().host
       assertEquals(emptyList<VerifiedApproval>(), folded.verifiedApprovals[nonce.gateId].orEmpty())
       assertEquals(1, folded.unverifiedApprovals.size)
+    }
+
+  @Test
+  fun aRejectedRowWithEvidenceThatDoesNotParseNamesWhatItsOwnEvidenceLacks() =
+    onBothWorkflows { rig ->
+      // The row journals the evidence as an empty object, so a reason read off the row would name
+      // the first field the empty object lacks. A signature-less candidate's row says "signature".
+      val nonce = rig.openGate()
+      val c = candidate(nonce)
+      val noSignature = c.copy(evidence = JsonObject(c.evidence - "signature"))
+      assertEquals(ApprovalAccept.REJECTED, rig.host().injectApproval(noSignature))
+      assertEquals(
+        JsonPrimitive("has malformed evidence: approval evidence is missing 'signature'"),
+        payload(rig.approvalRows().single()).getValue("rejectedReason"),
+      )
     }
 
   @Test
@@ -222,17 +238,16 @@ class ApprovalAcceptTest {
   @Test
   fun aRejectedRowIsBoundAsItIsJournaled() =
     onBothWorkflows { rig ->
-      // The rejected row names the sentinel, longer than "operator": a forgery sized so its row
-      // would fit under the operator's id does not fit under the sentinel's.
+      // The rejected row names the sentinel, longer than "operator", and adds its reason: a forgery
+      // sized so its row would fit under the operator's id does not fit as rejected.
       val nonce = rig.openGate()
       val host = rig.host()
-      val grow = LeadAuth.UNLISTED_PRINCIPAL_ID.length - "operator".length
-      val oneCharCarrier = rowUnderOperator(candidate(nonce, signature = FORGED_SAME_LENGTH, carrier = "c")).length
-      // Under the sentinel, the row is one char over the bound.
-      val target = ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS + 1 - grow
-      val carrier = "c".repeat(target - oneCharCarrier + 1)
+      val oneCharCarrier = rejectedRow(candidate(nonce, signature = FORGED_SAME_LENGTH, carrier = "c")).length
+      // As rejected, the row is one char over the bound; under the operator it fits.
+      val carrier = "c".repeat(ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS + 1 - oneCharCarrier + 1)
       val forged = candidate(nonce, signature = FORGED_SAME_LENGTH, carrier = carrier)
-      assertEquals(target, rowUnderOperator(forged).length)
+      assertEquals(ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS + 1, rejectedRow(forged).length)
+      assertTrue(rowUnderOperator(forged).length <= ApprovalAcceptor.MAX_APPROVAL_ROW_CHARS)
       assertDropped(rig, ApprovalAccept.OVERSIZED, host.injectApproval(forged))
       assertEquals("the same size verified fits", ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce, carrier = carrier)))
       // The drop is counted at the rejected row's own bound, and an accept alone (no timer fires
@@ -269,6 +284,11 @@ class ApprovalAcceptTest {
       assertEquals(ApprovalAccept.REJECTED, host.injectApproval(candidate(nonce, publicKey = "pk-stranger")))
       assertEquals(ApprovalAccept.REJECTED_OVER_ALLOWANCE, host.injectApproval(candidate(nonce, publicKey = "pk-stranger")))
       assertEquals(1, rig.approvalRows().size)
+      assertEquals(
+        "the row says why, which differs from a forged signature's reason",
+        JsonPrimitive("is signed by a key not in the allow-list"),
+        payload(rig.approvalRows().single()).getValue("rejectedReason"),
+      )
       assertEquals("positive control", ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
     }
 
@@ -1282,6 +1302,10 @@ class ApprovalAcceptTest {
   /** The row [c] would be journaled as if its key resolved to the operator. */
   private fun rowUnderOperator(c: ApprovalCandidate): String = rowUnder(c, "operator").toString()
 
+  /** The row [c] would be journaled as when rejected for a forged signature. */
+  private fun rejectedRow(c: ApprovalCandidate): String =
+    JsonObject(rowUnder(c, LeadAuth.UNLISTED_PRINCIPAL_ID) + ("rejectedReason" to JsonPrimitive(FORGED_REASON))).toString()
+
   /** The row [c] would be journaled as if its key resolved to [principalId]. */
   private fun rowUnder(c: ApprovalCandidate, principalId: String): JsonObject = buildJsonObject {
     put("gateId", c.gateId)
@@ -1378,6 +1402,9 @@ class ApprovalAcceptTest {
 
     /** A signature that does not verify, as long as [GENUINE]. */
     val FORGED_SAME_LENGTH = "f".repeat(GENUINE.length)
+
+    /** The reason a candidate whose signature does not verify is rejected for. */
+    const val FORGED_REASON = "has a signature that does not verify over its preimage"
 
     val OPERATOR = Principal("operator", role = "authorizer", keys = listOf(SchemeKey("test", "pk-operator")))
 

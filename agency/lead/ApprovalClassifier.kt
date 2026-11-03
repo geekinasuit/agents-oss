@@ -56,7 +56,7 @@ internal fun classifyApproval(
     try {
       ApprovalEvidence.fromJson(evidenceObj)
     } catch (x: Exception) {
-      return ApprovalVerdict.Rejected("has malformed evidence: ${x.message}", null)
+      return ApprovalVerdict.Rejected(malformedEvidenceReason(x), null)
     }
   val claimedKey =
     SchemeKey(evidence.schemeId, evidence.publicKey).takeIf {
@@ -100,3 +100,7 @@ internal fun classifyApproval(
   return if (original == null) ApprovalVerdict.VerifiedNew(committed.gateId, verified)
   else ApprovalVerdict.VerifiedDuplicate(committed.gateId, verified, original.seq)
 }
+
+/** The rejection reason for evidence that [ApprovalEvidence.fromJson] refused with [x]. Its messages
+ * name the field and the check, never the value. */
+internal fun malformedEvidenceReason(x: Exception): String = "has malformed evidence: ${x.message}"
