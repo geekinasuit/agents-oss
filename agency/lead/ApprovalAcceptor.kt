@@ -198,7 +198,7 @@ internal class ApprovalAcceptor<S>(
       val gate = host.openGates[candidate.gateId] ?: return notOpenDropped()
       val open = host.openNonceFor(gate)
       if (open == null || open.nonce != candidate.nonce) return notOpenDropped()
-      val evidence = evidenceOf(candidate)
+      val (evidence, evidenceRefusal) = parseEvidence(candidate)
       if (candidate.payloadDigest != open.payloadDigest) {
         return dropped(open, evidence, ApprovalAccept.WRONG_DIGEST) { wrongDigest++ }
       }
@@ -238,7 +238,16 @@ internal class ApprovalAcceptor<S>(
               if (key == null) overAllowanceUnlisted++ else overAllowance[key] = (overAllowance[key] ?: 0) + 1
             }
           }
-          val row = JsonObject(payload + ("principalId" to JsonPrimitive(UNLISTED_PRINCIPAL_ID)))
+          // Evidence that did not parse is classified as the empty object payloadOf writes, so its
+          // verdict names the first field that object lacks; the reason names what the candidate's
+          // own evidence lacks instead.
+          val reason = evidenceRefusal ?: verdict.reason
+          val row =
+            JsonObject(
+              payload +
+                ("principalId" to JsonPrimitive(UNLISTED_PRINCIPAL_ID)) +
+                ("rejectedReason" to JsonPrimitive(reason))
+            )
           if (!fits(row)) return dropped(open, evidence, ApprovalAccept.OVERSIZED) { oversized++ }
           append(row)
           ApprovalAccept.REJECTED
@@ -487,12 +496,12 @@ internal class ApprovalAcceptor<S>(
     var firstDropped: JsonObject? = null
   }
 
-  /** [c]'s evidence, or null when it does not parse. */
-  private fun evidenceOf(c: ApprovalCandidate): ApprovalEvidence? =
+  /** [c]'s evidence and null, or null and why it does not parse, as the classifier words it. */
+  private fun parseEvidence(c: ApprovalCandidate): Pair<ApprovalEvidence?, String?> =
     try {
-      ApprovalEvidence.fromJson(c.evidence)
-    } catch (_: Exception) {
-      null
+      ApprovalEvidence.fromJson(c.evidence) to null
+    } catch (x: Exception) {
+      null to malformedEvidenceReason(x)
     }
 
   /**

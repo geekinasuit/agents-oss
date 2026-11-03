@@ -105,6 +105,13 @@ object HostKinds {
    * satisfy the re-opened gate. A null/absent preimage is fail-closed: unverifiable, never a
    * pass — the closure the nullable [com.geekinasuit.agency.shared.auth.ApprovalEvidence]
    * field defers to this fold.
+   *
+   * A row the accept boundary journaled as rejected names [LeadAuth.UNLISTED_PRINCIPAL_ID] and adds
+   * `rejectedReason`: why the approval did not re-verify when it arrived, so an operator or approver
+   * can tell a misspelled key from a bad signature. Audit only: the fold never reads it and re-decides
+   * every row under the auth in force at that fold. Evidence that did not parse is journaled as an
+   * empty object, so for such a row the fold's own reason names the first field the empty object
+   * lacks; `rejectedReason` names what the arriving evidence lacked, and is the one to read.
    */
   const val APPROVAL_RECORDED = "approval-recorded"
 
