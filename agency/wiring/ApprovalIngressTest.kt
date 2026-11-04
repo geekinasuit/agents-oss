@@ -44,6 +44,9 @@ import com.geekinasuit.agency.shared.journal.SqliteStore
 import java.io.File
 import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -232,7 +235,8 @@ class ApprovalIngressTest {
       relay.replays(approvalWrap("g", "n", "d"))
       val sink = RecordingSink { ApprovalAccept.RECORDED }
       val ingress = ingress(Connections(relay.url), sink)
-      ingress.start()
+      val exits = CopyOnWriteArrayList<String>()
+      ingress.start { exits += it }
       val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos()
       while (sink.seen.isEmpty() && System.nanoTime() < deadline) Thread.sleep(20)
       assertEquals(1, sink.seen.size)
@@ -241,6 +245,77 @@ class ApprovalIngressTest {
         "the worker ended",
         Thread.getAllStackTraces().keys.none { it.name == "approval-ingress" && it.isAlive },
       )
+      assertEquals("a close is not an exit to report", emptyList<String>(), exits)
+    }
+
+  /** Serve the REQ with [event] and EOSE, then count [closed] down when the client closes the
+   * subscription or the connection, within ten seconds. */
+  private fun FakeRelay.replaysAndWatchesForClose(event: NostrEvent, closed: CountDownLatch) = serve { session ->
+    session.nextClientText(5_000) ?: error("no REQ")
+    session.sendText("[\"EVENT\",\"${ApprovalIngress.SUBSCRIPTION_ID}\"," + event.serialize() + "]")
+    session.sendText("[\"EOSE\",\"${ApprovalIngress.SUBSCRIPTION_ID}\"]")
+    val started = System.nanoTime()
+    session.nextClientText(10_000)
+    if (System.nanoTime() - started < Duration.ofSeconds(9).toNanos()) closed.countDown()
+  }
+
+  /** Start [ingress], wait for its worker to report an exit, and return the reason. The report waits up
+   * to five seconds for [closed], so it also asserts that the subscription closed before the report. */
+  private fun startAndAwaitExit(ingress: ApprovalIngress, closed: CountDownLatch): String {
+    val exit = LinkedBlockingQueue<Pair<String, Boolean>>()
+    ingress.start { exit.put(it to closed.await(5, TimeUnit.SECONDS)) }
+    val (reason, closedFirst) =
+      checkNotNull(exit.poll(10, TimeUnit.SECONDS)) { "the worker did not report an exit; counts ${ingress.counts()}" }
+    assertTrue("the subscription was closed before the report", closedFirst)
+    return reason
+  }
+
+  @Test
+  fun anExitReportMayCloseTheIngressWithoutWaitingOnItself() =
+    FakeRelay().use { relay ->
+      relay.replays(approvalWrap("g", "n", "d"))
+      val ingress = ingress(Connections(relay.url), { throw AssertionError("the sink broke") })
+      val closedIn = LinkedBlockingQueue<Long>()
+      ingress.start {
+        val started = System.nanoTime()
+        ingress.close()
+        closedIn.put((System.nanoTime() - started) / 1_000_000)
+      }
+      val millis = checkNotNull(closedIn.poll(10, TimeUnit.SECONDS)) { "the worker did not report an exit" }
+      assertTrue("close from the report took $millis ms", millis < 2_000)
+    }
+
+  @Test
+  fun aWorkerEndedByAnErrorFromTheSinkClosesItsSubscriptionAndReportsWhy() =
+    FakeRelay().use { relay ->
+      val closed = CountDownLatch(1)
+      relay.replaysAndWatchesForClose(approvalWrap("g", "n", "d"), closed)
+      val ingress = ingress(Connections(relay.url), { throw AssertionError("the sink broke") })
+      try {
+        val reason = startAndAwaitExit(ingress, closed)
+        assertTrue(reason, reason.contains("java.lang.AssertionError: the sink broke"))
+      } finally {
+        ingress.close()
+      }
+    }
+
+  @Test
+  fun aWorkerEndedByAnInterruptClosesItsSubscriptionAndReportsWhy() =
+    FakeRelay().use { relay ->
+      val closed = CountDownLatch(1)
+      relay.replaysAndWatchesForClose(approvalWrap("g", "n", "d"), closed)
+      // The sink runs on the worker, so this interrupts the worker; the delivery itself succeeds.
+      val ingress =
+        ingress(Connections(relay.url), {
+          Thread.currentThread().interrupt()
+          ApprovalAccept.RECORDED
+        })
+      try {
+        assertEquals("the ingress thread was interrupted", startAndAwaitExit(ingress, closed))
+        assertEquals(mapOf(ApprovalAccept.RECORDED to 1L), ingress.counts().accepted)
+      } finally {
+        ingress.close()
+      }
     }
 
   @Test

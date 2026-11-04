@@ -119,23 +119,72 @@ class ApprovalIngress(
     return !closed
   }
 
-  /** Run [step] on a daemon thread until [close]. */
-  fun start() {
+  /**
+   * Run [step] on a daemon thread until [close]. When the thread ends any other way, approvals stop
+   * reaching the host, so it closes the subscription and calls [onExit] with why, on that thread. Two
+   * paths lead there: the thread is interrupted, or something escapes a delivery, such as an [Error]
+   * from the sink, which a delivery does not catch. What escaped is rethrown after [onExit], to the
+   * thread's uncaught-exception handler, with anything [onExit] throws attached as suppressed. A
+   * [close] that comes before the thread ends ends it without calling [onExit]; one that comes after
+   * the thread has closed its subscription does not stop the call. [onExit] may call [close]. The
+   * ingress does not restart the thread, and a started ingress cannot be started again: whoever runs
+   * it decides, in [onExit], whether to stop, and still calls [close] to zero [leadKey]. The reason
+   * carries the escaped throwable's message, which may hold text the sink did not write, so show it
+   * through [com.geekinasuit.agency.shared.text.inert].
+   */
+  fun start(onExit: (reason: String) -> Unit) {
     synchronized(lock) {
       check(worker == null) { "the ingress is already started" }
-      worker = thread(isDaemon = true, name = "approval-ingress") { while (step(POLL)) Unit }
+      worker = thread(isDaemon = true, name = "approval-ingress") { work(onExit) }
     }
   }
 
-  /** Stop the thread, close the subscription, and zero [leadKey]. Idempotent. */
-  fun close() {
-    closed = true
-    val running = synchronized(lock) { worker }
-    synchronized(lock) {
-      subscription?.close()
-      subscription = null
+  private fun work(onExit: (reason: String) -> Unit) {
+    var escaped: Throwable? = null
+    val reason =
+      try {
+        while (step(POLL)) Unit
+        "the ingress thread was interrupted"
+      } catch (x: Throwable) {
+        escaped = x
+        "the ingress thread ended on ${x.javaClass.name}: ${x.message}"
+      }
+    // The thread is ending, so its interrupt status has nothing left to stop; cleared, it no longer
+    // fails a close or an [onExit] that waits.
+    Thread.interrupted()
+    // Under the lock, so this and [close] agree on which of them came first.
+    val report =
+      synchronized(lock) {
+        if (closed) {
+          false
+        } else {
+          subscription?.close()
+          subscription = null
+          true
+        }
+      }
+    if (report) {
+      try {
+        onExit(reason)
+      } catch (t: Throwable) {
+        val first = escaped ?: throw t
+        first.addSuppressed(t)
+      }
     }
-    running?.join(JOIN_MILLIS)
+    escaped?.let { throw it }
+  }
+
+  /** Stop the thread, close the subscription, and zero [leadKey]. Idempotent. Called on the thread
+   * itself, from [start]'s `onExit`, it does not wait for the thread to end. */
+  fun close() {
+    val running =
+      synchronized(lock) {
+        closed = true
+        subscription?.close()
+        subscription = null
+        worker
+      }
+    if (running !== Thread.currentThread()) running?.join(JOIN_MILLIS)
     leadKey.clear()
   }
 
