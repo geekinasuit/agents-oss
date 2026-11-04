@@ -57,8 +57,9 @@ import kotlin.system.exitProcess
  *
  * It runs until it is stopped (SIGTERM or SIGINT) or the lead's loop ends. Stopped by a signal, it
  * closes what it opened and exits with the signal's status, as the JVM does (143 for SIGTERM, 130
- * for SIGINT), which a supervisor such as systemd counts as a clean stop. Otherwise: exit 0 when
- * stopped from within; 1 on a refusal at start (no pinned root, a spec that does not load, a key file that does not read);
+ * for SIGINT). Those are exit statuses, not deaths by signal, so a systemd unit must list them in
+ * `SuccessExitStatus=` for a stop to read as clean. Otherwise: exit 0 when stopped from within; 1 on
+ * a refusal at start (no pinned root, a spec that does not load, a key file that does not read);
  * 2 on a usage error, checked before any file is read; 3 when the lead's loop ends on a fault (its
  * approval boundary stopped, or a wake that failed), which a supervisor answers by starting it
  * again; 4 when the approval ingress ends, likewise. Each failure prints one line on stderr saying
