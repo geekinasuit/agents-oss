@@ -213,6 +213,10 @@ class AgentHost<S> internal constructor(
 
     data class AuthRelease(val gateId: String, val payloadDigest: String) : WakeEvent
 
+    /** The approval accept boundary has failed: a doorbell, so an idle loop wakes and ends
+     * ([endIfTheBoundaryFailed]). */
+    data object BoundaryStopped : WakeEvent
+
     data object Shutdown : WakeEvent
   }
 
@@ -229,9 +233,12 @@ class AgentHost<S> internal constructor(
       timers,
       ApprovalAcceptor.DEFAULT_TICK_MS,
       clock,
-    ) { gateId, payloadDigest ->
-      // offer, not put — same false-refusal reasoning as injectMail's doorbell.
-      queue.offer(WakeEvent.AuthRelease(gateId, payloadDigest))
+      { gateId, payloadDigest ->
+        // offer, not put — same false-refusal reasoning as injectMail's doorbell.
+        queue.offer(WakeEvent.AuthRelease(gateId, payloadDigest))
+      },
+    ) { _ ->
+      queue.offer(WakeEvent.BoundaryStopped)
     }
 
   /** Structural single-run guard: the single-writer/single-loop-thread rule is enforced,
@@ -445,6 +452,7 @@ class AgentHost<S> internal constructor(
       while (true) {
         val ev = queue.take()
         if (ev is WakeEvent.Shutdown) return
+        endIfTheBoundaryFailed()
         try {
           handleWake(ev)
         } catch (t: Throwable) {
@@ -468,6 +476,15 @@ class AgentHost<S> internal constructor(
       approvals.stop("the loop has exited")
       active.set(false)
     }
+  }
+
+  // Checked before every wake, so no wake runs (and no cognition turn is paid for) once the boundary
+  // has failed, whichever wake was queued first; [WakeEvent.BoundaryStopped] is the doorbell that
+  // wakes an idle loop to see it. The boundary has escalated why, so this journals nothing more. The
+  // loop ends whether or not its own read of the journal would fail, so a supervisor restarts a host
+  // whose approvals are refused.
+  private fun endIfTheBoundaryFailed() {
+    approvals.failure?.let { throw ApprovalBoundaryStoppedException(it) }
   }
 
   // Journal [t] as an escalation that names [where], then rethrow it so the loop stops for a
@@ -497,6 +514,7 @@ class AgentHost<S> internal constructor(
       while (true) {
         val ev = queue.poll() ?: break
         if (ev is WakeEvent.Shutdown) break
+        endIfTheBoundaryFailed()
         handleWake(ev)
       }
       return refold()
@@ -550,8 +568,8 @@ class AgentHost<S> internal constructor(
     )
     queue.put(WakeEvent.Adopted)
     // A release a crash cut short after its approval's marked row lands now, before the loop takes its
-    // first wake, which stays Adopted; the release's own doorbell follows it. The repair never throws,
-    // so it cannot stop the loop.
+    // first wake, which stays Adopted; the release's own doorbell follows it. The repair never throws.
+    // A view that fails here stops the boundary, and the loop ends before that first wake runs.
     approvals.prime()
   }
 
@@ -894,7 +912,7 @@ class AgentHost<S> internal constructor(
           )
         }
       }
-      WakeEvent.Adopted, WakeEvent.Shutdown -> Unit
+      WakeEvent.Adopted, WakeEvent.Shutdown, WakeEvent.BoundaryStopped -> Unit
     }
   }
 
@@ -1937,7 +1955,8 @@ class AgentHost<S> internal constructor(
       is WakeEvent.PodDone -> WakeReason.PodCompleted(ev.completion.podId)
       is WakeEvent.PodDisposed -> WakeReason.PodDisposed(ev.podId, ev.disposition)
       is WakeEvent.AuthRelease -> WakeReason.GateReleased(ev.gateId)
-      WakeEvent.Shutdown -> WakeReason.Adopted // unreachable: shutdown never reaches handleWake
+      // Unreachable: neither reaches handleWake.
+      WakeEvent.Shutdown, WakeEvent.BoundaryStopped -> WakeReason.Adopted
     }
 
   companion object {

@@ -12,6 +12,7 @@ import com.geekinasuit.agency.shared.auth.SignerLeaf
 import com.geekinasuit.agency.shared.auth.committedPreimage
 import com.geekinasuit.agency.shared.journal.ArmedTimer
 import com.geekinasuit.agency.shared.journal.ChainBrokenException
+import com.geekinasuit.agency.shared.journal.ChainCursor
 import com.geekinasuit.agency.shared.journal.EffectReceiver
 import com.geekinasuit.agency.shared.journal.JournalEntry
 import com.geekinasuit.agency.shared.journal.JournalStore
@@ -19,8 +20,10 @@ import com.geekinasuit.agency.shared.journal.KIND_GATE_RELEASED
 import com.geekinasuit.agency.shared.journal.ORIGIN_AUTH_LAYER
 import com.geekinasuit.agency.shared.journal.ORIGIN_SUBSTRATE
 import com.geekinasuit.agency.shared.journal.SqliteStore
+import com.geekinasuit.agency.shared.journal.TailRead
 import java.io.File
 import java.sql.DriverManager
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -439,6 +442,200 @@ class ApprovalAcceptTest {
       )
       assertEquals("no approval row", 0, rig.rawKindsAndPayloads().count { it.first == HostKinds.APPROVAL_RECORDED })
     }
+
+  @Test
+  fun aTransientTailFaultEndsTheLoopThoughTheLoopsOwnReadSucceeds() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val journal = FailingTailStore(rig.store)
+      val host = rig.host(journal = journal)
+      journal.failing = true
+      assertThrows(IllegalStateException::class.java) { host.injectApproval(candidate(nonce)) }
+      // The fault was transient: the store reads again, and the loop's own read of the journal folds.
+      journal.failing = false
+      host.refold()
+      val ended = runLoopToItsEnd(host)
+      assertTrue("the loop ended on the stopped boundary, not $ended", ended is ApprovalBoundaryStoppedException)
+      assertTrue("names why", "approval boundary stopped" in ended!!.message!!)
+      assertEquals(
+        "the boundary's escalation, and none from the loop",
+        1,
+        rig.store.readAll().count { it.kind == HostKinds.ESCALATED && "approval boundary stopped" in it.payloadJson },
+      )
+    }
+
+  @Test
+  fun aBoundaryStoppedWhileTheHostAdoptsEndsTheLoop() =
+    onBothWorkflows { rig ->
+      rig.openGate()
+      val journal = FailingTailStore(rig.store)
+      // The adopt's repair is the view's first read, so it fails there, with the loop's own read whole.
+      journal.failing = true
+      val ended = runLoopToItsEnd(rig.host(journal = journal))
+      assertTrue("the loop ended on the stopped boundary, not $ended", ended is ApprovalBoundaryStoppedException)
+    }
+
+  @Test
+  fun aBoundaryThatFailsWhileTheHostAdoptsEndsTheLoopBeforeAnyWakeRuns() {
+    val rig = TicketRig()
+    rigs += rig
+    rig.openGate()
+    val journal = FailingTailStore(rig.store)
+    journal.failing = true
+    val decisions = AtomicInteger()
+    // The adopt queues its Adopted wake before its repair fails the boundary.
+    assertTrue(runLoopToItsEnd(countingTicketHost(rig, journal, decisions)) is ApprovalBoundaryStoppedException)
+    assertEquals("the queued Adopted wake did not run", 0, decisions.get())
+  }
+
+  @Test
+  fun aBoundaryThatFailsWhileTheLoopIdlesWakesAndEndsIt() {
+    val rig = TicketRig()
+    rigs += rig
+    val nonce = rig.openGate()
+    val journal = FailingTailStore(rig.store)
+    val decisions = AtomicInteger()
+    val host = countingTicketHost(rig, journal, decisions)
+    var thrown: Throwable? = null
+    val loop = Thread {
+      try {
+        host.runLoop()
+      } catch (t: Throwable) {
+        thrown = t
+      }
+    }
+    loop.start()
+    try {
+      // Once the Adopted wake has reached cognition it has left the queue, which then holds nothing:
+      // from here only the boundary's doorbell can wake the loop to see the failure.
+      val deadline = System.nanoTime() + 10_000_000_000L
+      while (decisions.get() == 0 && System.nanoTime() < deadline) Thread.sleep(10)
+      assertTrue("the Adopted wake ran", decisions.get() > 0)
+      journal.failing = true
+      assertThrows(IllegalStateException::class.java) { host.injectApproval(candidate(nonce)) }
+      loop.join(10_000)
+      assertFalse("the doorbell woke the idle loop, which ended", loop.isAlive)
+      assertTrue("it ended on the stopped boundary, not $thrown", thrown is ApprovalBoundaryStoppedException)
+    } finally {
+      if (loop.isAlive) {
+        host.shutdown()
+        loop.join(10_000)
+      }
+    }
+  }
+
+  /** A ticket lead over [journal] whose scripted cognition counts its decisions in [decisions]. */
+  private fun countingTicketHost(rig: Rig, journal: JournalStore, decisions: AtomicInteger): AgentHost<LeadState> {
+    val counting =
+      object : AgentCognition<LeadState> {
+        private val inner = ScriptedCognition()
+        override val name = inner.name
+
+        override fun decide(context: AgentWakeContext<LeadState>): CognitionOutput {
+          decisions.incrementAndGet()
+          return inner.decide(context)
+        }
+      }
+    return AgentHost(
+      store = journal,
+      cognition = counting,
+      podRunner = FakePodRunner(),
+      podSpec = PodSpec.fixture(),
+      workflow = TicketWorkflow(FileTicketSource(File(rig.dir, "ticket.txt"))),
+      workdir = rig.dir,
+      effects = EffectReceiver(rig.dir.absolutePath),
+      leadAuth = AUTH,
+      timers = TIMERS,
+    )
+  }
+
+  @Test
+  fun aBoundaryThatFailsWhileTheHostAdoptsEndsADrive() =
+    onBothWorkflows { rig ->
+      rig.openGate()
+      val journal = FailingTailStore(rig.store)
+      journal.failing = true
+      assertThrows(ApprovalBoundaryStoppedException::class.java) { rig.host(journal = journal).driveUntilQuiescent() }
+    }
+
+  @Test
+  fun theAcceptorTellsOfAViewFailureOnceAndNeverOfTheHostsOwnStop() {
+    val rig = TicketRig()
+    rigs += rig
+    val nonce = rig.openGate()
+    fun acceptor(journal: JournalStore, told: MutableList<String>) =
+      ApprovalAcceptor(
+        journal,
+        AUTH,
+        TicketWorkflowFold,
+        FaultInjector.NONE,
+        {},
+        TIMERS,
+        ApprovalAcceptor.DEFAULT_TICK_MS,
+        System::currentTimeMillis,
+        { _, _ -> },
+      ) {
+        told += it
+      }
+
+    val toldOnStop = mutableListOf<String>()
+    val stoppedByTheHost = acceptor(rig.store, toldOnStop)
+    stoppedByTheHost.stop("the loop has exited")
+    assertThrows(IllegalStateException::class.java) { stoppedByTheHost.accept(candidate(nonce)) }
+    assertEquals("the host's own stop is not reported", emptyList<String>(), toldOnStop)
+    assertEquals(null, stoppedByTheHost.failure)
+
+    val told = mutableListOf<String>()
+    val journal = FailingTailStore(rig.store)
+    val failed = acceptor(journal, told)
+    journal.failing = true
+    assertThrows(IllegalStateException::class.java) { failed.accept(candidate(nonce)) }
+    journal.failing = false
+    assertThrows(IllegalStateException::class.java) { failed.accept(candidate(nonce)) }
+    failed.prime()
+    assertEquals("told once, however often it is asked again", 1, told.size)
+    assertTrue(told.single(), told.single().startsWith("approval boundary stopped"))
+    assertEquals(told.single(), failed.failure)
+  }
+
+  @Test
+  fun aLoopEndedByShutdownStopsTheBoundaryWithoutReportingIt() =
+    onBothWorkflows { rig ->
+      val nonce = rig.openGate()
+      val host = rig.host()
+      val loop = Thread { host.runLoop() }
+      loop.start()
+      host.shutdown()
+      loop.join(10_000)
+      assertFalse("the loop exited", loop.isAlive)
+      assertThrows(IllegalStateException::class.java) { host.injectApproval(candidate(nonce)) }
+      assertEquals(
+        "a shutdown is no boundary failure",
+        0,
+        rig.store.readAll().count { it.kind == HostKinds.ESCALATED && "approval boundary stopped" in it.payloadJson },
+      )
+    }
+
+  /** Runs [host]'s loop on a thread of its own until it ends, for at most ten seconds, and returns what
+   * it threw, or null when it returned. */
+  private fun runLoopToItsEnd(host: AgentHost<*>): Throwable? {
+    var thrown: Throwable? = null
+    val loop = Thread {
+      try {
+        host.runLoop()
+      } catch (t: Throwable) {
+        thrown = t
+      }
+    }
+    loop.start()
+    loop.join(10_000)
+    if (loop.isAlive) {
+      host.shutdown()
+      loop.join(10_000)
+      throw AssertionError("the loop was still running after ten seconds")
+    }
+    return thrown
+  }
 
   @Test
   fun twoOfThreeReleasesAtTheSecondApprovalInEitherOrder() {
@@ -1338,6 +1535,17 @@ class ApprovalAcceptTest {
         throw IllegalStateException("the store refused the aggregate of the interval at $refusedAggregateStart")
       }
       return inner.append(kind, payload, origin, idempotencyKey)
+    }
+  }
+
+  /** [inner], except that a tail read ([readAfter]) throws while [failing] is set: a transient store
+   * error that the full read ([readAll]) the loop folds does not see. */
+  private class FailingTailStore(private val inner: JournalStore) : JournalStore by inner {
+    @Volatile var failing = false
+
+    override fun readAfter(from: ChainCursor): TailRead {
+      if (failing) throw IllegalStateException("the store failed a tail read")
+      return inner.readAfter(from)
     }
   }
 

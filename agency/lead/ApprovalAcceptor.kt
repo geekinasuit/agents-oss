@@ -65,6 +65,11 @@ enum class ApprovalAccept {
   OVERSIZED,
 }
 
+/** Ends a host's loop ([AgentHost.runLoop]) when its approval accept boundary has stopped: the host
+ * would run on with every approval refused. The boundary has escalated why, unless the journal
+ * refused that too. */
+class ApprovalBoundaryStoppedException(reason: String) : IllegalStateException(reason)
+
 /**
  * The host's approval accept boundary: it decides on each candidate against the host's records as the
  * journal stands at that moment, and journals what it keeps on the calling thread.
@@ -129,10 +134,10 @@ enum class ApprovalAccept {
  *
  * When the view fails to advance (a chain fault in the tail, an entry the fold refuses, a store
  * error), the acceptor stops: the failure is escalated and thrown, and every later [accept] throws
- * until the host restarts. The view cannot be trusted after such a failure. Nothing here restarts the
- * host: a chain fault also stops the loop at its next wake, but that wake may be far off, and a
- * transient store error may never reach the loop at all. Until a restart, the escalation is the only
- * signal that approvals are refused.
+ * until the host restarts. The view cannot be trusted after such a failure. So the acceptor tells the
+ * host ([stopped]), which ends its loop for a supervisor to restart it, whatever the loop's own read
+ * of the journal would say: a transient store error can leave that read healthy while approvals are
+ * refused.
  *
  * A failure between an approval's marked row and its doorbell does not stop the acceptor: the repair
  * retries the release. It is escalated once per nonce, however many retries fail, since an untrusted
@@ -153,10 +158,19 @@ internal class ApprovalAcceptor<S>(
   private val clock: () -> Long,
   /** Wakes the loop for the release of a gate on a digest, after the release is journaled. */
   private val ring: (gateId: String, payloadDigest: String) -> Unit,
+  /** Told why, once, when the view's failure to advance stops the acceptor, after the escalation. Not
+   * told for a [stop] the host makes itself. */
+  private val stopped: (reason: String) -> Unit,
 ) {
   private val lock = Any()
   private var view: IncrementalLeadView<S, *>? = null
   private var stoppedBecause: String? = null
+
+  /** Why the view's failure to advance stopped the acceptor, or null while it has not. A [stop] the
+   * host makes itself does not set it. Read without the lock, so the loop can check it before each
+   * wake without waiting on an accept. */
+  @Volatile var failure: String? = null
+    private set
 
   /** Nonce issued and not consumed → the claimed keys whose rejected row the journal holds on it;
    * null is the unlisted bucket. */
@@ -294,9 +308,9 @@ internal class ApprovalAcceptor<S>(
 
   /**
    * Runs the repair from the loop thread as the host adopts the journal, so a release a crash cut
-   * short lands before the loop's first wake. It never throws: a view that fails to advance stops the
-   * acceptor (escalated, as at any accept), and a release that fails is escalated and retried on the
-   * timer, so neither stops the loop.
+   * short lands before the loop's first wake. It never throws. A view that fails to advance stops the
+   * acceptor (escalated, and told to [stopped], as at any accept), which ends the loop before its first
+   * wake; a release that fails is escalated and retried on the timer, which does not.
    */
   fun prime() {
     synchronized(lock) { repairQuietly() }
@@ -426,18 +440,20 @@ internal class ApprovalAcceptor<S>(
     }
   }
 
-  /** Runs [block]; when it throws, stops the acceptor, escalates why, and rethrows. */
+  /** Runs [block]; when it throws, stops the acceptor, escalates why, tells [stopped], and rethrows. */
   private inline fun <T> stoppingOnFailure(block: () -> T): T =
     try {
       block()
     } catch (x: Exception) {
       val reason = "approval boundary stopped: " + (x.message ?: x::class.qualifiedName ?: "unknown")
       stoppedBecause = reason
+      failure = reason
       try {
         escalate(reason)
       } catch (journalFailure: Exception) {
         x.addSuppressed(journalFailure)
       }
+      stopped(reason)
       throw x
     }
 
