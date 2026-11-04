@@ -1,4 +1,6 @@
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library", "kt_jvm_test")
+load(":pinned_root.bzl", "pinned_root_jar")
 
 # Wiring: the adapters that join the lead host to the nostr substrate. Neither side depends on the
 # other (the lead never sees a nostr type; nostr never sees the host), so the pieces that need both
@@ -20,6 +22,8 @@ kt_jvm_library(
         # The operator's status tool (lead_status below).
         "LeadStatusTool.kt",
         "NostrGateOpenSink.kt",
+        # A ticket lead with no model in it (scripted_lead below).
+        "ScriptedLeadRunner.kt",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -27,9 +31,44 @@ kt_jvm_library(
         "//agency/lead:host",
         "//agency/nostr",
         "//agency/nostr:relay",
+        "//agency/pod",
         "//agency/shared/auth",
         "//agency/shared/journal",
         "//agency/shared/text",
+    ],
+)
+
+# The root key a scripted lead's spec must verify against, as `auth_spec pubkey` prints it. Fixed
+# in the built binary (--//agency/wiring:pinned_root=PUB): no flag or file of the runner's chooses
+# it, though a launch command that edits the classpath can (ScriptedLeadRunner's KDoc). Empty by
+# default: a binary built without it refuses to start.
+string_flag(
+    name = "pinned_root",
+    build_setting_default = "",
+)
+
+pinned_root_jar(
+    name = "pinned_root_jar",
+    pin = ":pinned_root",
+    # ScriptedLeadRunner.PINNED_ROOT_RESOURCE.
+    resource_path = "agency/wiring/pinned-root.txt",
+)
+
+java_import(
+    name = "pinned_root_resource",
+    jars = [":pinned_root_jar"],
+)
+
+# A ticket lead with no model in it: scripted cognition and fake pods, with real gates announced over
+# a relay and approvals taken from it. Run as the lead's OS user, on the lead's host.
+java_binary(
+    name = "scripted_lead",
+    main_class = "com.geekinasuit.agency.wiring.ScriptedLeadRunner",
+    runtime_deps = [
+        ":pinned_root_resource",
+        ":wiring",
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm",
+        "@maven//:org_xerial_sqlite_jdbc",
     ],
 )
 
@@ -64,6 +103,32 @@ kt_jvm_test(
         "//agency/shared/journal",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+# The runner in-process over scripted relays, with the real signer, verifier and gift wraps (native at
+# runtime) and the journal (sqlite at runtime). It carries the pin resource as the binary does, built
+# with the default flag, so one cell sees that the default build pins nothing.
+kt_jvm_test(
+    name = "scripted_lead_runner_test",
+    size = "medium",
+    srcs = ["ScriptedLeadRunnerTest.kt"],
+    associates = [":wiring"],
+    test_class = "com.geekinasuit.agency.wiring.ScriptedLeadRunnerTest",
+    runtime_deps = [
+        ":pinned_root_resource",
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm",
+        "@maven//:org_xerial_sqlite_jdbc",
+    ],
+    deps = [
+        "//agency/lead",
+        "//agency/nostr",
+        "//agency/nostr:fake_relay",
+        "//agency/nostr:relay",
+        "//agency/shared/auth",
+        "//agency/shared/journal",
+        "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],
 )
