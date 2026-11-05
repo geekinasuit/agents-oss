@@ -343,6 +343,11 @@ class AgentHost<S> internal constructor(
    */
   fun injectApproval(candidate: ApprovalCandidate): ApprovalAccept = approvals.accept(candidate)
 
+  /** Whether an approval could count now: some open gate holds an open nonce, and the approval
+   * boundary has not stopped. It reads the journal as [injectApproval] does, and throws as it does
+   * when that read fails. */
+  fun approvalsAwaited(): Boolean = approvals.awaited()
+
   /** Timer fires stay enqueue-only (no accept-append, deliberately): a timer is
    * self-scheduled re-derivable state — armed and not fired re-arms at adopt — so a lost
    * doorbell loses nothing, and "timer-fired" keeps meaning CONSUMED by the loop, which

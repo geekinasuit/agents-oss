@@ -203,6 +203,16 @@ internal class ApprovalAcceptor<S>(
     synchronized(lock) { if (stoppedBecause == null) stoppedBecause = reason }
   }
 
+  /** Whether an approval could count now: some open gate holds an open nonce, and the acceptor has
+   * not stopped. Appends nothing. A failure to advance the view stops the acceptor and throws, as it
+   * does in [accept]. */
+  fun awaited(): Boolean =
+    synchronized(lock) {
+      if (stoppedBecause != null) return false
+      val host = advance()
+      host.openGates.values.any { host.openNonceFor(it) != null }
+    }
+
   /** Decides on [candidate], appending only when it is [ApprovalAccept.RECORDED],
    * [ApprovalAccept.RELEASED] or [ApprovalAccept.REJECTED]. */
   fun accept(candidate: ApprovalCandidate): ApprovalAccept =

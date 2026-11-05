@@ -12,6 +12,7 @@ import com.geekinasuit.agency.nostr.RelayAuth
 import com.geekinasuit.agency.nostr.RelayConnection
 import com.geekinasuit.agency.nostr.RelayMessage
 import com.geekinasuit.agency.nostr.SecretKeyHex
+import com.geekinasuit.agency.nostr.UntilPager
 import com.geekinasuit.agency.nostr.decodeApproval
 import java.time.Duration
 import java.util.concurrent.TimeUnit
@@ -24,11 +25,39 @@ fun interface ApprovalSink {
 
 /**
  * Carries approvals from a relay to the host's accept boundary (order item 3, carrier (a)). It holds
- * ONE subscription on ONE connection, with ONE filter: gift wraps (kind [Nip59.GIFT_WRAP_KIND])
- * addressed to the lead's key, with no `limit`. Nothing else may share that connection: the relay's
- * replay window and the connection's queue bound are counted per connection, so a second
- * subscription or a publisher on it would crowd approvals out. [newConnection] must therefore open a
- * connection used for nothing else, as [ReconnectingSubscription] requires.
+ * ONE kept subscription on ONE connection, with ONE filter: gift wraps (kind [Nip59.GIFT_WRAP_KIND])
+ * addressed to the lead's key, with a `limit` of [PAGE_LIMIT]. A replay with no limit could overflow
+ * the connection's queue, and it would then break before its EOSE, on every connection, so no walk
+ * would start. Nothing else may share that connection: the relay's replay window and the connection's
+ * queue bound are counted per connection, so another subscription or a publisher on it would crowd
+ * approvals out. The pages below are the one exception, and they run one at a time with the same
+ * limit. [newConnection] must therefore open a connection used for nothing else, as
+ * [ReconnectingSubscription] requires.
+ *
+ * A relay replays only the newest wraps it allows, so a member that stores enough newer wraps pushes
+ * an approval out of the replay. So after the replay of each new connection, while [approvalsAwaited]
+ * says an approval could count, the ingress walks back through the older wraps with `until`, a page
+ * at a time, each after the EOSE of the one before, as [UntilPager] decides. The filter is otherwise
+ * the same. Each page has a subscription id of its own, [PAGE_SUBSCRIPTION_PREFIX]
+ * and its number, so a wrap that arrives under a page after its EOSE, which a member times and stamps
+ * as it likes, reaches [sink] and cannot move the walk. One a relay puts before a page's EOSE can: a
+ * relay that sends live events into a stored replay lets a member stamp the walk past what lies
+ * between. The kept subscription stays open, so an approval published during the walk arrives on it.
+ * [approvalsAwaited] is asked before each page, and while it says no, a walk ends, and none starts, so
+ * a lead with nothing open reads no old wraps.
+ *
+ * The walk goes back to the end of what the relay gives, on every new connection. It cannot stop
+ * sooner on what it has seen: a wrap already journaled says nothing about an older one, which is the
+ * crowded-out approval it is looking for. So each reconnect while a gate is open costs a read of the
+ * lead's whole stored mailbox. Its wraps go through [sink] like any others, which drops the repeats.
+ *
+ * A walk can end short, and [Counts.stalledWalks] counts the ways the ingress can see: [UntilPager]
+ * reports a stall, the relay refuses a page, or a page cannot be sent. An approval below that point
+ * stays held until it is sent again. Three ways go uncounted: a relay that caps a page below
+ * [PAGE_LIMIT] can make a stall read as an end, one that sends no EOSE for a page holds its walk
+ * until a new connection starts another, and frames the connection drops as unparseable count for
+ * nothing, so a replay made only of those reads as empty. This never forges a release: the worst a
+ * relay or a member can do here is delay one.
  *
  * For each event it receives, it opens the gift wrap with [leadKey], decodes the rumor as an approval
  * by shape alone, and hands the result to [sink]. An event that is not a wrap, a wrap that does not
@@ -58,19 +87,31 @@ class ApprovalIngress(
   private val backoff: ReconnectingSubscription.Backoff,
   private val resubscribeBackoff: ReconnectingSubscription.Backoff,
   private val leadKey: SecretKeyHex,
+  /** Whether an approval could count now, `AgentHost::approvalsAwaited`. When it throws, the ingress
+   * treats it as a throw from [sink]. */
+  private val approvalsAwaited: () -> Boolean,
   private val sink: ApprovalSink,
 ) {
-  /** What the ingress has seen. [accepted] counts each [ApprovalAccept] the sink returned. */
+  /** What the ingress has seen. [accepted] counts each [ApprovalAccept] the sink returned. [pages]
+   * counts each page of stored wraps asked for, and [stalledWalks] each walk the ingress saw end
+   * before the relay's oldest wrap, as the class KDoc lists. */
   data class Counts(
     val accepted: Map<ApprovalAccept, Long>,
     val malformed: Long,
     val sinkFailures: Long,
     val resubscriptions: Long,
     val interruptions: Long,
+    val pages: Long,
+    val stalledWalks: Long,
   )
 
+  /** The walk in progress: [reading] is the subscription whose stored wraps it is reading, and it is
+   * on page [page]. */
+  private class Walk(val pager: UntilPager, var reading: String, var page: Long = 0)
+
   private val leadPubkey: String = leadKey.useKeyBytes { Bip340.xonlyPubkeyFromKeyBytes(it) }
-  private val filter = NostrFilter(kinds = listOf(Nip59.GIFT_WRAP_KIND), tags = mapOf('p' to listOf(leadPubkey)))
+  private val filter =
+    NostrFilter(kinds = listOf(Nip59.GIFT_WRAP_KIND), tags = mapOf('p' to listOf(leadPubkey)), limit = PAGE_LIMIT)
 
   private val lock = Any()
   @Volatile private var closed = false
@@ -84,9 +125,16 @@ class ApprovalIngress(
   private var sinkFailures = 0L
   private var resubscriptions = 0L
   private var interruptions = 0L
+  private var pages = 0L
+  private var stalledWalks = 0L
+
+  // Touched only by the thread that runs [step].
+  private var walk: Walk? = null
 
   fun counts(): Counts =
-    synchronized(lock) { Counts(accepted.toMap(), malformed, sinkFailures, resubscriptions, interruptions) }
+    synchronized(lock) {
+      Counts(accepted.toMap(), malformed, sinkFailures, resubscriptions, interruptions, pages, stalledWalks)
+    }
 
   /** Handle at most one delivery, waiting up to [timeout] for it. Never throws for anything a relay or
    * a sender does. Returns false once [close] has been called, and on a thread whose interrupt status
@@ -112,12 +160,64 @@ class ApprovalIngress(
       return !closed
     }
     when (val delivery = sub.next(timeout)) {
-      is Delivery.Received -> (delivery.message as? RelayMessage.Event)?.let { handle(it) }
-      is Delivery.Interrupted, is Delivery.Unavailable -> synchronized(lock) { interruptions++ }
-      Delivery.Subscribed, Delivery.Stopped, null -> Unit
+      is Delivery.Received -> receive(sub, delivery.message)
+      is Delivery.Interrupted, is Delivery.Unavailable -> {
+        walk = null
+        synchronized(lock) { interruptions++ }
+      }
+      Delivery.Subscribed -> walk = Walk(UntilPager(PAGE_LIMIT), SUBSCRIPTION_ID)
+      Delivery.Stopped, null -> Unit
     }
     return !closed
   }
+
+  private fun receive(sub: ReconnectingSubscription, message: RelayMessage) {
+    when (message) {
+      is RelayMessage.Event -> {
+        walk?.takeIf { it.reading == message.subscriptionId }?.pager?.saw(message.event.createdAt)
+        handle(message)
+      }
+      is RelayMessage.Eose -> walk?.takeIf { it.reading == message.subscriptionId }?.let { advance(sub, it) }
+      is RelayMessage.Closed ->
+        walk?.takeIf { it.reading == message.subscriptionId }?.let {
+          walk = null
+          synchronized(lock) { stalledWalks++ }
+        }
+      else -> Unit
+    }
+  }
+
+  // The page [w] is reading has ended: ask for the next one, or end the walk.
+  private fun advance(sub: ReconnectingSubscription, w: Walk) {
+    val decision = w.pager.pageEnded()
+    if (decision is UntilPager.Decision.Stalled) synchronized(lock) { stalledWalks++ }
+    val next = decision as? UntilPager.Decision.Next
+    val goOn = if (next != null) awaited() ?: return else false
+    if (w.page > 0) sub.closeOnOpenConnection(w.reading)
+    if (next == null || !goOn) {
+      walk = null
+      return
+    }
+    w.page++
+    w.reading = PAGE_SUBSCRIPTION_PREFIX + w.page
+    val page = NostrFilter(filter.kinds, filter.tags, limit = PAGE_LIMIT, until = next.until)
+    if (sub.requestOnOpenConnection(w.reading, listOf(page))) {
+      synchronized(lock) { pages++ }
+    } else {
+      walk = null
+      synchronized(lock) { stalledWalks++ }
+    }
+  }
+
+  // Whether to go on, or null when asking threw and the ingress is resubscribing.
+  private fun awaited(): Boolean? =
+    try {
+      approvalsAwaited()
+    } catch (x: Exception) {
+      if (x is InterruptedException) Thread.currentThread().interrupt()
+      resubscribeLater()
+      null
+    }
 
   /**
    * Run [step] on a daemon thread until [close]. When the thread ends any other way, approvals stop
@@ -189,7 +289,7 @@ class ApprovalIngress(
   }
 
   private fun handle(message: RelayMessage.Event) {
-    if (message.subscriptionId != SUBSCRIPTION_ID) return
+    if (message.subscriptionId != SUBSCRIPTION_ID && !message.subscriptionId.startsWith(PAGE_SUBSCRIPTION_PREFIX)) return
     val carrier = open(message.event)?.let { decodeApproval(it) }
     if (carrier == null) {
       synchronized(lock) { malformed++ }
@@ -221,6 +321,7 @@ class ApprovalIngress(
 
   // The approval the sink failed to record is replayed only on a new subscription, after the delay.
   private fun resubscribeLater() {
+    walk = null
     synchronized(lock) {
       sinkFailures++
       resubscriptions++
@@ -246,6 +347,13 @@ class ApprovalIngress(
   companion object {
     /** The subscription id the ingress sends its one REQ under. */
     const val SUBSCRIPTION_ID = "approvals"
+
+    /** The start of the subscription id of each page of a walk, followed by the page's number. */
+    const val PAGE_SUBSCRIPTION_PREFIX = "approvals-page-"
+
+    /** The most wraps the replay or a page asks for. Below the connection's queue, so each leaves room
+     * for the live events that share it. */
+    const val PAGE_LIMIT = 500
 
     private val POLL: Duration = Duration.ofMillis(500)
     private const val SLICE_NANOS: Long = 100_000_000L

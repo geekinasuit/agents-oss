@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.nostr
 
+import java.net.SocketException
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -61,14 +62,22 @@ class StoredEventRelay(
       for ((id, filter) in subscribed) if (matches(event, filter)) session?.sendText(eventFrame(id, event))
     }
 
-  /** Accept one connection and answer it until the client goes away. */
+  /** Close the connection the relay is answering, as a relay does when it goes away. */
+  fun dropConnection() = synchronized(lock) { session?.sendClose() }
+
+  /** Accept one connection and answer it until the client goes away. A second call before the first
+   * connection ends accepts the connection after it. */
   fun serveOneConnection() =
     relay.serve { client ->
       synchronized(lock) {
         session = client
         subscribed.clear()
       }
-      while (true) answer(client, client.nextClientText(IDLE_MILLIS) ?: break)
+      try {
+        while (true) answer(client, client.nextClientText(IDLE_MILLIS) ?: break)
+      } catch (_: SocketException) {
+        // The client left while the relay was answering it, which ends the connection like any other.
+      }
       synchronized(lock) { if (session === client) session = null }
     }
 
