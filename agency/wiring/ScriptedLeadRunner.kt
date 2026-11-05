@@ -179,6 +179,11 @@ object ScriptedLeadRunner {
             resubscribeBackoff = RESUBSCRIBE_BACKOFF,
             leadKey = key,
             approvalsAwaited = host::approvalsAwaited,
+            // Stderr first, so a journal that fails to take the report still leaves the line.
+            reporter = { problem ->
+              err.println("scripted_lead: ${inert(problem)}")
+              host.reportProblem(problem)
+            },
             sink = host::injectApproval,
           )
         }

@@ -17,6 +17,7 @@ import com.geekinasuit.agency.nostr.SecretKeyHex
 import com.geekinasuit.agency.nostr.encodeApproval
 import com.geekinasuit.agency.nostr.parseEvent
 import com.geekinasuit.agency.nostr.serialize
+import com.geekinasuit.agency.nostr.waitUntil
 import com.geekinasuit.agency.lead.LeadAuth
 import com.geekinasuit.agency.nostr.Bip340ApprovalVerifier
 import com.geekinasuit.agency.shared.auth.AllowList
@@ -31,6 +32,7 @@ import java.io.File
 import java.io.PrintStream
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -162,6 +164,42 @@ class ScriptedLeadRunnerTest {
       assertEquals(err.toString(), 4, code)
       assertTrue(err.toString(), err.toString().contains("the approvals connection broke"))
     }
+  }
+
+  @Test
+  fun aRelayThatRefusesEverySubscriptionLeavesTheLeadUpAndSaysSoOnStderrAndInTheJournal() {
+    val dir = tmp.newFolder()
+    File(dir, "tickets.txt").writeText("t1\n")
+    val err = ByteArrayOutputStream()
+    val refusing = List(ApprovalIngress.REPORT_AFTER_FAILURES + 3) { FakeRelay() }
+    FakeRelay().use { noticeRelay ->
+      noticeRelay.serve { session -> while (session.nextClientText(30_000) != null) Unit }
+      for (relay in refusing) {
+        relay.serve { session ->
+          session.nextClientText(30_000) ?: error("no REQ")
+          session.sendText("[\"CLOSED\",\"${ApprovalIngress.SUBSCRIPTION_ID}\",\"restricted: members only\"]")
+          session.nextClientText(30_000)
+        }
+      }
+      val attempts = AtomicInteger()
+      val connect = { use: ScriptedLeadRunner.RelayUse, _: String, _: String ->
+        val url = if (use == ScriptedLeadRunner.RelayUse.APPROVALS) refusing[attempts.getAndIncrement()].url else noticeRelay.url
+        RelayConnection(RelayConfig(url, SecretKeyHex.ofHexString(LEAD_SECRET)))
+      }
+      val stop = LinkedBlockingQueue<() -> Unit>()
+      var code: Int? = null
+      val runner = thread { code = ScriptedLeadRunner.run(ROOT_PUB, args(dir), PrintStream(err, true), connect) { stop.put(it) } }
+      assertTrue(err.toString(), waitUntil(30_000) { err.toString().contains("approvals are not arriving") })
+      assertTrue("the lead stays up", runner.isAlive)
+      assertTrue(err.toString(), err.toString().contains("restricted"))
+      fun journaled() = entries(dir).count { it.kind == HostKinds.ESCALATED && "approvals are not arriving" in it.payloadJson }
+      assertTrue("the outage reaches the journal", waitUntil(5_000) { journaled() == 1 })
+      stop.poll(5, TimeUnit.SECONDS)!!.invoke()
+      runner.join(20_000)
+      assertFalse("the lead stopped when told to", runner.isAlive)
+      assertEquals(err.toString(), 0, code)
+    }
+    refusing.forEach { it.close() }
   }
 
   @Test
