@@ -268,11 +268,18 @@ class ReconnectingSubscriptionTest {
   private fun eventsUntilEose(subscription: ReconnectingSubscription, id: String): List<NostrEvent> {
     val events = mutableListOf<NostrEvent>()
     while (true) {
-      val delivery = subscription.next(wait)
+      val delivery = nextOtherThanHeld(subscription)
       val message = (delivery as? Delivery.Received)?.message ?: error("expected a message, got $delivery")
       if (message is RelayMessage.Eose && message.subscriptionId == id) return events
       if (message is RelayMessage.Event && message.subscriptionId == id) events += message.event
     }
+  }
+
+  /** The next delivery but a [Delivery.Held], which a slow machine can put in front of what a cell
+   * is waiting for, since a cell's connection outlives the short maximum of [backoff]. */
+  private fun nextOtherThanHeld(subscription: ReconnectingSubscription): Delivery? {
+    val delivery = subscription.next(wait)
+    return if (delivery == Delivery.Held) subscription.next(wait) else delivery
   }
 
   private fun open(relay: StoredEventRelay): ReconnectingSubscription {
@@ -395,7 +402,7 @@ class ReconnectingSubscriptionTest {
       assertFalse(subscription.closeOnOpenConnection(unsendable))
 
       relay.publish(storedEvent(1, 100))
-      assertEquals(received(storedEvent(1, 100)), subscription.next(wait))
+      assertEquals(received(storedEvent(1, 100)), nextOtherThanHeld(subscription))
       subscription.close()
     }
   }
@@ -422,14 +429,15 @@ class ReconnectingSubscriptionTest {
       assertEquals(
         "a filter with until matches no newer event, so only the kept subscription gets it",
         received(storedEvent(1, 50_000)),
-        subscription.next(wait),
+        nextOtherThanHeld(subscription),
       )
 
       assertTrue(subscription.closeOnOpenConnection("page"))
       assertTrue("the relay ended the subscription", waitUntil(3_000) { "page" in relay.closed })
       relay.publish(storedEvent(2, 50))
-      assertEquals(received(storedEvent(2, 50)), subscription.next(wait))
-      assertEquals("the closed id gets nothing more", null, subscription.next(Duration.ofMillis(200)))
+      assertEquals(received(storedEvent(2, 50)), nextOtherThanHeld(subscription))
+      val after = subscription.next(Duration.ofMillis(200))
+      assertTrue("the closed id gets nothing more, got $after", after == null || after == Delivery.Held)
       subscription.close()
     }
   }
@@ -607,6 +615,290 @@ class ReconnectingSubscriptionTest {
     subscription.close()
   }
 
+  private val shortLiveness = ReconnectingSubscription.Liveness(Duration.ofMillis(60), Duration.ofMillis(60))
+
+  @Test
+  fun `a relay that goes silent is pinged once, then given up on, and the REQ goes to a new connection`() {
+    FakeRelay().use { silent ->
+      FakeRelay().use { next ->
+        val pings = LinkedBlockingQueue<Int>()
+        silent.serve { session ->
+          awaitReq(session)
+          session.sendText(eoseFrame(SUB))
+          // Reads until the client closes, counting what arrives.
+          session.nextClientText(10_000)
+          pings.put(session.pingsRead)
+        }
+        val reqs = LinkedBlockingQueue<String>()
+        next.serve { session -> reqs.put(awaitReq(session)) }
+        val connections = Connections(silent.url, next.url)
+        val subscription =
+          ReconnectingSubscription(connections::next, connectTimeout, RelayAuth.None, SUB, filters, backoff, shortLiveness)
+
+        val started = System.nanoTime()
+        assertEquals(Delivery.Subscribed, subscription.next(wait))
+        assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
+        var delivery: Delivery? = null
+        while (delivery == null && System.nanoTime() - started < Duration.ofSeconds(3).toNanos()) {
+          delivery = subscription.next(Duration.ofMillis(20))
+        }
+        val elapsedMillis = (System.nanoTime() - started) / 1_000_000
+        assertTrue("expected an interruption, got $delivery", delivery is Delivery.Interrupted)
+        assertEquals("the relay went silent", (delivery as Delivery.Interrupted).detail)
+        assertTrue("both spans, and not many times them: $elapsedMillis ms", elapsedMillis in 120L..1_200L)
+        assertTrue("the silent connection is closed", zeroed(connections.configs[0]))
+        assertEquals(1, pings.poll(5, TimeUnit.SECONDS))
+        assertEquals(Delivery.Subscribed, subscription.next(wait))
+        assertTrue("the REQ went to the new connection", reqs.poll(5, TimeUnit.SECONDS) != null)
+        subscription.close()
+      }
+    }
+  }
+
+  @Test
+  fun `a relay that answers pings is kept however quiet it is`() {
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        session.pongsToSend = Int.MAX_VALUE
+        awaitReq(session)
+        session.sendText(eoseFrame(SUB))
+        session.nextClientText(5_000)
+      }
+      val subscription =
+        ReconnectingSubscription(
+          Connections(relay.url)::next, connectTimeout, RelayAuth.None, SUB, filters, backoff, shortLiveness,
+        )
+
+      assertEquals(Delivery.Subscribed, subscription.next(wait))
+      assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
+      val deliveries = mutableListOf<Delivery>()
+      val end = System.nanoTime() + Duration.ofMillis(800).toNanos()
+      while (System.nanoTime() < end) {
+        subscription.next(Duration.ofMillis(20))?.let { deliveries += it }
+      }
+      assertEquals("it has held, once", listOf<Delivery>(Delivery.Held), deliveries)
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a connection silent after one answered ping has not held, though it stayed open past the maximum`() {
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        session.pongsToSend = 1
+        awaitReq(session)
+        session.sendText(eoseFrame(SUB))
+        session.nextClientText(5_000)
+      }
+      val subscription =
+        ReconnectingSubscription(
+          Connections(relay.url)::next, connectTimeout, RelayAuth.None, SUB, filters,
+          // Longer than the time to the answered ping, shorter than the time to the give-up.
+          ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(150)),
+          shortLiveness,
+        )
+
+      assertEquals(Delivery.Subscribed, subscription.next(wait))
+      assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
+      val started = System.nanoTime()
+      var delivery: Delivery? = null
+      while (delivery == null && System.nanoTime() - started < Duration.ofSeconds(3).toNanos()) {
+        delivery = subscription.next(Duration.ofMillis(20))
+      }
+      assertTrue("got $delivery", delivery is Delivery.Interrupted && !delivery.held)
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a relay that keeps sending is seen to have held, with messages always queued`() {
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        awaitReq(session)
+        session.sendText(eoseFrame(SUB))
+        repeat(20) {
+          session.sendText("[\"NOTICE\",\"still here\"]")
+          Thread.sleep(20)
+        }
+        session.nextClientText(5_000)
+      }
+      val subscription = subscription(Connections(relay.url)::next, RelayAuth.None)
+
+      assertEquals(Delivery.Subscribed, subscription.next(wait))
+      assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
+      val held = (1..20).map { subscription.next(wait) }.count { it == Delivery.Held }
+      assertEquals(1, held)
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a connection seen to have held resets the delay, though it fails later`() {
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        awaitReq(session)
+        session.sendText(eoseFrame(SUB))
+        Thread.sleep(300)
+        session.sendText("[\"NOTICE\",\"still here\"]")
+        Thread.sleep(50)
+        session.sendClose()
+      }
+      val subscription = subscription(Connections(REFUSED_URL, REFUSED_URL, relay.url)::next, RelayAuth.None)
+
+      assertEquals(Duration.ofMillis(50), (subscription.next(wait) as Delivery.Unavailable).retryAfter)
+      assertEquals(Duration.ofMillis(100), (subscription.next(wait) as Delivery.Unavailable).retryAfter)
+      assertEquals(Delivery.Subscribed, subscription.next(wait))
+      assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
+      assertTrue(subscription.next(wait) is Delivery.Received)
+      assertEquals(Delivery.Held, subscription.next(wait))
+      val interrupted = subscription.next(wait) as Delivery.Interrupted
+      assertEquals(Duration.ofMillis(50), interrupted.retryAfter)
+      assertEquals("reported already, so not again", false, interrupted.held)
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `an interruption that finds the connection has held says so`() {
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        awaitReq(session)
+        session.sendText(eoseFrame(SUB))
+        Thread.sleep(300)
+        session.sendClose()
+      }
+      val subscription = subscription(Connections(relay.url)::next, RelayAuth.None)
+
+      assertEquals(Delivery.Subscribed, subscription.next(wait))
+      assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
+      val delivery = subscription.next(wait)
+      assertTrue("got $delivery", delivery is Delivery.Interrupted && delivery.held)
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `the check does nothing on an interrupted thread`() {
+    FakeRelay().use { relay ->
+      val pings = LinkedBlockingQueue<Int>()
+      relay.serve { session ->
+        awaitReq(session)
+        session.nextClientText(10_000)
+        pings.put(session.pingsRead)
+      }
+      val subscription =
+        ReconnectingSubscription(
+          Connections(relay.url)::next, connectTimeout, RelayAuth.None, SUB, filters, backoff, shortLiveness,
+        )
+
+      assertEquals(Delivery.Subscribed, subscription.next(wait))
+      Thread.sleep(150)
+      Thread.currentThread().interrupt()
+      try {
+        assertEquals(null, subscription.next(Duration.ZERO))
+      } finally {
+        assertTrue("the status is left set", Thread.interrupted())
+      }
+      subscription.close()
+      assertEquals(0, pings.poll(5, TimeUnit.SECONDS))
+    }
+  }
+
+  @Test
+  fun `text from the relay counts as hearing from it, so no ping is sent while it talks`() {
+    assertNoPingWhile(framesOf = { session -> session.sendText("[\"NOTICE\",\"still here\"]") })
+  }
+
+  @Test
+  fun `a ping from the relay counts as hearing from it`() {
+    assertNoPingWhile(framesOf = { session -> session.sendPing() })
+  }
+
+  /** Have a relay send a frame every 20 ms, for about six times [shortLiveness]'s ping delay, while
+   * the client finds gaps between them to run its check in, and require that it never pinged. */
+  private fun assertNoPingWhile(framesOf: (FakeRelay.Session) -> Unit) {
+    FakeRelay().use { relay ->
+      val pings = LinkedBlockingQueue<Int>()
+      relay.serve { session ->
+        awaitReq(session)
+        repeat(18) {
+          framesOf(session)
+          // Reads while it waits: a ping from the client would otherwise go uncounted.
+          session.nextClientText(20)
+        }
+        pings.put(session.pingsRead)
+        session.nextClientText(5_000)
+      }
+      val subscription =
+        ReconnectingSubscription(
+          Connections(relay.url)::next, connectTimeout, RelayAuth.None, SUB, filters, backoff, shortLiveness,
+        )
+
+      assertEquals(Delivery.Subscribed, subscription.next(wait))
+      while (pings.isEmpty()) {
+        val delivery = subscription.next(Duration.ofMillis(10))
+        assertTrue("got $delivery", delivery == null || delivery is Delivery.Received)
+      }
+      assertEquals(0, pings.single())
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a ping from the relay is answered`() {
+    FakeRelay().use { relay ->
+      val pongs = LinkedBlockingQueue<Int>()
+      relay.serve { session ->
+        awaitReq(session)
+        session.sendPing()
+        session.nextClientText(500)
+        pongs.put(session.pongsRead)
+        session.nextClientText(5_000)
+      }
+      val connections = Connections(relay.url)
+      val subscription = subscription(connections::next, RelayAuth.None)
+
+      assertEquals(Delivery.Subscribed, subscription.next(wait))
+      assertEquals(1, pongs.poll(5, TimeUnit.SECONDS))
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a consumer that comes back late pings first, and does not give up on a relay that would answer`() {
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        session.pongsToSend = Int.MAX_VALUE
+        // A pong that takes this long lands after the first check past the ping, so a give-up
+        // counted from before the ping would fire first.
+        session.pongDelayMillis = 30
+        awaitReq(session)
+        session.nextClientText(5_000)
+      }
+      val subscription =
+        ReconnectingSubscription(
+          Connections(relay.url)::next, connectTimeout, RelayAuth.None, SUB, filters, backoff, shortLiveness,
+        )
+
+      assertEquals(Delivery.Subscribed, subscription.next(wait))
+      // Past both spans before the check first runs.
+      assertEquals(null, subscription.next(Duration.ofMillis(400)))
+      val end = System.nanoTime() + Duration.ofMillis(300).toNanos()
+      while (System.nanoTime() < end) {
+        assertEquals(null, subscription.next(Duration.ofMillis(20)))
+      }
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `liveness needs positive spans`() {
+    val one = Duration.ofMillis(1)
+    assertThrows(IllegalArgumentException::class.java) { ReconnectingSubscription.Liveness(Duration.ZERO, one) }
+    assertThrows(IllegalArgumentException::class.java) { ReconnectingSubscription.Liveness(one, Duration.ZERO) }
+    assertThrows(IllegalArgumentException::class.java) { ReconnectingSubscription.Liveness(one.negated(), one) }
+  }
+
   @Test
   fun `each attempt waits out the jittered delay it reported`() {
     val attempts = CopyOnWriteArrayList<Long>()
@@ -665,11 +957,8 @@ class ReconnectingSubscriptionTest {
       assertEquals(Delivery.Subscribed, subscription.next(wait))
       assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
       assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
-      assertEquals(
-        "the connection lasted the maximum past its first EOSE",
-        Duration.ofMillis(50),
-        (subscription.next(wait) as Delivery.Interrupted).retryAfter,
-      )
+      assertEquals("the relay was heard the maximum past its first EOSE", Delivery.Held, subscription.next(wait))
+      assertEquals(Duration.ofMillis(50), (subscription.next(wait) as Delivery.Interrupted).retryAfter)
       subscription.close()
     }
   }

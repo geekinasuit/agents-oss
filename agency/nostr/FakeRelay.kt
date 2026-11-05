@@ -98,6 +98,17 @@ class FakeRelay : AutoCloseable {
     private val output = sock.getOutputStream()
     private val input = sock.getInputStream()
 
+    /** How many of a client's pings [nextClientText] answers with a pong. A script that wants a relay
+     * gone silent leaves it zero. */
+    @Volatile var pongsToSend = 0
+
+    /** How long [nextClientText] holds a pong back, for a relay that answers late. */
+    @Volatile var pongDelayMillis = 0L
+
+    /** How many pings and pongs [nextClientText] has read from the client. */
+    @Volatile var pingsRead = 0
+    @Volatile var pongsRead = 0
+
     /** A single complete text message. */
     fun sendText(text: String) = sendFrame(OPCODE_TEXT, text.toByteArray(Charsets.UTF_8), fin = true)
 
@@ -159,7 +170,15 @@ class FakeRelay : AutoCloseable {
             if (frame.fin) return message.toString(Charsets.UTF_8.name())
           }
           OPCODE_CLOSE -> return null
-          OPCODE_PING, OPCODE_PONG -> {} // the client's auto-pong (and any ping): skip, keep reading
+          OPCODE_PING -> {
+            pingsRead++
+            if (pongsToSend > 0) {
+              pongsToSend--
+              Thread.sleep(pongDelayMillis)
+              sendFrame(OPCODE_PONG, frame.payload, fin = true)
+            }
+          }
+          OPCODE_PONG -> pongsRead++
           else -> {} // binary or any other frame: skip, keep reading for text
         }
       }
