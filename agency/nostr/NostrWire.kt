@@ -187,6 +187,11 @@ fun authMessage(event: NostrEvent): String =
  *    as the newest [limit] by `created_at`. It is a SHOULD: a relay may return fewer, and should
  *    not return many more. A limit of zero is stronger: the relay MUST NOT return stored events for
  *    the filter. Events that arrive after EOSE are never limited.
+ *  - [until]: match only events with `created_at` at or before this time, in unix seconds. A filter
+ *    with one also matches no live event newer than that, so it reads history and does not stand in
+ *    for a live subscription. NIP-01 includes an event stamped exactly [until], but no relay has
+ *    been checked against that here, so a caller should not rely on such an event coming back, or
+ *    on its not coming back.
  *
  * [ReconnectingSubscription] sends its REQ again on each new connection, and the relay answers with
  * the stored matching events each time. The connection breaks when the relay sends more messages
@@ -205,13 +210,13 @@ fun authMessage(event: NostrEvent): String =
  * cap on a filter with no limit (NIP-11's `default_limit`) can make the same window, and on such a
  * relay a limit above that cap asks for more stored events than no limit does.
  *
- * `authors`, `since`, `until`, and `ids` are DELIBERATELY OMITTED under one uniform YAGNI
+ * `authors`, `since`, and `ids` are DELIBERATELY OMITTED under one uniform YAGNI
  * rule, no per-field special-casing: none has a caller, and each is a PURE ADDITION when one
  * appears. An `authors` allow-list narrowing is an OPTIONAL efficiency, not a correctness selector —
  * the fold re-verifies every approval's own signature against the allow-list regardless (A4-3:
  * listening never authorizes), so a relay-side author filter authorizes nothing — and it lands when
- * the allow-list wiring does (step 5). A `since`/`until` window belongs to approval-validity expiry,
- * out of scope for this phase. Correctness never rests on any of them: the relay is a hint, not a
+ * the allow-list wiring does (step 5). A `since` window belongs to approval-validity expiry,
+ * out of scope for this phase. Correctness never rests on any filter: the relay is a hint, not a
  * boundary, so what it filters can withhold an approval but never authorize one.
  *
  * An empty filter serializes to `{}` — the NIP-01 "match everything" filter. An empty [kinds] is
@@ -224,6 +229,7 @@ class NostrFilter(
   kinds: List<Int> = emptyList(),
   tags: Map<Char, List<String>> = emptyMap(),
   val limit: Int? = null,
+  val until: Long? = null,
 ) {
   // Immutable snapshots taken at construction. A filter's invariant — every tag value list non-empty —
   // must hold for its whole life, but the caller keeps its own references: without the copy, clearing a
@@ -234,6 +240,7 @@ class NostrFilter(
 
   init {
     require(limit == null || limit >= 0) { "a NIP-01 limit must be zero or more, was $limit" }
+    require(until == null || until >= 0) { "a NIP-01 until must be zero or more, was $until" }
     for ((key, values) in this.tags) {
       require(key in 'a'..'z' || key in 'A'..'Z') {
         "a NIP-01 tag filter key must be a single ASCII letter (a-zA-Z), was '$key'"
@@ -358,16 +365,17 @@ private fun JsonObjectBuilder.putEventFields(
 }
 
 /** The filter as a NIP-01 JSON object, in a fixed key order (kinds, then tag filters by letter, then
- * limit) so the output is deterministic. An empty [kinds] is OMITTED, never emitted as `[]` — an
- * absent condition matches all, an empty one matches none; tag values are non-empty by construction
- * ([NostrFilter] `init`), so every tag emits. A null limit is omitted, and a zero one is emitted,
- * since NIP-01 gives zero a meaning of its own. */
+ * until, then limit) so the output is deterministic. An empty [kinds] is OMITTED, never emitted as
+ * `[]` — an absent condition matches all, an empty one matches none; tag values are non-empty by
+ * construction ([NostrFilter] `init`), so every tag emits. A null until or limit is omitted, and a
+ * zero limit is emitted, since NIP-01 gives zero a meaning of its own. */
 private fun NostrFilter.toJsonObject(): JsonObject =
   buildJsonObject {
     if (kinds.isNotEmpty()) putJsonArray("kinds") { for (k in kinds) add(k) }
     for ((letter, values) in tags.toSortedMap()) {
       putJsonArray("#$letter") { for (v in values) add(v) }
     }
+    if (until != null) put("until", until)
     if (limit != null) put("limit", limit)
   }
 

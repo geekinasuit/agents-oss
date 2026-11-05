@@ -12,6 +12,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Test
@@ -19,10 +20,10 @@ import org.junit.Test
 /**
  * [ReconnectingSubscription] against [FakeRelay]s: the REQ it sends again on a new connection after a
  * relay close, a breach, or a CLOSED for its subscription; messages for another subscription id,
- * passed on; the delay before each attempt and when it resets; authentication before each REQ; what
- * it reports when a connection cannot be opened; and [ReconnectingSubscription.close]. A [FakeRelay]
- * accepts one connection per [FakeRelay.serve], so a cell that expects a reconnect gives the factory
- * a second relay.
+ * passed on; a further REQ on the open connection, against a [StoredEventRelay]; the delay before
+ * each attempt and when it resets; authentication before each REQ; what it reports when a connection
+ * cannot be opened; and [ReconnectingSubscription.close]. A [FakeRelay] accepts one connection per
+ * [FakeRelay.serve], so a cell that expects a reconnect gives the factory a second relay.
  *
  * The NIP-42 cells sign, so the class needs the secp256k1 native at runtime, like
  * [ReconnectingPublisherTest].
@@ -258,6 +259,246 @@ class ReconnectingSubscriptionTest {
       relay.assertScriptClean()
       subscription.close()
     }
+  }
+
+  private fun storedEvent(n: Int, createdAt: Long) = event(n).copy(createdAt = createdAt)
+
+  /** Take from [subscription] the events under [id] up to that id's EOSE, in the order they came. */
+  private fun eventsUntilEose(subscription: ReconnectingSubscription, id: String): List<NostrEvent> {
+    val events = mutableListOf<NostrEvent>()
+    while (true) {
+      val delivery = subscription.next(wait)
+      val message = (delivery as? Delivery.Received)?.message ?: error("expected a message, got $delivery")
+      if (message is RelayMessage.Eose && message.subscriptionId == id) return events
+      if (message is RelayMessage.Event && message.subscriptionId == id) events += message.event
+    }
+  }
+
+  private fun open(relay: StoredEventRelay): ReconnectingSubscription {
+    relay.serveOneConnection()
+    val subscription = subscription(Connections(relay.url)::next, RelayAuth.None)
+    assertEquals(Delivery.Subscribed, subscription.next(wait))
+    return subscription
+  }
+
+  private fun until(until: Long, limit: Int? = null) =
+    listOf(NostrFilter(kinds = listOf(1), limit = limit, until = until))
+
+  @Test
+  fun `a further REQ with until gets the older events, newest first, under its own id`() {
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE).use { relay ->
+      relay.store(storedEvent(1, 100), storedEvent(2, 200), storedEvent(3, 300))
+      val subscription = open(relay)
+      assertEquals(3, eventsUntilEose(subscription, SUB).size)
+
+      assertTrue(subscription.requestOnOpenConnection("page", until(200)))
+
+      assertEquals(listOf(storedEvent(2, 200), storedEvent(1, 100)), eventsUntilEose(subscription, "page"))
+      relay.assertClean()
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `the two readings of until differ only on the boundary`() {
+    val expected =
+      mapOf(
+        StoredEventRelay.UntilOrder.AT_OR_BEFORE to listOf(storedEvent(2, 200), storedEvent(1, 100)),
+        StoredEventRelay.UntilOrder.BEFORE to listOf(storedEvent(1, 100)),
+      )
+    for ((order, events) in expected) {
+      StoredEventRelay(order).use { relay ->
+        relay.store(storedEvent(1, 100), storedEvent(2, 200), storedEvent(3, 300))
+        val subscription = open(relay)
+        eventsUntilEose(subscription, SUB)
+
+        assertTrue(subscription.requestOnOpenConnection("page", until(200)))
+
+        assertEquals("under $order", events, eventsUntilEose(subscription, "page"))
+        subscription.close()
+      }
+    }
+  }
+
+  @Test
+  fun `a relay's clamp cuts a further REQ to the newest it allows, below the REQ's own limit`() {
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE, clamp = 2).use { relay ->
+      relay.store(storedEvent(1, 100), storedEvent(2, 200), storedEvent(3, 300))
+      val subscription = open(relay)
+      assertEquals("the kept REQ is clamped too", 2, eventsUntilEose(subscription, SUB).size)
+
+      assertTrue(subscription.requestOnOpenConnection("page", until(300, limit = 3)))
+
+      assertEquals(listOf(storedEvent(3, 300), storedEvent(2, 200)), eventsUntilEose(subscription, "page"))
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a further REQ's limit cuts it to the newest events`() {
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE).use { relay ->
+      relay.store(storedEvent(1, 100), storedEvent(2, 200), storedEvent(3, 300))
+      val subscription = open(relay)
+      eventsUntilEose(subscription, SUB)
+
+      assertTrue(subscription.requestOnOpenConnection("page", until(300, limit = 2)))
+
+      assertEquals(listOf(storedEvent(3, 300), storedEvent(2, 200)), eventsUntilEose(subscription, "page"))
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `events of equal created_at come lowest id first, so a limit keeps the lowest ids`() {
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE).use { relay ->
+      relay.store(storedEvent(3, 100), storedEvent(1, 100), storedEvent(2, 100))
+      val subscription = open(relay)
+      eventsUntilEose(subscription, SUB)
+
+      assertTrue(subscription.requestOnOpenConnection("page", until(100, limit = 2)))
+
+      assertEquals(listOf(storedEvent(1, 100), storedEvent(2, 100)), eventsUntilEose(subscription, "page"))
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a further REQ gets only the kinds and tag values its filter names`() {
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE).use { relay ->
+      val wanted = storedEvent(1, 100).copy(tags = listOf(listOf("p", "lead")))
+      val otherValue = storedEvent(2, 100).copy(tags = listOf(listOf("p", "someone")))
+      val otherTag = storedEvent(3, 100).copy(tags = listOf(listOf("e", "lead")))
+      val untagged = storedEvent(4, 100)
+      val otherKind = storedEvent(5, 100).copy(kind = 2, tags = listOf(listOf("p", "lead")))
+      relay.store(wanted, otherValue, otherTag, untagged, otherKind)
+      val subscription = open(relay)
+      eventsUntilEose(subscription, SUB)
+
+      val filter = NostrFilter(kinds = listOf(1), tags = mapOf('p' to listOf("lead")))
+      assertTrue(subscription.requestOnOpenConnection("page", listOf(filter)))
+
+      assertEquals(listOf(wanted), eventsUntilEose(subscription, "page"))
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a further REQ or CLOSE whose send fails reports false and leaves the kept subscription live`() {
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE).use { relay ->
+      val subscription = open(relay)
+      eventsUntilEose(subscription, SUB)
+      // A lone surrogate is a valid subscription id by length, and has no UTF-8 form to send.
+      val unsendable = Char(0xD800).toString()
+
+      assertFalse(subscription.requestOnOpenConnection(unsendable, until(100)))
+      assertFalse(subscription.closeOnOpenConnection(unsendable))
+
+      relay.publish(storedEvent(1, 100))
+      assertEquals(received(storedEvent(1, 100)), subscription.next(wait))
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a malformed id or empty filters throw with no connection open, as they do on one`() {
+    val subscription = subscription({ error("not opened") }, RelayAuth.None)
+
+    assertThrows(IllegalArgumentException::class.java) { subscription.requestOnOpenConnection("", until(100)) }
+    assertThrows(IllegalArgumentException::class.java) { subscription.requestOnOpenConnection("page", emptyList()) }
+    assertThrows(IllegalArgumentException::class.java) { subscription.closeOnOpenConnection("") }
+    subscription.close()
+  }
+
+  @Test
+  fun `the kept subscription stays live while a further REQ runs, and after its CLOSE`() {
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE).use { relay ->
+      val subscription = open(relay)
+      eventsUntilEose(subscription, SUB)
+      assertTrue(subscription.requestOnOpenConnection("page", until(100)))
+      eventsUntilEose(subscription, "page")
+
+      relay.publish(storedEvent(1, 50_000))
+      assertEquals(
+        "a filter with until matches no newer event, so only the kept subscription gets it",
+        received(storedEvent(1, 50_000)),
+        subscription.next(wait),
+      )
+
+      assertTrue(subscription.closeOnOpenConnection("page"))
+      assertTrue("the relay ended the subscription", waitUntil(3_000) { "page" in relay.closed })
+      relay.publish(storedEvent(2, 50))
+      assertEquals(received(storedEvent(2, 50)), subscription.next(wait))
+      assertEquals("the closed id gets nothing more", null, subscription.next(Duration.ofMillis(200)))
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a further REQ is not sent again on a new connection`() {
+    FakeRelay().use { first ->
+      FakeRelay().use { second ->
+        val secondFrames = LinkedBlockingQueue<String>()
+        first.serve { session ->
+          awaitReq(session)
+          check(session.nextClientText(3_000)!!.startsWith("[\"REQ\",\"page\",")) { "no further REQ" }
+          session.sendClose()
+        }
+        second.serve { session ->
+          secondFrames.put(awaitReq(session))
+          secondFrames.put(session.nextClientText(500) ?: NOTHING)
+        }
+        val subscription = subscription(Connections(first.url, second.url)::next, RelayAuth.None)
+        assertEquals(Delivery.Subscribed, subscription.next(wait))
+        assertTrue(subscription.requestOnOpenConnection("page", until(100)))
+
+        assertTrue(subscription.next(wait) is Delivery.Interrupted)
+        assertEquals(Delivery.Subscribed, subscription.next(wait))
+
+        assertTrue(secondFrames.poll(5, TimeUnit.SECONDS)!!.startsWith("[\"REQ\",\"$SUB\","))
+        assertEquals(NOTHING, secondFrames.poll(5, TimeUnit.SECONDS))
+        first.assertScriptClean()
+        second.assertScriptClean()
+        subscription.close()
+      }
+    }
+  }
+
+  @Test
+  fun `a further REQ or its CLOSE with no connection open reports false and sends nothing`() {
+    val opened = AtomicInteger()
+    val subscription =
+      subscription(
+        {
+          opened.incrementAndGet()
+          error("not opened")
+        },
+        RelayAuth.None,
+      )
+
+    assertFalse(subscription.requestOnOpenConnection("page", until(100)))
+    assertFalse(subscription.closeOnOpenConnection("page"))
+    assertEquals("neither call opens a connection", 0, opened.get())
+    subscription.close()
+  }
+
+  @Test
+  fun `after close a further REQ reports false`() {
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE).use { relay ->
+      val subscription = open(relay)
+      subscription.close()
+
+      assertFalse(subscription.requestOnOpenConnection("page", until(100)))
+      assertFalse(subscription.closeOnOpenConnection("page"))
+    }
+  }
+
+  @Test
+  fun `the kept subscription's id is refused to a further REQ and its CLOSE`() {
+    val subscription = subscription({ error("not opened") }, RelayAuth.None)
+
+    assertThrows(IllegalArgumentException::class.java) { subscription.requestOnOpenConnection(SUB, until(100)) }
+    assertThrows(IllegalArgumentException::class.java) { subscription.closeOnOpenConnection(SUB) }
+    subscription.close()
   }
 
   @Test

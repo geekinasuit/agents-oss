@@ -399,6 +399,31 @@ class NostrWireTest {
     }
   }
 
+  @Test
+  fun `NostrFilter serializes until after its tag filters and before its limit`() {
+    val filter = NostrFilter(kinds = listOf(1059), tags = mapOf('p' to listOf("pk")), until = 1700000000L, limit = 100)
+    assertEquals(
+      """["REQ","s",{"kinds":[1059],"#p":["pk"],"until":1700000000,"limit":100}]""",
+      reqMessage("s", listOf(filter)),
+    )
+  }
+
+  @Test
+  fun `a NostrFilter with no until omits it, and one of zero is emitted`() {
+    assertEquals("""["REQ","s",{}]""", reqMessage("s", listOf(NostrFilter(until = null))))
+    assertEquals("""["REQ","s",{"until":0}]""", reqMessage("s", listOf(NostrFilter(until = 0))))
+  }
+
+  @Test
+  fun `NostrFilter rejects a negative until`() {
+    try {
+      NostrFilter(until = -1)
+      throw AssertionError("expected IllegalArgumentException for a negative until")
+    } catch (e: IllegalArgumentException) {
+      assertTrue(e.message!!.contains("zero or more"))
+    }
+  }
+
   private companion object {
     // The six characters of the JSON escape for U+D800, a high surrogate, built from two parts so this
     // source holds no escape sequence of its own.

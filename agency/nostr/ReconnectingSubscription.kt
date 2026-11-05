@@ -49,7 +49,8 @@ import java.util.concurrent.TimeUnit
  * [next] and [close] run one at a time, but [close] does not wait out a [next] that is waiting for a
  * message or for the delay: those waits check for [close] about every 100 ms. It does wait for a
  * connection attempt in progress, which [connectTimeout], the auth timeout and [RelayConnection]'s
- * own allowances bound, plus however long [newConnection] takes.
+ * own allowances bound, plus however long [newConnection] takes, and for a send by
+ * [requestOnOpenConnection] or [closeOnOpenConnection], which [connectTimeout] bounds.
  */
 class ReconnectingSubscription(
   private val newConnection: () -> RelayConnection,
@@ -150,6 +151,39 @@ class ReconnectingSubscription(
             ?: interrupt("connection failed: ${conn.failureReason()}")
         else -> null
       }
+    }
+  }
+
+  /**
+   * Send a REQ under another subscription id, [id], on the open connection, beside the subscription
+   * this class keeps, and return whether it was sent. False means no connection is open, or the send
+   * failed. A failed send can leave the connection up and the kept subscription running; one that
+   * broke the connection shows at [next]. Its EVENTs, EOSE and CLOSED come through [next] in
+   * [Delivery.Received], with the id they carry, and do not change the delay.
+   *
+   * It lasts as long as the connection: a new connection carries only the subscription this class
+   * keeps. Its stored events share the connection's queue with everything else, so a caller sends one
+   * at a time, with a [NostrFilter.limit], and takes its EOSE from [next] before it sends another.
+   * [next]'s caller must make this call too: [next] holds what this call waits for while it waits. A
+   * malformed [id], [id] equal to the kept subscription's, or empty [filters] throws, connected or not.
+   */
+  fun requestOnOpenConnection(id: String, filters: List<NostrFilter>): Boolean {
+    requireValidSubscriptionId(id)
+    require(id != subscriptionId) { "the kept subscription's id is not available to a further REQ" }
+    require(filters.isNotEmpty()) { "a REQ must carry at least one filter (NIP-01)" }
+    return synchronized(lock) {
+      connection?.subscribe(id, filters, connectTimeout) == SubscribeResult.Sent
+    }
+  }
+
+  /** End what [requestOnOpenConnection] sent under [id], and return whether the CLOSE was sent. False
+   * means no connection is open, or the send failed. A malformed [id], or [id] equal to the kept
+   * subscription's, throws, connected or not. */
+  fun closeOnOpenConnection(id: String): Boolean {
+    requireValidSubscriptionId(id)
+    require(id != subscriptionId) { "the kept subscription is ended by close" }
+    return synchronized(lock) {
+      connection?.closeSubscription(id, connectTimeout) == SubscribeResult.Sent
     }
   }
 
