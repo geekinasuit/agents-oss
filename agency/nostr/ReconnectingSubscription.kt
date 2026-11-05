@@ -37,12 +37,19 @@ import java.util.concurrent.TimeUnit
  *
  * The delay before a new connection is [Backoff.initial] after the first interruption or failed
  * attempt, and doubles after each one that follows, up to [Backoff.max]. It returns to
- * [Backoff.initial] only when the connection has lasted [Backoff.max] past the relay's EOSE for
- * [subscriptionId]. EOSE alone does not reset it: a struggling relay can serve a replay and then drop
- * the connection, and a replay is the costly part of a connection, so a reset there would send it
- * another replay at once. So a relay that keeps dropping the subscription, like one that is down or
- * refuses the connection, the authentication or the subscription, is tried at most once per
- * [Backoff.max] once the delay has grown.
+ * [Backoff.initial] only when the connection has held: the relay was still there [Backoff.max] past
+ * its EOSE for [subscriptionId]. With [liveness] that means it was heard from then, so a connection
+ * that stayed open while silent has not held. With none it means the connection was still open.
+ * EOSE alone does not reset the delay: a struggling relay can serve a replay and then drop the
+ * connection, and a replay is the costly part of a connection, so a reset there would send it another
+ * replay at once. So a relay that keeps dropping the subscription, like one that is down or refuses
+ * the connection, the authentication or the subscription, is tried at most once per [Backoff.max] once
+ * the delay has grown. [next] reports a connection that has held, once, as [Delivery.Held], so a
+ * caller can use the same rule.
+ *
+ * With [liveness] set, a connection that goes silent is found and replaced, however it failed: nothing
+ * else would show a relay that stopped answering, or a connection that died with no close reaching
+ * the client, until the next send. With none, that goes unseen.
  *
  * [newConnection] belongs to the deployment and has the contract [ReconnectingPublisher] states: a new
  * [RelayConnection], around a new [RelayConfig] and a new [SecretKeyHex], on every call. An exception
@@ -53,17 +60,19 @@ import java.util.concurrent.TimeUnit
  * message or for the delay: those waits check for [close] about every 100 ms. It does wait for a
  * connection attempt in progress, which [connectTimeout], the auth timeout and [RelayConnection]'s
  * own allowances bound, plus however long [newConnection] takes, and for a send by
- * [requestOnOpenConnection] or [closeOnOpenConnection], which [connectTimeout] bounds.
+ * [requestOnOpenConnection] or [closeOnOpenConnection], or a [Liveness] ping, which [connectTimeout]
+ * bounds.
  */
 class ReconnectingSubscription(
   private val newConnection: () -> RelayConnection,
-  /** Bounds the connect, and separately the send of the REQ. */
+  /** Bounds the connect, and separately each send: the REQ, a further REQ or CLOSE, a ping. */
   private val connectTimeout: Duration,
   // Required, with no default: whether the relay needs NIP-42 is the deployment's to say.
   private val auth: RelayAuth,
   private val subscriptionId: String,
   filters: List<NostrFilter>,
   private val backoff: Backoff,
+  private val liveness: Liveness? = null,
 ) {
   private val filters: List<NostrFilter> = filters.toList()
 
@@ -90,6 +99,23 @@ class ReconnectingSubscription(
     }
   }
 
+  /**
+   * How to tell a connection that has gone silent. After [pingAfter] with no text, ping or pong from
+   * the relay, [next] sends a ping. If [giveUpAfter] passes after the ping with still none, it reports
+   * [Delivery.Interrupted] and closes the connection. A relay that does not answer pings is treated
+   * as gone when it is otherwise quiet. The check runs when [next] finds no message, on a thread that
+   * is not interrupted, so a caller that passes [next] a long timeout sees it that late.
+   */
+  class Liveness(val pingAfter: Duration, val giveUpAfter: Duration) {
+    internal val pingAfterNanos: Long = pingAfter.toNanos()
+    internal val giveUpAfterNanos: Long = giveUpAfter.toNanos()
+
+    init {
+      require(!pingAfter.isNegative && !pingAfter.isZero) { "pingAfter must be positive, was $pingAfter" }
+      require(!giveUpAfter.isNegative && !giveUpAfter.isZero) { "giveUpAfter must be positive, was $giveUpAfter" }
+    }
+  }
+
   /** What one [next] reports. */
   sealed interface Delivery {
     /** A message from the relay, as it arrived. */
@@ -103,7 +129,11 @@ class ReconnectingSubscription(
      * subscription, as [detail] says. The next connection is tried once [retryAfter] has passed.
      * [detail] quotes no text the relay sent, though a relay close's status code is the relay's
      * number, and a CLOSED's reason is kept to its standard NIP-01 or NIP-42 prefix. */
-    data class Interrupted(val detail: String, val retryAfter: Duration) : Delivery
+    data class Interrupted(val detail: String, val retryAfter: Duration, val held: Boolean = false) : Delivery
+
+    /** The connection has held, as the class KDoc says. Reported once per connection. An interruption
+     * that finds the same thing first says so in [Interrupted.held] instead. */
+    data object Held : Delivery
 
     /** A connection could not be opened, authenticated or subscribed on, as [detail] says. The next
      * attempt comes once [retryAfter] has passed. [detail] quotes no text the relay sent, though a
@@ -121,6 +151,8 @@ class ReconnectingSubscription(
   private var delayMillis = backoff.initialMillis
   private var nextAttemptNanos = System.nanoTime()
   private var servedAtNanos: Long? = null
+  private var pingedAfterHeardAt: Long? = null
+  private var pingedAtNanos = 0L
 
   /**
    * The next thing to report, or null if there is none before [timeout] passes. When no connection
@@ -131,6 +163,7 @@ class ReconnectingSubscription(
    * [connectTimeout], the auth timeout and the REQ's send, plus [RelayConnection]'s fixed allowances
    * for the handshake and for closing a connection that fails, plus however long [newConnection]
    * takes. A negative [timeout] counts as zero, and one longer than about 146 years is cut to that.
+   * With [liveness], a ping's send can add up to [connectTimeout].
    *
    * On a thread whose interrupt status is set, it makes no connection attempt. It reports only a
    * message or a fault the open connection already holds, and otherwise returns null, leaving the
@@ -146,6 +179,8 @@ class ReconnectingSubscription(
         if (!awaitAttemptTime(deadline)) return if (closed) Delivery.Stopped else null
         return open()
       }
+      // Before the wait, so a relay that keeps sending is seen to have held too.
+      if (!Thread.currentThread().isInterrupted && noteHeld(conn)) return Delivery.Held
       val message = receive(conn, deadline)
       return when {
         message != null -> deliver(message)
@@ -156,9 +191,26 @@ class ReconnectingSubscription(
         conn.hasFailed() ->
           conn.receive(Duration.ZERO)?.let { deliver(it) }
             ?: interrupt("connection failed: ${conn.failureReason()}")
-        else -> null
+        else -> liveness?.let { checkLiveness(conn, it) }
       }
     }
+  }
+
+  // Ping once for each silence, and give up when the ping has gone unanswered too long. The wait is
+  // counted from the ping, so a consumer slow to come here does not use it up.
+  private fun checkLiveness(conn: RelayConnection, l: Liveness): Delivery? {
+    if (Thread.currentThread().isInterrupted) return null
+    val heard = conn.heardAtNanos()
+    val now = System.nanoTime()
+    if (pingedAfterHeardAt == heard) {
+      return if (now - pingedAtNanos >= l.giveUpAfterNanos) interrupt("the relay went silent") else null
+    }
+    if (now - heard >= l.pingAfterNanos) {
+      pingedAfterHeardAt = heard
+      conn.ping(connectTimeout)
+      pingedAtNanos = System.nanoTime()
+    }
+    return null
   }
 
   /**
@@ -238,21 +290,29 @@ class ReconnectingSubscription(
   }
 
   private fun interrupt(detail: String): Delivery {
+    val held = connection?.let { noteHeld(it) } ?: false
     connection?.close()
     connection = null
-    return Delivery.Interrupted(detail, scheduleRetry())
+    return Delivery.Interrupted(detail, scheduleRetry(), held)
+  }
+
+  // Whether [conn] has just been found to have held, which starts the delay over. Measured to the
+  // last time the relay was heard, when something is listening for it, so a connection that sat
+  // silent does not count for the time it sat.
+  private fun noteHeld(conn: RelayConnection): Boolean {
+    val served = servedAtNanos ?: return false
+    val stillThereAt = if (liveness != null) conn.heardAtNanos() else System.nanoTime()
+    if (stillThereAt - served < TimeUnit.MILLISECONDS.toNanos(backoff.maxMillis)) return false
+    servedAtNanos = null
+    delayMillis = backoff.initialMillis
+    return true
   }
 
   // Schedule the next attempt after the current delay, with its jitter, double the delay for the
-  // attempt after that, up to the maximum, and return what this attempt waits. A connection that
-  // outlasted the maximum past its EOSE served well enough that the delay starts over.
+  // attempt after that, up to the maximum, and return what this attempt waits.
   private fun scheduleRetry(): Duration {
     val now = System.nanoTime()
-    val served = servedAtNanos
     servedAtNanos = null
-    if (served != null && now - served >= TimeUnit.MILLISECONDS.toNanos(backoff.maxMillis)) {
-      delayMillis = backoff.initialMillis
-    }
     val delay = delayMillis
     val wait = delay + (delay * backoff.jitter * ThreadLocalRandom.current().nextDouble()).toLong()
     nextAttemptNanos = now + TimeUnit.MILLISECONDS.toNanos(wait)

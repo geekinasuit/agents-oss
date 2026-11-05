@@ -176,6 +176,7 @@ object ScriptedLeadRunner {
             connectTimeout = TIMEOUT,
             auth = options.auth,
             backoff = BACKOFF,
+            liveness = LIVENESS,
             resubscribeBackoff = RESUBSCRIBE_BACKOFF,
             leadKey = key,
             approvalsAwaited = host::approvalsAwaited,
@@ -307,9 +308,13 @@ object ScriptedLeadRunner {
 
   private val TIMEOUT: Duration = Duration.ofSeconds(10)
   // A lead added to a relay can take this long to notice. A shorter maximum hammers a relay that is
-  // struggling or refusing it. The maximum is also how long a connection must hold past its EOSE to
-  // count as healthy, so a peer that closes idle connections sooner keeps the delay at the maximum.
+  // struggling or refusing it. The maximum is also how long a relay must stay heard from past its
+  // EOSE for a connection to count as healthy, so one that drops connections sooner keeps the delay
+  // at the maximum.
   private val BACKOFF = ReconnectingSubscription.Backoff(Duration.ofMillis(500), Duration.ofSeconds(60), jitter = 0.25)
+  // An idle connection is pinged every 20 seconds, which also keeps one alive past a peer's idle limit
+  // if the limit is longer than that, and is replaced after 20 more with no answer.
+  private val LIVENESS = ReconnectingSubscription.Liveness(Duration.ofSeconds(20), Duration.ofSeconds(20))
   private val RESUBSCRIBE_BACKOFF = ReconnectingSubscription.Backoff(Duration.ofSeconds(1), Duration.ofSeconds(30))
   private const val SHUTDOWN_WAIT_SECONDS = 15L
 

@@ -9,10 +9,12 @@ import java.net.http.HttpConnectTimeoutException
 import java.net.http.HttpTimeoutException
 import java.net.http.WebSocket
 import java.net.http.WebSocketHandshakeException
+import java.nio.ByteBuffer
 import java.security.SecureRandom
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.BlockingQueue
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
@@ -232,6 +234,7 @@ class RelayConnection(
   // means the socket is dead; every wait checks it so a caller never blocks past the connection's
   // life. AtomicReference so the listener thread and the caller thread agree on the first cause.
   private val failure = AtomicReference<String?>(null)
+  @Volatile private var heardAtNanos: Long = System.nanoTime()
 
   // How far inbound delivery has got, so a test can say where a delivery stopped: onText calls,
   // characters received in them, complete messages handed to deliver(), and messages the depth
@@ -513,6 +516,24 @@ class RelayConnection(
     }
   }
 
+  /**
+   * Send a WebSocket ping, and report only whether it went onto the wire. A relay's pong moves
+   * [heardAtNanos], as its text and pings do. A stalled send breaches the connection, as for
+   * [subscribe]. Never throws for a remote fault.
+   */
+  fun ping(timeout: Duration): SubscribeResult {
+    val ws = webSocket ?: return SubscribeResult.Failed("not connected")
+    failure.get()?.let { return SubscribeResult.Failed("connection failed: $it") }
+    awaitSendOrBreach(ws, timeout) { ws.sendPing(ByteBuffer.allocate(0)) }?.let {
+      return SubscribeResult.Failed("could not send a ping: $it")
+    }
+    return SubscribeResult.Sent
+  }
+
+  /** The [System.nanoTime] of the last text, ping or pong the relay sent, or of connecting if it has
+   * sent none. A binary frame does not count: a relay has no reason to send one. */
+  fun heardAtNanos(): Long = heardAtNanos
+
   /** Whether the connection has recorded a terminal fault (error, relay close, a bounds breach, or a
    * stalled send). Once true it stays true. */
   fun hasFailed(): Boolean = failure.get() != null
@@ -657,8 +678,11 @@ class RelayConnection(
   // pending send either — so the broad catch keeps this method's "never throws for a send fault"
   // contract while breaching only the two cases that actually leave a send in flight.
   private fun sendFrameOrBreach(ws: WebSocket, frame: String, budget: Duration): String? =
+    awaitSendOrBreach(ws, budget) { ws.sendText(frame, true) }
+
+  private fun awaitSendOrBreach(ws: WebSocket, budget: Duration, send: () -> CompletableFuture<WebSocket>): String? =
     try {
-      ws.sendText(frame, true).get(budget.toMillis(), TimeUnit.MILLISECONDS)
+      send().get(budget.toMillis(), TimeUnit.MILLISECONDS)
       null
     } catch (e: TimeoutException) {
       val reason = "send did not complete within ${budget.toMillis()}ms"
@@ -694,10 +718,24 @@ class RelayConnection(
     private val assembling = StringBuilder()
 
     override fun onOpen(webSocket: WebSocket) {
+      heardAtNanos = System.nanoTime()
       webSocket.request(1)
     }
 
+    override fun onPong(webSocket: WebSocket, message: ByteBuffer): CompletionStage<*>? {
+      heardAtNanos = System.nanoTime()
+      webSocket.request(1)
+      return null
+    }
+
+    override fun onPing(webSocket: WebSocket, message: ByteBuffer): CompletionStage<*>? {
+      heardAtNanos = System.nanoTime()
+      webSocket.request(1)
+      return null
+    }
+
     override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? {
+      heardAtNanos = System.nanoTime()
       textCalls++
       charsReceived += data.length
       // SIZE bound on the ACCUMULATED buffer, checked on every fragment: the breach can arrive
@@ -720,8 +758,8 @@ class RelayConnection(
         }
       // Replenish demand on EVERY onText, per delivery (per fragment) — verified empirically: demand
       // is NOT auto-replenished for an overridden onText, and it is consumed per fragment, so a
-      // multi-fragment message stalls mid-assembly without this. (onPing/onPong/onBinary are left
-      // as JDK defaults, which replenish demand and auto-answer a ping — also verified.)
+      // multi-fragment message stalls mid-assembly without this. (onBinary is left as the JDK's
+      // default, which replenishes demand. The JDK answers a ping itself, whatever onPing returns.)
       webSocket.request(1)
       if (complete != null) deliver(webSocket, complete)
       return null

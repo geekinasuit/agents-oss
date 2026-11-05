@@ -90,6 +90,7 @@ class ApprovalIngressTest {
       ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(50)),
     approvalsAwaited: () -> Boolean = { false },
     backoff: ReconnectingSubscription.Backoff = ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(50)),
+    liveness: ReconnectingSubscription.Liveness? = null,
     reporter: IngressReporter = IngressReporter {},
     reportAfterFailures: Int = 2,
     reportInterval: Duration = Duration.ZERO,
@@ -100,6 +101,7 @@ class ApprovalIngressTest {
       connectTimeout = Duration.ofSeconds(3),
       auth = RelayAuth.None,
       backoff = backoff,
+      liveness = liveness,
       resubscribeBackoff = resubscribeBackoff,
       leadKey = SecretKeyHex.ofHexString(LEAD_SECRET),
       approvalsAwaited = approvalsAwaited,
@@ -676,6 +678,82 @@ class ApprovalIngressTest {
   }
 
   @Test
+  fun aConnectionThatGoesSilentAfterItsReplayIsReplacedAndTheApprovalArrives() =
+    FakeRelay().use { silent ->
+      FakeRelay().use { next ->
+        silent.serve { session ->
+          session.nextClientText(5_000) ?: error("no REQ")
+          session.sendText("[\"EOSE\",\"${ApprovalIngress.SUBSCRIPTION_ID}\"]")
+          session.nextClientText(5_000)
+        }
+        next.replays(approvalWrap("g-after", "n".repeat(64), "d".repeat(64)))
+        val sink = RecordingSink { ApprovalAccept.RECORDED }
+        val ingress =
+          ingress(
+            Connections(silent.url, next.url),
+            sink,
+            backoff = ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofSeconds(2)),
+            liveness = ReconnectingSubscription.Liveness(Duration.ofMillis(50), Duration.ofMillis(50)),
+          )
+        ingress.runUntil { sink.seen.size == 1 }
+        assertEquals("the silent connection was replaced once", 1L, ingress.counts().interruptions)
+        ingress.close()
+      }
+    }
+
+  @Test
+  fun aRelayThatGoesSilentAfterEveryReplayIsReportedAndNeverCountsAsHeld() {
+    val relays =
+      List(3) { FakeRelay() }.onEach { relay ->
+        relay.serve { session ->
+          session.nextClientText(5_000) ?: error("no REQ")
+          session.sendText("[\"EOSE\",\"${ApprovalIngress.SUBSCRIPTION_ID}\"]")
+          session.nextClientText(5_000)
+        }
+      }
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        backoff = ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofSeconds(2)),
+        liveness = ReconnectingSubscription.Liveness(Duration.ofMillis(50), Duration.ofMillis(50)),
+        reporter = { reports += it },
+        reportAfterFailures = 3,
+      )
+    ingress.runUntil { reports.size == 1 }
+    assertTrue(reports.single(), reports.single().contains("the relay went silent"))
+    ingress.closeWith(relays)
+  }
+
+  @Test
+  fun aRelayThatAnswersOnePingAfterEveryReplayAndGoesSilentIsReported() {
+    val relays =
+      List(3) { FakeRelay() }.onEach { relay ->
+        relay.serve { session ->
+          session.pongsToSend = 1
+          session.nextClientText(5_000) ?: error("no REQ")
+          session.sendText("[\"EOSE\",\"${ApprovalIngress.SUBSCRIPTION_ID}\"]")
+          session.nextClientText(5_000)
+        }
+      }
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        // Each connection stays open past this maximum, with the relay heard for less of it.
+        backoff = ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(150)),
+        liveness = ReconnectingSubscription.Liveness(Duration.ofMillis(50), Duration.ofMillis(50)),
+        reporter = { reports += it },
+        reportAfterFailures = 3,
+      )
+    ingress.runUntil { reports.isNotEmpty() }
+    assertTrue(reports.toString(), reports.first().contains("the relay went silent"))
+    ingress.closeWith(relays)
+  }
+
+  @Test
   fun aReplayThatFinishesInTimeIsNotReportedAsSilent() =
     FakeRelay().use { relay ->
       relay.replays()
@@ -741,6 +819,22 @@ class ApprovalIngressTest {
     val end = System.nanoTime() + Duration.ofMillis(400).toNanos()
     while (System.nanoTime() < end) ingress.step(Duration.ofMillis(50))
     assertEquals(reports.toString(), 0, reports.count { "arriving again" in it })
+    ingress.closeWith(relays)
+  }
+
+  @Test
+  fun aConnectionFoundToHaveHeldOnlyWhenItDroppedStillEndsTheOutage() {
+    // The drop lands inside one step's wait, past the maximum, so the interruption carries the news.
+    val relays = refusing(1) + servingThenDropping(holdMillis = 70)
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        reporter = { reports += it },
+        reportAfterFailures = 1,
+      )
+    ingress.runUntil { reports.any { "arriving again" in it } }
     ingress.closeWith(relays)
   }
 
@@ -1066,6 +1160,7 @@ class ApprovalIngressTest {
         Duration.ofSeconds(1),
         RelayAuth.None,
         ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(10)),
+        null,
         ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(10)),
         key,
         { false },
