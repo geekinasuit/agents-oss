@@ -2,6 +2,7 @@ package com.geekinasuit.agency.nostr
 
 import com.geekinasuit.agency.nostr.ReconnectingSubscription.Delivery
 import java.time.Duration
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -533,42 +534,174 @@ class ReconnectingSubscriptionTest {
   }
 
   @Test
-  fun `EOSE for the subscription resets the delay, and EOSE for another id does not`() {
-    FakeRelay().use { first ->
-      FakeRelay().use { second ->
-        first.serve { session ->
-          awaitReq(session)
-          session.sendText(eoseFrame("other"))
-          session.sendClose()
-        }
-        second.serve { session ->
-          awaitReq(session)
-          session.sendText(eoseFrame(SUB))
-          session.sendClose()
-        }
-        // Two refused attempts first, so the delay has grown before the first relay is reached.
-        val connections = Connections(REFUSED_URL, REFUSED_URL, first.url, second.url)
-        val subscription = subscription(connections::next, RelayAuth.None)
+  fun `only a connection that lasts the maximum past its EOSE resets the delay`() {
+    FakeRelay().use { other ->
+      FakeRelay().use { dropped ->
+        FakeRelay().use { lasted ->
+          other.serve { session ->
+            awaitReq(session)
+            session.sendText(eoseFrame("other"))
+            Thread.sleep(300)
+            session.sendClose()
+          }
+          dropped.serve { session ->
+            awaitReq(session)
+            session.sendText(eoseFrame(SUB))
+            session.sendClose()
+          }
+          lasted.serve { session ->
+            awaitReq(session)
+            session.sendText(eoseFrame(SUB))
+            Thread.sleep(300)
+            session.sendClose()
+          }
+          // Two refused attempts first, so the delay has grown before the first relay is reached.
+          val connections = Connections(REFUSED_URL, REFUSED_URL, other.url, dropped.url, lasted.url)
+          val subscription = subscription(connections::next, RelayAuth.None)
 
-        assertEquals(Duration.ofMillis(50), (subscription.next(wait) as Delivery.Unavailable).retryAfter)
-        assertEquals(Duration.ofMillis(100), (subscription.next(wait) as Delivery.Unavailable).retryAfter)
-        assertEquals(Delivery.Subscribed, subscription.next(wait))
-        assertEquals(Delivery.Received(RelayMessage.Eose("other")), subscription.next(wait))
-        assertEquals(
-          "an EOSE for another id leaves the delay as it was",
-          Duration.ofMillis(200),
-          (subscription.next(wait) as Delivery.Interrupted).retryAfter,
+          assertEquals(Duration.ofMillis(50), (subscription.next(wait) as Delivery.Unavailable).retryAfter)
+          assertEquals(Duration.ofMillis(100), (subscription.next(wait) as Delivery.Unavailable).retryAfter)
+          assertEquals(Delivery.Subscribed, subscription.next(wait))
+          assertEquals(Delivery.Received(RelayMessage.Eose("other")), subscription.next(wait))
+          assertEquals(
+            "an EOSE for another id does not count, however long the connection lasts",
+            Duration.ofMillis(200),
+            (subscription.next(wait) as Delivery.Interrupted).retryAfter,
+          )
+          assertEquals(Delivery.Subscribed, subscription.next(wait))
+          assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
+          assertEquals(
+            "a relay that serves the replay and drops at once gets no reset",
+            Duration.ofMillis(200),
+            (subscription.next(wait) as Delivery.Interrupted).retryAfter,
+          )
+          assertEquals(Delivery.Subscribed, subscription.next(wait))
+          assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
+          assertEquals(
+            "a connection that lasted the maximum past its EOSE resets the delay",
+            Duration.ofMillis(50),
+            (subscription.next(wait) as Delivery.Interrupted).retryAfter,
+          )
+          other.assertScriptClean()
+          dropped.assertScriptClean()
+          lasted.assertScriptClean()
+          subscription.close()
+        }
+      }
+    }
+  }
+
+  @Test
+  fun `each delay gets a jitter of up to its fraction`() {
+    val subscription =
+      subscription(
+        { RelayConnection(RelayConfig(REFUSED_URL, SecretKeyHex.ofHexString(key))) },
+        RelayAuth.None,
+        ReconnectingSubscription.Backoff(Duration.ofMillis(40), Duration.ofMillis(40), jitter = 0.5),
+      )
+
+    val delays = (1..12).map { (subscription.next(wait) as Delivery.Unavailable).retryAfter.toMillis() }
+
+    assertTrue("each within 40 to 60 ms, got $delays", delays.all { it in 40L..60L })
+    assertTrue("not all the same, got $delays", delays.toSet().size > 1)
+    subscription.close()
+  }
+
+  @Test
+  fun `each attempt waits out the jittered delay it reported`() {
+    val attempts = CopyOnWriteArrayList<Long>()
+    val subscription =
+      subscription(
+        {
+          attempts += System.nanoTime()
+          RelayConnection(RelayConfig(REFUSED_URL, SecretKeyHex.ofHexString(key)))
+        },
+        RelayAuth.None,
+        ReconnectingSubscription.Backoff(Duration.ofMillis(100), Duration.ofMillis(100), jitter = 1.0),
+      )
+
+    val reported = (1..5).map { (subscription.next(wait) as Delivery.Unavailable).retryAfter.toMillis() }
+
+    val waitedMillis = (attempts.last() - attempts.first()) / 1_000_000
+    assertTrue(
+      "reported $reported, and the attempts were $waitedMillis ms apart in all",
+      waitedMillis >= reported.dropLast(1).sum(),
+    )
+    subscription.close()
+  }
+
+  @Test
+  fun `jitter does not feed the doubling`() {
+    // A compounding delay reaches past 80 ms on the second attempt for most first jitters, so one of
+    // these runs would catch it.
+    repeat(8) {
+      val subscription =
+        subscription(
+          { RelayConnection(RelayConfig(REFUSED_URL, SecretKeyHex.ofHexString(key))) },
+          RelayAuth.None,
+          ReconnectingSubscription.Backoff(Duration.ofMillis(20), Duration.ofSeconds(1), jitter = 1.0),
         )
-        assertEquals(Delivery.Subscribed, subscription.next(wait))
-        assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
-        assertEquals(
-          "an EOSE for the subscription resets the delay",
-          Duration.ofMillis(50),
-          (subscription.next(wait) as Delivery.Interrupted).retryAfter,
-        )
-        first.assertScriptClean()
-        second.assertScriptClean()
-        subscription.close()
+
+      val delays = (1..2).map { (subscription.next(wait) as Delivery.Unavailable).retryAfter.toMillis() }
+
+      assertTrue("20 to 40 ms, then 40 to 80, got $delays", delays[0] in 20L..40L && delays[1] in 40L..80L)
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a repeated EOSE does not move the time a connection is measured from`() {
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        awaitReq(session)
+        session.sendText(eoseFrame(SUB))
+        Thread.sleep(300)
+        session.sendText(eoseFrame(SUB))
+        session.sendClose()
+      }
+      val subscription = subscription(Connections(REFUSED_URL, relay.url)::next, RelayAuth.None)
+
+      assertEquals(Duration.ofMillis(50), (subscription.next(wait) as Delivery.Unavailable).retryAfter)
+      assertEquals(Delivery.Subscribed, subscription.next(wait))
+      assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
+      assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
+      assertEquals(
+        "the connection lasted the maximum past its first EOSE",
+        Duration.ofMillis(50),
+        (subscription.next(wait) as Delivery.Interrupted).retryAfter,
+      )
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a connection that was dropped at once does not count as lasting at the next failure`() {
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        awaitReq(session)
+        session.sendText(eoseFrame(SUB))
+        session.sendClose()
+      }
+      val subscription = subscription(Connections(relay.url, REFUSED_URL)::next, RelayAuth.None)
+
+      assertEquals(Delivery.Subscribed, subscription.next(wait))
+      assertEquals(Delivery.Received(RelayMessage.Eose(SUB)), subscription.next(wait))
+      assertEquals(Duration.ofMillis(50), (subscription.next(wait) as Delivery.Interrupted).retryAfter)
+      Thread.sleep(250)
+      assertEquals(
+        "the delay goes on growing, though the EOSE is now older than the maximum",
+        Duration.ofMillis(100),
+        (subscription.next(wait) as Delivery.Unavailable).retryAfter,
+      )
+      subscription.close()
+    }
+  }
+
+  @Test
+  fun `a jitter outside zero to one is refused`() {
+    for (jitter in listOf(-0.1, 1.1)) {
+      assertThrows(IllegalArgumentException::class.java) {
+        ReconnectingSubscription.Backoff(Duration.ofMillis(1), Duration.ofMillis(1), jitter)
       }
     }
   }

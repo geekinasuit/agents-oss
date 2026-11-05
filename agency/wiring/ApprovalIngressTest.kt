@@ -89,6 +89,7 @@ class ApprovalIngressTest {
     resubscribeBackoff: ReconnectingSubscription.Backoff =
       ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(50)),
     approvalsAwaited: () -> Boolean = { false },
+    backoff: ReconnectingSubscription.Backoff = ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(50)),
     reporter: IngressReporter = IngressReporter {},
     reportAfterFailures: Int = 2,
     reportInterval: Duration = Duration.ZERO,
@@ -98,7 +99,7 @@ class ApprovalIngressTest {
       newConnection = connections::next,
       connectTimeout = Duration.ofSeconds(3),
       auth = RelayAuth.None,
-      backoff = ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(50)),
+      backoff = backoff,
       resubscribeBackoff = resubscribeBackoff,
       leadKey = SecretKeyHex.ofHexString(LEAD_SECRET),
       approvalsAwaited = approvalsAwaited,
@@ -562,12 +563,14 @@ class ApprovalIngressTest {
       }
     }
 
-  /** A relay that answers the REQ with EOSE and then drops the connection. */
-  private fun servingThenDropping(): FakeRelay =
+  /** A relay that answers the REQ with EOSE and drops the connection after [holdMillis]. The default
+   * outlasts the ingress's backoff maximum, so the connection counts as having held. */
+  private fun servingThenDropping(holdMillis: Long = 300): FakeRelay =
     FakeRelay().also { relay ->
       relay.serve { session ->
         session.nextClientText(5_000) ?: error("no REQ")
         session.sendText("[\"EOSE\",\"${ApprovalIngress.SUBSCRIPTION_ID}\"]")
+        Thread.sleep(holdMillis)
         session.sendClose()
       }
     }
@@ -668,7 +671,7 @@ class ApprovalIngressTest {
       )
     ingress.runUntil { ingress.counts().interruptions == 2L }
     assertEquals(reports.toString(), 1, reports.count { "not finished" in it })
-    assertEquals(reports.toString(), 0, reports.count { "not arriving" in it })
+    assertEquals(reports.toString(), 0, reports.count { "attempts in a row" in it })
     ingress.closeWith(relays)
   }
 
@@ -689,6 +692,57 @@ class ApprovalIngressTest {
       assertEquals(reports.toString(), 0, reports.size)
       ingress.close()
     }
+
+  @Test
+  fun aRelayThatSendsEoseAndDropsOnEveryConnectionIsReported() {
+    val relays = List(3) { servingThenDropping(holdMillis = 0) }
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        // A maximum well above the step's wait, so a drop at once is seen as one.
+        backoff = ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofSeconds(2)),
+        reporter = { reports += it },
+        reportAfterFailures = 3,
+      )
+    ingress.runUntil { reports.size == 1 }
+    assertTrue(reports.single(), reports.single().contains("3 attempts"))
+    assertTrue("the third relay's own drop, not a fourth connection: ${reports.single()}", reports.single().contains("relay closed"))
+    ingress.closeWith(relays)
+  }
+
+  @Test
+  fun aResubscribeForgetsTheServedConnectionSoItsSuccessorIsNotCountedAsHeld() {
+    val first = refusing(1)
+    val wrap = approvalWrap("g", "n".repeat(64), "d".repeat(64))
+    val served = FakeRelay()
+    served.serve { session ->
+      session.nextClientText(5_000) ?: error("no REQ")
+      session.sendText("[\"EOSE\",\"${ApprovalIngress.SUBSCRIPTION_ID}\"]")
+      session.sendText("[\"EVENT\",\"${ApprovalIngress.SUBSCRIPTION_ID}\"," + wrap.serialize() + "]")
+      session.nextClientText(5_000)
+    }
+    val quiet = FakeRelay()
+    quiet.serve { session ->
+      session.nextClientText(5_000) ?: error("no REQ")
+      session.nextClientText(5_000)
+    }
+    val relays = first + served + quiet
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        { error("the append failed") },
+        reporter = { reports += it },
+        reportAfterFailures = 1,
+      )
+    ingress.runUntil { ingress.counts().resubscriptions == 1L }
+    val end = System.nanoTime() + Duration.ofMillis(400).toNanos()
+    while (System.nanoTime() < end) ingress.step(Duration.ofMillis(50))
+    assertEquals(reports.toString(), 0, reports.count { "arriving again" in it })
+    ingress.closeWith(relays)
+  }
 
   @Test
   fun anOutageThatEndsIsReportedAsEnded() {
@@ -713,6 +767,8 @@ class ApprovalIngressTest {
         relay.serve { session ->
           session.nextClientText(5_000) ?: error("no REQ")
           session.sendText("[\"EOSE\",\"${ApprovalIngress.PAGE_SUBSCRIPTION_PREFIX}1\"]")
+          // Past the backoff's maximum, so an EOSE that counted would have ended the outage.
+          Thread.sleep(300)
           session.sendText("[\"CLOSED\",\"${ApprovalIngress.SUBSCRIPTION_ID}\",\"restricted: no\"]")
           session.nextClientText(5_000)
         }
@@ -726,7 +782,25 @@ class ApprovalIngressTest {
         reportAfterFailures = 3,
       )
     ingress.runUntil { reports.size == 1 }
+    assertTrue("the third relay's own refusal: ${reports.single()}", reports.single().contains("restricted"))
     ingress.closeWith(relays)
+  }
+
+  @Test
+  fun anEoseFromADroppedConnectionDoesNotCountAsAConnectionThatHeldDuringLaterFailures() {
+    val served = servingThenDropping(holdMillis = 0)
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(served.url, *Array(8) { REFUSED_URL }),
+        RecordingSink { ApprovalAccept.RECORDED },
+        reporter = { reports += it },
+        reportAfterFailures = 1,
+      )
+    ingress.runUntil { ingress.counts().interruptions == 7L }
+    assertEquals(reports.toString(), 0, reports.count { "arriving again" in it })
+    ingress.close()
+    served.close()
   }
 
   @Test
@@ -745,7 +819,7 @@ class ApprovalIngressTest {
           reportInterval = Duration.ofHours(1),
         )
       ingress.runUntil { reports.any { "ended short" in it } }
-      assertTrue(reports.toString(), reports.any { "not arriving" in it })
+      assertTrue(reports.toString(), reports.any { "attempts in a row" in it })
       ingress.close()
     }
   }
@@ -802,7 +876,7 @@ class ApprovalIngressTest {
         reportInterval = Duration.ofHours(1),
       )
     ingress.runUntil { ingress.counts().interruptions == 3L }
-    assertEquals(reports.toString(), 1, reports.count { "not arriving" in it })
+    assertEquals(reports.toString(), 1, reports.count { "attempts in a row" in it })
     ingress.closeWith(relays)
   }
 
