@@ -23,6 +23,13 @@ fun interface ApprovalSink {
   fun accept(candidate: ApprovalCandidate): ApprovalAccept
 }
 
+/** Where the ingress tells an operator that approvals are not arriving, or are again. It runs on the
+ * ingress's own thread. An [Exception] it throws is dropped, since a report that fails must not stop
+ * the ingress. An [Error] ends the ingress's thread, as one from the sink does. */
+fun interface IngressReporter {
+  fun report(problem: String)
+}
+
 /**
  * Carries approvals from a relay to the host's accept boundary (order item 3, carrier (a)). It holds
  * ONE kept subscription on ONE connection, with ONE filter: gift wraps (kind [Nip59.GIFT_WRAP_KIND])
@@ -72,6 +79,22 @@ fun interface ApprovalSink {
  * initial value after an accept that does not throw. A stopped boundary therefore costs one
  * resubscription per maximum delay, not a busy loop.
  *
+ * A relay that refuses the lead, or stays down, leaves the lead up with no approvals arriving, and the
+ * retries go on, since a lead added to a relay later should need no restart. So [reporter] is told
+ * once [reportAfterFailures] attempts in a row have failed, with the last failure's detail, which
+ * says whether the relay refused or could not be reached and quotes no text the relay chose. A relay
+ * that takes the subscription and sends no EOSE for the replay within [replayWait] fails no attempt,
+ * so that is reported too, and the ingress keeps the connection, which may still carry an approval. An
+ * outage ends when the relay sends EOSE for the replay, and it is reported once, with one report when
+ * it ends, so a past outage does not read as a live one. An empty replay ends an outage as a full one
+ * does, so a relay that sends EOSE and then refuses, on every connection, is never reported. A relay
+ * can make outages as fast as it likes, so reports of outages are at least [reportInterval] apart, and
+ * so are reports of a walk that ended short. A report held back by the interval goes out later in the
+ * outage, if the outage lasts. A short outage within an interval of the last report goes unreported.
+ * Nothing watches a connection after its replay ends, so one that goes silent then, or dies with no
+ * close reaching the client, is seen only when it next fails. This state is the process's own: a
+ * restart forgets an outage, so a report with no end report after it may be from before a restart.
+ *
  * [leadKey] must be a holder of its own: [close] zeroes it, and a holder another component also
  * clears (a [com.geekinasuit.agency.nostr.RelayNotifier]'s, a [com.geekinasuit.agency.nostr.RelayConfig]'s)
  * would zero this one's key or be zeroed by it.
@@ -90,8 +113,15 @@ class ApprovalIngress(
   /** Whether an approval could count now, `AgentHost::approvalsAwaited`. When it throws, the ingress
    * treats it as a throw from [sink]. */
   private val approvalsAwaited: () -> Boolean,
+  private val reporter: IngressReporter,
+  private val reportAfterFailures: Int = REPORT_AFTER_FAILURES,
+  reportInterval: Duration = REPORT_INTERVAL,
+  replayWait: Duration = REPLAY_WAIT,
   private val sink: ApprovalSink,
 ) {
+  private val reportIntervalNanos: Long = reportInterval.toNanos()
+  private val replayWaitNanos: Long = replayWait.toNanos()
+
   /** What the ingress has seen. [accepted] counts each [ApprovalAccept] the sink returned. [pages]
    * counts each page of stored wraps asked for, and [stalledWalks] each walk the ingress saw end
    * before the relay's oldest wrap, as the class KDoc lists. */
@@ -130,6 +160,11 @@ class ApprovalIngress(
 
   // Touched only by the thread that runs [step].
   private var walk: Walk? = null
+  private var failedAttempts = 0
+  private var outageReported = false
+  private var lastOutageReportNanos: Long? = null
+  private var lastStallReportNanos: Long? = null
+  private var replayAwaitedSinceNanos: Long? = null
 
   fun counts(): Counts =
     synchronized(lock) {
@@ -161,14 +196,25 @@ class ApprovalIngress(
     }
     when (val delivery = sub.next(timeout)) {
       is Delivery.Received -> receive(sub, delivery.message)
-      is Delivery.Interrupted, is Delivery.Unavailable -> {
-        walk = null
-        synchronized(lock) { interruptions++ }
+      is Delivery.Interrupted -> attemptFailed(delivery.detail)
+      is Delivery.Unavailable -> attemptFailed(delivery.detail)
+      Delivery.Subscribed -> {
+        walk = Walk(UntilPager(PAGE_LIMIT), SUBSCRIPTION_ID)
+        replayAwaitedSinceNanos = System.nanoTime()
       }
-      Delivery.Subscribed -> walk = Walk(UntilPager(PAGE_LIMIT), SUBSCRIPTION_ID)
       Delivery.Stopped, null -> Unit
     }
+    reportASilentReplay()
     return !closed
+  }
+
+  // A relay that takes the subscription and goes quiet fails no attempt, so nothing else would say so.
+  private fun reportASilentReplay() {
+    val since = replayAwaitedSinceNanos ?: return
+    if (System.nanoTime() - since < replayWaitNanos || outageReported || !due(lastOutageReportNanos)) return
+    outageReported = true
+    lastOutageReportNanos = System.nanoTime()
+    report("approvals may not be arriving: the relay took the subscription and has not finished its replay")
   }
 
   private fun receive(sub: ReconnectingSubscription, message: RelayMessage) {
@@ -177,20 +223,56 @@ class ApprovalIngress(
         walk?.takeIf { it.reading == message.subscriptionId }?.pager?.saw(message.event.createdAt)
         handle(message)
       }
-      is RelayMessage.Eose -> walk?.takeIf { it.reading == message.subscriptionId }?.let { advance(sub, it) }
+      is RelayMessage.Eose -> {
+        if (message.subscriptionId == SUBSCRIPTION_ID) {
+          failedAttempts = 0
+          replayAwaitedSinceNanos = null
+          if (outageReported) report("approvals are arriving again: the relay finished its replay")
+          outageReported = false
+        }
+        walk?.takeIf { it.reading == message.subscriptionId }?.let { advance(sub, it) }
+      }
       is RelayMessage.Closed ->
         walk?.takeIf { it.reading == message.subscriptionId }?.let {
           walk = null
-          synchronized(lock) { stalledWalks++ }
+          walkEndedShort("the relay refused a page")
         }
       else -> Unit
+    }
+  }
+
+  private fun attemptFailed(detail: String) {
+    walk = null
+    replayAwaitedSinceNanos = null
+    synchronized(lock) { interruptions++ }
+    failedAttempts++
+    if (failedAttempts < reportAfterFailures || outageReported || !due(lastOutageReportNanos)) return
+    outageReported = true
+    lastOutageReportNanos = System.nanoTime()
+    report("approvals are not arriving: $failedAttempts attempts in a row failed, the last with: $detail")
+  }
+
+  private fun walkEndedShort(why: String) {
+    synchronized(lock) { stalledWalks++ }
+    if (!due(lastStallReportNanos)) return
+    lastStallReportNanos = System.nanoTime()
+    report("a walk back through stored approvals ended short: $why. An older approval stays held until it is sent again")
+  }
+
+  private fun due(last: Long?) = last == null || System.nanoTime() - last >= reportIntervalNanos
+
+  private fun report(problem: String) {
+    try {
+      reporter.report(problem)
+    } catch (x: Exception) {
+      if (x is InterruptedException) Thread.currentThread().interrupt()
     }
   }
 
   // The page [w] is reading has ended: ask for the next one, or end the walk.
   private fun advance(sub: ReconnectingSubscription, w: Walk) {
     val decision = w.pager.pageEnded()
-    if (decision is UntilPager.Decision.Stalled) synchronized(lock) { stalledWalks++ }
+    if (decision is UntilPager.Decision.Stalled) walkEndedShort("a page got no lower, and more may lie below it")
     val next = decision as? UntilPager.Decision.Next
     val goOn = if (next != null) awaited() ?: return else false
     if (w.page > 0) sub.closeOnOpenConnection(w.reading)
@@ -205,7 +287,7 @@ class ApprovalIngress(
       synchronized(lock) { pages++ }
     } else {
       walk = null
-      synchronized(lock) { stalledWalks++ }
+      walkEndedShort("a page could not be sent")
     }
   }
 
@@ -354,6 +436,18 @@ class ApprovalIngress(
     /** The most wraps the replay or a page asks for. Below the connection's queue, so each leaves room
      * for the live events that share it. */
     const val PAGE_LIMIT = 500
+
+    /** How many attempts in a row must fail before an outage is reported. A relay that restarts
+     * should not trip it: at the runner's backoff, five attempts take about eight seconds. */
+    const val REPORT_AFTER_FAILURES = 5
+
+    /** The least time between reports of an outage, and between reports of a walk that ended short.
+     * It bounds what a relay can add to the journal to three rows per interval: an outage, its end,
+     * and a walk. */
+    val REPORT_INTERVAL: Duration = Duration.ofHours(1)
+
+    /** How long a relay may take to finish its replay before that is reported. */
+    val REPLAY_WAIT: Duration = Duration.ofMinutes(1)
 
     private val POLL: Duration = Duration.ofMillis(500)
     private const val SLICE_NANOS: Long = 100_000_000L

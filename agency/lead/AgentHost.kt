@@ -348,6 +348,11 @@ class AgentHost<S> internal constructor(
    * when that read fails. */
   fun approvalsAwaited(): Boolean = approvals.awaited()
 
+  /** Journal [problem] as an escalation, for what a host's outside parts see and it cannot, such as a
+   * relay that keeps refusing the lead. [problem] is journaled as given, so it must hold no text a
+   * relay or a sender wrote. */
+  fun reportProblem(problem: String) = escalate(problem)
+
   /** Timer fires stay enqueue-only (no accept-append, deliberately): a timer is
    * self-scheduled re-derivable state — armed and not fired re-arms at adopt — so a lost
    * doorbell loses nothing, and "timer-fired" keeps meaning CONSUMED by the loop, which

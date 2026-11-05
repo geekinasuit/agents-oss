@@ -25,6 +25,7 @@ import com.geekinasuit.agency.nostr.RecipientKey
 import com.geekinasuit.agency.nostr.RelayAuth
 import com.geekinasuit.agency.nostr.RelayConfig
 import com.geekinasuit.agency.nostr.RelayConnection
+import com.geekinasuit.agency.nostr.REFUSED_URL
 import com.geekinasuit.agency.nostr.Rumor
 import com.geekinasuit.agency.nostr.SecretKeyHex
 import com.geekinasuit.agency.nostr.StoredEventRelay
@@ -88,6 +89,10 @@ class ApprovalIngressTest {
     resubscribeBackoff: ReconnectingSubscription.Backoff =
       ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(50)),
     approvalsAwaited: () -> Boolean = { false },
+    reporter: IngressReporter = IngressReporter {},
+    reportAfterFailures: Int = 2,
+    reportInterval: Duration = Duration.ZERO,
+    replayWait: Duration = Duration.ofMinutes(1),
   ) =
     ApprovalIngress(
       newConnection = connections::next,
@@ -97,6 +102,10 @@ class ApprovalIngressTest {
       resubscribeBackoff = resubscribeBackoff,
       leadKey = SecretKeyHex.ofHexString(LEAD_SECRET),
       approvalsAwaited = approvalsAwaited,
+      reporter = reporter,
+      reportAfterFailures = reportAfterFailures,
+      reportInterval = reportInterval,
+      replayWait = replayWait,
       sink = sink,
     )
 
@@ -543,6 +552,340 @@ class ApprovalIngressTest {
     }
   }
 
+  /** A relay per expected connection, each answering the REQ with a CLOSED that refuses it. */
+  private fun refusing(count: Int): List<FakeRelay> =
+    List(count) { FakeRelay() }.onEach { relay ->
+      relay.serve { session ->
+        session.nextClientText(5_000) ?: error("no REQ")
+        session.sendText("[\"CLOSED\",\"${ApprovalIngress.SUBSCRIPTION_ID}\",\"restricted: relay-chosen-marker\"]")
+        session.nextClientText(5_000)
+      }
+    }
+
+  /** A relay that answers the REQ with EOSE and then drops the connection. */
+  private fun servingThenDropping(): FakeRelay =
+    FakeRelay().also { relay ->
+      relay.serve { session ->
+        session.nextClientText(5_000) ?: error("no REQ")
+        session.sendText("[\"EOSE\",\"${ApprovalIngress.SUBSCRIPTION_ID}\"]")
+        session.sendClose()
+      }
+    }
+
+  private fun ApprovalIngress.closeWith(relays: List<FakeRelay>) {
+    close()
+    relays.forEach { it.close() }
+  }
+
+  @Test
+  fun aRelayThatKeepsRefusingIsReportedOnceAtTheThresholdWithItsReasonAndNotItsText() {
+    val relays = refusing(5)
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        reporter = { reports += it },
+        reportAfterFailures = 3,
+      )
+    ingress.runUntil { ingress.counts().interruptions == 2L }
+    assertEquals("not yet at the threshold", 0, reports.size)
+    ingress.runUntil { ingress.counts().interruptions == 5L }
+    assertEquals(1, reports.size)
+    assertTrue(reports.single(), reports.single().contains("3 attempts"))
+    assertTrue(reports.single(), reports.single().contains("restricted"))
+    assertTrue(reports.single(), !reports.single().contains("relay-chosen-marker"))
+    ingress.closeWith(relays)
+  }
+
+  @Test
+  fun aRelayThatTakesTheSubscriptionAndGoesQuietIsReportedOnceAndKeepsTheConnection() =
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        session.nextClientText(5_000) ?: error("no REQ")
+        session.nextClientText(10_000)
+      }
+      val reports = CopyOnWriteArrayList<String>()
+      val ingress =
+        ingress(
+          Connections(relay.url),
+          RecordingSink { ApprovalAccept.RECORDED },
+          reporter = { reports += it },
+          replayWait = Duration.ofMillis(200),
+        )
+      ingress.runUntil { reports.size == 1 }
+      assertTrue(reports.single(), reports.single().contains("has not finished its replay"))
+      repeat(3) { ingress.step(Duration.ofMillis(50)) }
+      assertEquals("once", 1, reports.size)
+      assertEquals("the connection is kept", 0L, ingress.counts().interruptions)
+      ingress.close()
+    }
+
+  @Test
+  fun aQuietRelayIsHeldToTheIntervalAfterAnEarlierOutageAndStampsTheClockItself() {
+    val first = refusing(1) + servingThenDropping()
+    FakeRelay().use { quiet ->
+      quiet.serve { session ->
+        session.nextClientText(5_000) ?: error("no REQ")
+        session.nextClientText(10_000)
+      }
+      val reports = CopyOnWriteArrayList<String>()
+      val ingress =
+        ingress(
+          Connections(*(first + quiet).map { it.url }.toTypedArray()),
+          RecordingSink { ApprovalAccept.RECORDED },
+          reporter = { reports += it },
+          reportAfterFailures = 1,
+          reportInterval = Duration.ofHours(1),
+          replayWait = Duration.ofMillis(50),
+        )
+      ingress.runUntil { reports.any { "arriving again" in it } }
+      repeat(8) { ingress.step(Duration.ofMillis(50)) }
+      assertEquals("the quiet relay comes inside the interval: $reports", 0, reports.count { "not finished" in it })
+      ingress.closeWith(first)
+    }
+  }
+
+  @Test
+  fun aQuietReportHoldsBackTheNextOutageReport() {
+    val quietThenRefusing = FakeRelay()
+    quietThenRefusing.serve { session ->
+      session.nextClientText(5_000) ?: error("no REQ")
+      Thread.sleep(300)
+      session.sendText("[\"EOSE\",\"${ApprovalIngress.SUBSCRIPTION_ID}\"]")
+      session.sendClose()
+    }
+    val relays = listOf(quietThenRefusing) + refusing(1)
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        reporter = { reports += it },
+        reportAfterFailures = 1,
+        reportInterval = Duration.ofHours(1),
+        replayWait = Duration.ofMillis(50),
+      )
+    ingress.runUntil { ingress.counts().interruptions == 2L }
+    assertEquals(reports.toString(), 1, reports.count { "not finished" in it })
+    assertEquals(reports.toString(), 0, reports.count { "not arriving" in it })
+    ingress.closeWith(relays)
+  }
+
+  @Test
+  fun aReplayThatFinishesInTimeIsNotReportedAsSilent() =
+    FakeRelay().use { relay ->
+      relay.replays()
+      val reports = CopyOnWriteArrayList<String>()
+      val ingress =
+        ingress(
+          Connections(relay.url),
+          RecordingSink { ApprovalAccept.RECORDED },
+          reporter = { reports += it },
+          replayWait = Duration.ofMillis(300),
+        )
+      val end = System.nanoTime() + Duration.ofMillis(600).toNanos()
+      while (System.nanoTime() < end) ingress.step(Duration.ofMillis(50))
+      assertEquals(reports.toString(), 0, reports.size)
+      ingress.close()
+    }
+
+  @Test
+  fun anOutageThatEndsIsReportedAsEnded() {
+    val relays = refusing(1) + servingThenDropping()
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        reporter = { reports += it },
+        reportAfterFailures = 1,
+      )
+    ingress.runUntil { reports.size == 2 }
+    assertTrue(reports.toString(), reports[1].contains("arriving again"))
+    ingress.closeWith(relays)
+  }
+
+  @Test
+  fun anEoseForAnotherIdDoesNotEndAnOutage() {
+    val relays =
+      List(3) { FakeRelay() }.onEach { relay ->
+        relay.serve { session ->
+          session.nextClientText(5_000) ?: error("no REQ")
+          session.sendText("[\"EOSE\",\"${ApprovalIngress.PAGE_SUBSCRIPTION_PREFIX}1\"]")
+          session.sendText("[\"CLOSED\",\"${ApprovalIngress.SUBSCRIPTION_ID}\",\"restricted: no\"]")
+          session.nextClientText(5_000)
+        }
+      }
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        reporter = { reports += it },
+        reportAfterFailures = 3,
+      )
+    ingress.runUntil { reports.size == 1 }
+    ingress.closeWith(relays)
+  }
+
+  @Test
+  fun anOutageReportDoesNotHoldBackAWalkReport() {
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE, clamp = ApprovalIngress.PAGE_LIMIT).use { stored ->
+      stored.store(*Array(ApprovalIngress.PAGE_LIMIT) { filler(it + 1, 100) })
+      stored.serveOneConnection()
+      val reports = CopyOnWriteArrayList<String>()
+      val ingress =
+        ingress(
+          Connections(REFUSED_URL, stored.url),
+          RecordingSink { ApprovalAccept.RECORDED },
+          approvalsAwaited = { true },
+          reporter = { reports += it },
+          reportAfterFailures = 1,
+          reportInterval = Duration.ofHours(1),
+        )
+      ingress.runUntil { reports.any { "ended short" in it } }
+      assertTrue(reports.toString(), reports.any { "not arriving" in it })
+      ingress.close()
+    }
+  }
+
+  @Test
+  fun theDefaultsAskForMoreThanOneFailureAndBoundWhatARelayCanWrite() {
+    assertTrue(ApprovalIngress.REPORT_AFTER_FAILURES > 1)
+    assertTrue(ApprovalIngress.REPORT_INTERVAL >= Duration.ofHours(1))
+    assertTrue(ApprovalIngress.REPLAY_WAIT <= Duration.ofMinutes(5))
+  }
+
+  @Test
+  fun aRelayThatCannotBeReachedIsReportedAsSuch() {
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(REFUSED_URL, REFUSED_URL, REFUSED_URL),
+        RecordingSink { ApprovalAccept.RECORDED },
+        reporter = { reports += it },
+      )
+    ingress.runUntil { reports.size == 1 }
+    assertTrue(reports.single(), reports.single().contains("could not connect"))
+    ingress.close()
+  }
+
+  @Test
+  fun aReplayThatCompletesEndsTheOutageSoFailuresCountAfreshAndANewOutageIsReported() {
+    val relays = refusing(1) + servingThenDropping() + refusing(1) + servingThenDropping() + refusing(2)
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        reporter = { reports += it },
+        reportAfterFailures = 3,
+      )
+    ingress.runUntil { ingress.counts().interruptions == 6L }
+    // Failures in a row: 1, then a replay; 1, 2, then a replay; 1, 2, 3.
+    assertEquals(reports.toString(), 1, reports.size)
+    assertTrue(reports.single(), reports.single().contains("3 attempts"))
+    ingress.closeWith(relays)
+  }
+
+  @Test
+  fun reportsOfOutagesAreHeldToTheIntervalHoweverFastARelayMakesThem() {
+    val relays = refusing(1) + servingThenDropping() + refusing(1)
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        reporter = { reports += it },
+        reportAfterFailures = 1,
+        reportInterval = Duration.ofHours(1),
+      )
+    ingress.runUntil { ingress.counts().interruptions == 3L }
+    assertEquals(reports.toString(), 1, reports.count { "not arriving" in it })
+    ingress.closeWith(relays)
+  }
+
+  @Test
+  fun aReportHeldBackByTheIntervalGoesOutAtALaterFailure() {
+    val relays = refusing(1) + servingThenDropping() + refusing(4)
+    val reports = CopyOnWriteArrayList<String>()
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        reporter = { reports += it },
+        reportAfterFailures = 1,
+        reportInterval = Duration.ofMillis(100),
+      )
+    ingress.runUntil { reports.size == 2 }
+    ingress.closeWith(relays)
+  }
+
+  @Test
+  fun aReporterThatThrowsLeavesTheIngressRunning() {
+    val relays = refusing(3)
+    val ingress =
+      ingress(
+        Connections(*relays.map { it.url }.toTypedArray()),
+        RecordingSink { ApprovalAccept.RECORDED },
+        reporter = { error("the journal is gone") },
+        reportAfterFailures = 1,
+      )
+    ingress.runUntil { ingress.counts().interruptions == 3L }
+    ingress.closeWith(relays)
+  }
+
+  @Test
+  fun aWalkThatEndsShortIsReportedAndReportsAreHeldToTheInterval() {
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE, clamp = ApprovalIngress.PAGE_LIMIT).use { relay ->
+      relay.store(*Array(ApprovalIngress.PAGE_LIMIT) { filler(it + 1, 100) })
+      relay.serveOneConnection()
+      relay.serveOneConnection()
+      val reports = CopyOnWriteArrayList<String>()
+      val ingress =
+        ingress(
+          Connections(relay.url, relay.url),
+          RecordingSink { ApprovalAccept.RECORDED },
+          approvalsAwaited = { true },
+          reporter = { reports += it },
+          reportInterval = Duration.ofHours(1),
+        )
+      ingress.runUntil { ingress.counts().stalledWalks == 1L }
+      assertEquals(reports.toString(), 1, reports.size)
+      assertTrue(reports.single(), reports.single().contains("ended short"))
+      relay.dropConnection()
+      ingress.runUntil { ingress.counts().stalledWalks == 2L }
+      assertEquals("the second stall is counted, not reported", 1, reports.size)
+      ingress.close()
+    }
+  }
+
+  @Test
+  fun aRelayThatRefusesAPageIsReportedAsAWalkEndedShort() =
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        session.nextClientText(5_000) ?: error("no REQ")
+        val id = ApprovalIngress.SUBSCRIPTION_ID
+        session.sendText("[\"EVENT\",\"$id\"," + filler(1, 100).serialize() + "]")
+        session.sendText("[\"EOSE\",\"$id\"]")
+        session.nextClientText(5_000) ?: error("no page")
+        session.sendText("[\"CLOSED\",\"${ApprovalIngress.PAGE_SUBSCRIPTION_PREFIX}1\",\"restricted: no\"]")
+        session.nextClientText(10_000)
+      }
+      val reports = CopyOnWriteArrayList<String>()
+      val ingress =
+        ingress(
+          Connections(relay.url),
+          RecordingSink { ApprovalAccept.RECORDED },
+          approvalsAwaited = { true },
+          reporter = { reports += it },
+        )
+      ingress.runUntil { reports.size == 1 }
+      assertTrue(reports.single(), reports.single().contains("refused a page"))
+      ingress.close()
+    }
+
   @Test
   fun aMailboxPastTheConnectionsQueueIsWalkedWithoutBreakingTheConnection() =
     StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE, clamp = 5_000).use { relay ->
@@ -652,6 +995,7 @@ class ApprovalIngressTest {
         ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(10)),
         key,
         { false },
+        {},
       ) {
         ApprovalAccept.RECORDED
       }

@@ -100,6 +100,17 @@ class ApprovalAcceptTest {
     }
 
   @Test
+  fun aReportedProblemIsAnEscalationAReaderOfTheFoldSees() =
+    onBothWorkflows { rig ->
+      val host = rig.host()
+      host.reportProblem("the relay keeps refusing the lead")
+      assertEquals(
+        listOf("the relay keeps refusing the lead"),
+        rig.host().refold().host.escalations,
+      )
+    }
+
+  @Test
   fun aFailedReadThrowsAndStopsTheBoundaryAndNothingIsAwaitedAfter() =
     onBothWorkflows { rig ->
       rig.openGate()
