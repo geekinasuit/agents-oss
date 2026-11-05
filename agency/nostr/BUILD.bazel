@@ -237,6 +237,21 @@ kt_jvm_library(
     visibility = ["//agency/wiring:__pkg__"],
 )
 
+# A relay double with a store, over fake_relay: it answers a REQ from what it holds, so a cell can ask
+# which stored events come back under `until`, `limit` and a relay's clamp. testonly.
+kt_jvm_library(
+    name = "stored_event_relay",
+    testonly = True,
+    srcs = ["StoredEventRelay.kt"],
+    # The approval ingress's paging cells in //agency/wiring page against it.
+    visibility = ["//agency/wiring:__pkg__"],
+    deps = [
+        ":fake_relay",
+        ":nostr",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
 # WebSocket-level test doubles for RelayConnection, reached through its injectable HttpClient. A
 # double decides when each relay frame reaches the connection's listener, relative to the client's
 # own calls, so a cell can fix an order that the socket-level fake_relay leaves to the scheduler.
@@ -413,10 +428,11 @@ kt_jvm_test(
 )
 
 # The reconnecting subscription against fake relays: the REQ it sends again on a new connection,
-# messages for another subscription id, the delay before each attempt and its reset, what it reports
-# when it cannot connect or authenticate, and close. The NIP-42 cells sign, so it needs the native
-# runtime-only, and reads JSON directly to pull the AUTH event's id out of a client frame. associates
-# (not deps) on :relay so the cells can check that a closed connection's key is zeroed.
+# messages for another subscription id, a further REQ on the open connection, the delay before each
+# attempt and its reset, what it reports when it cannot connect or authenticate, and close. The NIP-42
+# cells sign, so it needs the native runtime-only, and reads JSON directly to pull the AUTH event's id
+# out of a client frame. associates (not deps) on :relay so the cells can check that a closed
+# connection's key is zeroed.
 kt_jvm_test(
     name = "reconnecting_subscription_test",
     size = "small",
@@ -427,6 +443,7 @@ kt_jvm_test(
     deps = [
         ":fake_relay",
         ":nostr",
+        ":stored_event_relay",
         "@maven//:junit_junit",
         "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
     ],

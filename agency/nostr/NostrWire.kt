@@ -189,8 +189,9 @@ fun authMessage(event: NostrEvent): String =
  *    the filter. Events that arrive after EOSE are never limited.
  *  - [until]: match only events with `created_at` at or before this time, in unix seconds. A filter
  *    with one also matches no live event newer than that, so it reads history and does not stand in
- *    for a live subscription. Relays differ at the boundary, so a caller cannot rely on an event
- *    stamped exactly [until] coming back, or on its not coming back.
+ *    for a live subscription. NIP-01 includes an event stamped exactly [until], but no relay has
+ *    been checked against that here, so a caller should not rely on such an event coming back, or
+ *    on its not coming back.
  *
  * [ReconnectingSubscription] sends its REQ again on each new connection, and the relay answers with
  * the stored matching events each time. The connection breaks when the relay sends more messages
