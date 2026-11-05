@@ -189,10 +189,10 @@ class ScriptedLeadRunnerTest {
       val stop = LinkedBlockingQueue<() -> Unit>()
       var code: Int? = null
       val runner = thread { code = ScriptedLeadRunner.run(ROOT_PUB, args(dir), PrintStream(err, true), connect) { stop.put(it) } }
-      assertTrue(err.toString(), waitUntil(30_000) { err.toString().contains("approvals are not arriving") })
+      assertTrue(err.toString(), waitUntil(30_000) { err.toString().contains("attempts in a row failed") })
       assertTrue("the lead stays up", runner.isAlive)
       assertTrue(err.toString(), err.toString().contains("restricted"))
-      fun journaled() = entries(dir).count { it.kind == HostKinds.ESCALATED && "approvals are not arriving" in it.payloadJson }
+      fun journaled() = entries(dir).count { it.kind == HostKinds.ESCALATED && "attempts in a row failed" in it.payloadJson }
       assertTrue("the outage reaches the journal", waitUntil(5_000) { journaled() == 1 })
       stop.poll(5, TimeUnit.SECONDS)!!.invoke()
       runner.join(20_000)

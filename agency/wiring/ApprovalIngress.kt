@@ -23,7 +23,7 @@ fun interface ApprovalSink {
   fun accept(candidate: ApprovalCandidate): ApprovalAccept
 }
 
-/** Where the ingress tells an operator that approvals are not arriving, or are again. It runs on the
+/** Where the ingress tells an operator that approvals may not be arriving, or are again. It runs on the
  * ingress's own thread. An [Exception] it throws is dropped, since a report that fails must not stop
  * the ingress. An [Error] ends the ingress's thread, as one from the sink does. */
 fun interface IngressReporter {
@@ -85,12 +85,15 @@ fun interface IngressReporter {
  * says whether the relay refused or could not be reached and quotes no text the relay chose. A relay
  * that takes the subscription and sends no EOSE for the replay within [replayWait] fails no attempt,
  * so that is reported too, and the ingress keeps the connection, which may still carry an approval. An
- * outage ends when the relay sends EOSE for the replay, and it is reported once, with one report when
- * it ends, so a past outage does not read as a live one. An empty replay ends an outage as a full one
- * does, so a relay that sends EOSE and then refuses, on every connection, is never reported. A relay
- * can make outages as fast as it likes, so reports of outages are at least [reportInterval] apart, and
- * so are reports of a walk that ended short. A report held back by the interval goes out later in the
- * outage, if the outage lasts. A short outage within an interval of the last report goes unreported.
+ * outage ends when a connection has lasted the maximum of [backoff] past the EOSE for its replay, the
+ * rule [ReconnectingSubscription] resets its delay by, so an EOSE followed by a refusal does not end
+ * one. An outage is reported once, with one report when it ends, so a past outage does not read as a
+ * live one. A relay can make outages as fast as it likes, so reports of outages are at least
+ * [reportInterval] apart, and so are reports of a walk that ended short. A report held back by the
+ * interval goes out later in the outage, if the outage lasts. A relay that serves its replay and
+ * drops the connection before that delivers what it stored, so the report says approvals may not be
+ * arriving, not that they are not. An approval stored while no connection is open waits for the next
+ * one, up to the backoff's maximum and its jitter. A short outage within an interval of the last report goes unreported.
  * Nothing watches a connection after its replay ends, so one that goes silent then, or dies with no
  * close reaching the client, is seen only when it next fails. This state is the process's own: a
  * restart forgets an outage, so a report with no end report after it may be from before a restart.
@@ -165,6 +168,8 @@ class ApprovalIngress(
   private var lastOutageReportNanos: Long? = null
   private var lastStallReportNanos: Long? = null
   private var replayAwaitedSinceNanos: Long? = null
+  private var servedAtNanos: Long? = null
+  private val healthyAfterNanos: Long = backoff.max.toNanos()
 
   fun counts(): Counts =
     synchronized(lock) {
@@ -204,6 +209,7 @@ class ApprovalIngress(
       }
       Delivery.Stopped, null -> Unit
     }
+    noteAConnectionThatLasted()
     reportASilentReplay()
     return !closed
   }
@@ -225,10 +231,8 @@ class ApprovalIngress(
       }
       is RelayMessage.Eose -> {
         if (message.subscriptionId == SUBSCRIPTION_ID) {
-          failedAttempts = 0
           replayAwaitedSinceNanos = null
-          if (outageReported) report("approvals are arriving again: the relay finished its replay")
-          outageReported = false
+          if (servedAtNanos == null) servedAtNanos = System.nanoTime()
         }
         walk?.takeIf { it.reading == message.subscriptionId }?.let { advance(sub, it) }
       }
@@ -241,7 +245,20 @@ class ApprovalIngress(
     }
   }
 
+  // A connection that has lasted past its EOSE ends an outage: an EOSE alone is not enough, since a
+  // relay can send one and then refuse, on every connection.
+  private fun noteAConnectionThatLasted() {
+    val served = servedAtNanos ?: return
+    if (System.nanoTime() - served < healthyAfterNanos) return
+    servedAtNanos = null
+    failedAttempts = 0
+    if (outageReported) report("approvals are arriving again: the connection to the relay has held")
+    outageReported = false
+  }
+
   private fun attemptFailed(detail: String) {
+    noteAConnectionThatLasted()
+    servedAtNanos = null
     walk = null
     replayAwaitedSinceNanos = null
     synchronized(lock) { interruptions++ }
@@ -249,7 +266,7 @@ class ApprovalIngress(
     if (failedAttempts < reportAfterFailures || outageReported || !due(lastOutageReportNanos)) return
     outageReported = true
     lastOutageReportNanos = System.nanoTime()
-    report("approvals are not arriving: $failedAttempts attempts in a row failed, the last with: $detail")
+    report("approvals may not be arriving: $failedAttempts attempts in a row failed, the last with: $detail")
   }
 
   private fun walkEndedShort(why: String) {
@@ -404,6 +421,7 @@ class ApprovalIngress(
   // The approval the sink failed to record is replayed only on a new subscription, after the delay.
   private fun resubscribeLater() {
     walk = null
+    servedAtNanos = null
     synchronized(lock) {
       sinkFailures++
       resubscriptions++

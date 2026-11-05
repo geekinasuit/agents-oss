@@ -1,6 +1,7 @@
 package com.geekinasuit.agency.nostr
 
 import java.time.Duration
+import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.TimeUnit
 
 /**
@@ -36,10 +37,12 @@ import java.util.concurrent.TimeUnit
  *
  * The delay before a new connection is [Backoff.initial] after the first interruption or failed
  * attempt, and doubles after each one that follows, up to [Backoff.max]. It returns to
- * [Backoff.initial] when the relay sends EOSE for [subscriptionId], which shows that the relay served
- * the subscription. A relay that serves the subscription and then drops it is therefore tried again
- * after [Backoff.initial]. One that is down, or that refuses the connection, the authentication or
- * the subscription, is tried at most once per [Backoff.max] once the delay has grown.
+ * [Backoff.initial] only when the connection has lasted [Backoff.max] past the relay's EOSE for
+ * [subscriptionId]. EOSE alone does not reset it: a struggling relay can serve a replay and then drop
+ * the connection, and a replay is the costly part of a connection, so a reset there would send it
+ * another replay at once. So a relay that keeps dropping the subscription, like one that is down or
+ * refuses the connection, the authentication or the subscription, is tried at most once per
+ * [Backoff.max] once the delay has grown.
  *
  * [newConnection] belongs to the deployment and has the contract [ReconnectingPublisher] states: a new
  * [RelayConnection], around a new [RelayConfig] and a new [SecretKeyHex], on every call. An exception
@@ -72,15 +75,18 @@ class ReconnectingSubscription(
   /**
    * The delay before a new connection: [initial] after the first interruption or failed attempt,
    * doubled after each one that follows, up to [max]. Counted in whole milliseconds, so [initial]
-   * must be at least one: a delay of zero would never grow.
+   * must be at least one: a delay of zero would never grow. Each delay also gets a random extra of up
+   * to [jitter] times itself, so leads that lost a relay together do not all return together. The
+   * extra does not compound into the next delay, and it can take a delay past [max].
    */
-  class Backoff(val initial: Duration, val max: Duration) {
+  class Backoff(val initial: Duration, val max: Duration, val jitter: Double = 0.0) {
     internal val initialMillis: Long = initial.toMillis()
     internal val maxMillis: Long = max.toMillis()
 
     init {
       require(initialMillis >= 1) { "the initial delay must be at least 1 ms, was $initial" }
       require(maxMillis >= initialMillis) { "the maximum delay must be at least the initial delay" }
+      require(jitter in 0.0..1.0) { "the jitter must be between 0 and 1, was $jitter" }
     }
   }
 
@@ -114,6 +120,7 @@ class ReconnectingSubscription(
   private var connection: RelayConnection? = null
   private var delayMillis = backoff.initialMillis
   private var nextAttemptNanos = System.nanoTime()
+  private var servedAtNanos: Long? = null
 
   /**
    * The next thing to report, or null if there is none before [timeout] passes. When no connection
@@ -224,8 +231,8 @@ class ReconnectingSubscription(
     if (message is RelayMessage.Closed && message.subscriptionId == subscriptionId) {
       return interrupt(relayReasonDetail("relay closed the subscription", message.message))
     }
-    if (message is RelayMessage.Eose && message.subscriptionId == subscriptionId) {
-      delayMillis = backoff.initialMillis
+    if (message is RelayMessage.Eose && message.subscriptionId == subscriptionId && servedAtNanos == null) {
+      servedAtNanos = System.nanoTime()
     }
     return Delivery.Received(message)
   }
@@ -236,13 +243,21 @@ class ReconnectingSubscription(
     return Delivery.Interrupted(detail, scheduleRetry())
   }
 
-  // Schedule the next attempt after the current delay, double the delay for the attempt after that,
-  // up to the maximum, and return the delay this attempt waits.
+  // Schedule the next attempt after the current delay, with its jitter, double the delay for the
+  // attempt after that, up to the maximum, and return what this attempt waits. A connection that
+  // outlasted the maximum past its EOSE served well enough that the delay starts over.
   private fun scheduleRetry(): Duration {
+    val now = System.nanoTime()
+    val served = servedAtNanos
+    servedAtNanos = null
+    if (served != null && now - served >= TimeUnit.MILLISECONDS.toNanos(backoff.maxMillis)) {
+      delayMillis = backoff.initialMillis
+    }
     val delay = delayMillis
-    nextAttemptNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delay)
+    val wait = delay + (delay * backoff.jitter * ThreadLocalRandom.current().nextDouble()).toLong()
+    nextAttemptNanos = now + TimeUnit.MILLISECONDS.toNanos(wait)
     delayMillis = if (delay > backoff.maxMillis / 2) backoff.maxMillis else delay * 2
-    return Duration.ofMillis(delay)
+    return Duration.ofMillis(wait)
   }
 
   // Wait in slices until the next attempt is due, and return whether it is. False after close() or

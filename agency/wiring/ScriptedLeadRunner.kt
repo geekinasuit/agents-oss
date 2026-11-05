@@ -306,7 +306,10 @@ object ScriptedLeadRunner {
     )
 
   private val TIMEOUT: Duration = Duration.ofSeconds(10)
-  private val BACKOFF = ReconnectingSubscription.Backoff(Duration.ofMillis(500), Duration.ofSeconds(5))
+  // A lead added to a relay can take this long to notice. A shorter maximum hammers a relay that is
+  // struggling or refusing it. The maximum is also how long a connection must hold past its EOSE to
+  // count as healthy, so a peer that closes idle connections sooner keeps the delay at the maximum.
+  private val BACKOFF = ReconnectingSubscription.Backoff(Duration.ofMillis(500), Duration.ofSeconds(60), jitter = 0.25)
   private val RESUBSCRIBE_BACKOFF = ReconnectingSubscription.Backoff(Duration.ofSeconds(1), Duration.ofSeconds(30))
   private const val SHUTDOWN_WAIT_SECONDS = 15L
 
