@@ -85,6 +85,33 @@ class ApprovalAcceptTest {
     }
 
   @Test
+  fun approvalsAreAwaitedOnlyWhileAGateHoldsAnOpenNonce() =
+    onBothWorkflows { rig ->
+      assertEquals("nothing is open yet", false, rig.host().approvalsAwaited())
+      val nonce = rig.openGate()
+      val host = rig.host()
+      val rowsBefore = rig.store.readAll().size
+      assertEquals("the gate is open", true, host.approvalsAwaited())
+      assertEquals("asking appends nothing", rowsBefore, rig.store.readAll().size)
+      assertEquals(ApprovalAccept.RECORDED, host.injectApproval(candidate(nonce)))
+      assertEquals("one of two approvals leaves it open", true, host.approvalsAwaited())
+      assertEquals(ApprovalAccept.RELEASED, host.injectApproval(candidate(nonce, publicKey = "pk-second")))
+      assertEquals("the release spends the nonce", false, host.approvalsAwaited())
+    }
+
+  @Test
+  fun aFailedReadThrowsAndStopsTheBoundaryAndNothingIsAwaitedAfter() =
+    onBothWorkflows { rig ->
+      rig.openGate()
+      val journal = FailingTailStore(rig.store)
+      val host = rig.host(journal = journal)
+      journal.failing = true
+      assertThrows(IllegalStateException::class.java) { host.approvalsAwaited() }
+      journal.failing = false
+      assertEquals(false, host.approvalsAwaited())
+    }
+
+  @Test
   fun aReturnedDriveDoesNotStopTheBoundary() =
     onBothWorkflows { rig ->
       val nonce = rig.openGate()

@@ -1,5 +1,6 @@
 package com.geekinasuit.agency.wiring
 
+import com.geekinasuit.agency.lead.AgentHost
 import com.geekinasuit.agency.lead.ApprovalAccept
 import com.geekinasuit.agency.lead.ApprovalCandidate
 import com.geekinasuit.agency.lead.FakePodRunner
@@ -26,6 +27,7 @@ import com.geekinasuit.agency.nostr.RelayConfig
 import com.geekinasuit.agency.nostr.RelayConnection
 import com.geekinasuit.agency.nostr.Rumor
 import com.geekinasuit.agency.nostr.SecretKeyHex
+import com.geekinasuit.agency.nostr.StoredEventRelay
 import com.geekinasuit.agency.nostr.encodeApproval
 import com.geekinasuit.agency.nostr.serialize
 import com.geekinasuit.agency.lead.LeadKinds
@@ -47,6 +49,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -57,7 +60,8 @@ import org.junit.rules.TemporaryFolder
 /**
  * The approval ingress over a scripted relay ([FakeRelay], one connection per relay): what reaches the
  * accept boundary, what is dropped as malformed, the resubscription after the boundary throws, and one
- * run end to end into a real host, whose gate the approval releases.
+ * run end to end into a real host, whose gate the approval releases. Against a relay with a store
+ * ([StoredEventRelay]): the walk back past a relay's cap on replay.
  */
 class ApprovalIngressTest {
 
@@ -83,6 +87,7 @@ class ApprovalIngressTest {
     sink: ApprovalSink,
     resubscribeBackoff: ReconnectingSubscription.Backoff =
       ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(50)),
+    approvalsAwaited: () -> Boolean = { false },
   ) =
     ApprovalIngress(
       newConnection = connections::next,
@@ -91,6 +96,7 @@ class ApprovalIngressTest {
       backoff = ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(50)),
       resubscribeBackoff = resubscribeBackoff,
       leadKey = SecretKeyHex.ofHexString(LEAD_SECRET),
+      approvalsAwaited = approvalsAwaited,
       sink = sink,
     )
 
@@ -318,6 +324,322 @@ class ApprovalIngressTest {
       }
     }
 
+  /** A relay holding [older] behind newer wraps it replays first, at a clamp of [clamp]. */
+  private fun crowded(order: StoredEventRelay.UntilOrder, older: NostrEvent, clamp: Int = 3) =
+    StoredEventRelay(order, clamp).also {
+      it.store(older, filler(1, 200), filler(2, 300), filler(3, 500), filler(4, 501), filler(5, 502))
+    }
+
+  @Test
+  fun anApprovalCrowdedOutBehindAJournaledOneComesBackByPaging() {
+    for (order in StoredEventRelay.UntilOrder.entries) {
+      val older = approvalWrap("g-older", "n".repeat(64), "d".repeat(64), at = 100)
+      crowded(order, older).use { relay ->
+        // The newest wrap is an approval the boundary already holds: seeing it must not end the walk.
+        relay.store(approvalWrap("g-newer", "m".repeat(64), "d".repeat(64), at = 503))
+        relay.serveOneConnection()
+        val sink = RecordingSink { ApprovalAccept.DUPLICATE }
+        val ingress = ingress(Connections(relay.url), sink, approvalsAwaited = { true })
+        ingress.runUntil { sink.seen.any { it.gateId == "g-older" } }
+        assertEquals("under $order", 0L, ingress.counts().stalledWalks)
+        relay.assertClean()
+        ingress.close()
+      }
+    }
+  }
+
+  @Test
+  fun aWalkEndsOnAPageThatGetsNoLowerAndClosesItsSubscription() {
+    for (order in StoredEventRelay.UntilOrder.entries) {
+      val older = approvalWrap("g-older", "n".repeat(64), "d".repeat(64), at = 100)
+      crowded(order, older).use { relay ->
+        relay.serveOneConnection()
+        val sink = RecordingSink { ApprovalAccept.RECORDED }
+        val ingress = ingress(Connections(relay.url), sink, approvalsAwaited = { true })
+        // A page's CLOSE comes before the next page's REQ, so the two counts meet only at the end.
+        ingress.runUntil { ingress.counts().pages > 0L && relay.closed.size.toLong() == ingress.counts().pages }
+        assertEquals("under $order", 0L, ingress.counts().stalledWalks)
+        val pages = relay.requests.size
+        repeat(3) { ingress.step(Duration.ofMillis(50)) }
+        assertEquals("under $order: no page after the last", pages, relay.requests.size)
+        ingress.close()
+      }
+    }
+  }
+
+  @Test
+  fun aFullPageStampedInOneSecondStallsTheWalkAndCountsIt() {
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE, clamp = ApprovalIngress.PAGE_LIMIT + 10).use { relay ->
+      val older = approvalWrap("g-older", "n".repeat(64), "d".repeat(64), at = 50)
+      relay.store(older)
+      relay.store(*Array(ApprovalIngress.PAGE_LIMIT + 10) { filler(it + 1, 100) })
+      relay.serveOneConnection()
+      val sink = RecordingSink { ApprovalAccept.RECORDED }
+      val ingress = ingress(Connections(relay.url), sink, approvalsAwaited = { true })
+      ingress.runUntil { ingress.counts().stalledWalks == 1L }
+      assertEquals("the stated limit: the older approval stays held", 0, sink.seen.size)
+      ingress.close()
+    }
+  }
+
+  @Test
+  fun aLeadWithNothingAwaitedSendsNoPage() =
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE).use { relay ->
+      relay.store(filler(1, 100))
+      relay.serveOneConnection()
+      val ingress = ingress(Connections(relay.url), RecordingSink { ApprovalAccept.RECORDED })
+      ingress.runUntil { ingress.counts().malformed == 1L }
+      repeat(3) { ingress.step(Duration.ofMillis(50)) }
+      assertEquals(1, relay.requests.size)
+      assertEquals(0L, ingress.counts().pages)
+      ingress.close()
+    }
+
+  @Test
+  fun aWalkEndsWhenApprovalsAreNoLongerAwaited() =
+    StoredEventRelay(StoredEventRelay.UntilOrder.BEFORE, clamp = 2).use { relay ->
+      relay.store(filler(1, 100), filler(2, 200), filler(3, 300))
+      relay.serveOneConnection()
+      val asked = AtomicInteger()
+      val ingress =
+        ingress(
+          Connections(relay.url),
+          RecordingSink { ApprovalAccept.RECORDED },
+          approvalsAwaited = { asked.incrementAndGet() == 1 },
+        )
+      ingress.runUntil { asked.get() == 2 && "${ApprovalIngress.PAGE_SUBSCRIPTION_PREFIX}1" in relay.closed }
+      assertEquals("the replay's REQ and one page", 2, relay.requests.size)
+      ingress.close()
+    }
+
+  @Test
+  fun anApprovalPublishedDuringAWalkArrivesOnTheSubscription() =
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE).use { relay ->
+      relay.store(filler(1, 100))
+      relay.serveOneConnection()
+      val published = approvalWrap("g-live", "n".repeat(64), "d".repeat(64), at = 5_000)
+      val sink = RecordingSink { ApprovalAccept.RECORDED }
+      val asked = AtomicInteger()
+      val ingress =
+        ingress(
+          Connections(relay.url),
+          sink,
+          approvalsAwaited = {
+            if (asked.incrementAndGet() == 1) relay.publish(published)
+            true
+          },
+        )
+      ingress.runUntil { sink.seen.any { it.gateId == "g-live" } }
+      ingress.close()
+    }
+
+  @Test
+  fun aNewConnectionWalksAgain() =
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE, clamp = 2).use { relay ->
+      relay.store(approvalWrap("g-older", "n".repeat(64), "d".repeat(64), at = 100), filler(1, 200), filler(2, 300))
+      relay.serveOneConnection()
+      relay.serveOneConnection()
+      val sink = RecordingSink { ApprovalAccept.DUPLICATE }
+      val ingress = ingress(Connections(relay.url, relay.url), sink, approvalsAwaited = { true })
+      ingress.runUntil { sink.seen.size == 1 }
+      relay.dropConnection()
+      ingress.runUntil { sink.seen.size == 2 }
+      relay.publish(approvalWrap("g-live", "n".repeat(64), "d".repeat(64), at = 5_000))
+      ingress.runUntil { sink.seen.any { it.gateId == "g-live" } }
+      assertEquals("the one drop", 1L, ingress.counts().interruptions)
+      relay.assertClean()
+      ingress.close()
+    }
+
+  @Test
+  fun aPagedApprovalTheSinkFailsToRecordComesBackOnANewSubscription() =
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE, clamp = 2).use { relay ->
+      relay.store(approvalWrap("g-older", "n".repeat(64), "d".repeat(64), at = 100), filler(1, 200), filler(2, 300))
+      relay.serveOneConnection()
+      relay.serveOneConnection()
+      val attempts = AtomicInteger()
+      val ingress =
+        ingress(
+          Connections(relay.url, relay.url),
+          {
+            check(attempts.incrementAndGet() > 1) { "the append failed" }
+            ApprovalAccept.RECORDED
+          },
+          approvalsAwaited = { true },
+        )
+      ingress.runUntil { ingress.counts().accepted[ApprovalAccept.RECORDED] == 1L }
+      assertEquals(1L, ingress.counts().resubscriptions)
+      ingress.close()
+    }
+
+  @Test
+  fun aFailureToAskWhetherApprovalsAreAwaitedResubscribes() =
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE).use { relay ->
+      relay.store(filler(1, 100))
+      relay.serveOneConnection()
+      relay.serveOneConnection()
+      val asked = AtomicInteger()
+      val ingress =
+        ingress(
+          Connections(relay.url, relay.url),
+          RecordingSink { ApprovalAccept.RECORDED },
+          approvalsAwaited = {
+            check(asked.incrementAndGet() > 1) { "the read failed" }
+            true
+          },
+        )
+      ingress.runUntil { ingress.counts().pages == 1L }
+      assertEquals(1L, ingress.counts().resubscriptions)
+      ingress.close()
+    }
+
+  @Test
+  fun aRelayThatRefusesAPageEndsTheWalkCountedAndKeepsTheSubscription() =
+    FakeRelay().use { relay ->
+      val live = approvalWrap("g-live", "n".repeat(64), "d".repeat(64), at = 5_000)
+      relay.serve { session ->
+        session.nextClientText(5_000) ?: error("no REQ")
+        val id = ApprovalIngress.SUBSCRIPTION_ID
+        session.sendText("[\"EVENT\",\"$id\"," + filler(1, 100).serialize() + "]")
+        session.sendText("[\"EOSE\",\"$id\"]")
+        val page = session.nextClientText(5_000) ?: error("no page")
+        check(page.startsWith("[\"REQ\",\"${ApprovalIngress.PAGE_SUBSCRIPTION_PREFIX}1\",")) { "unexpected $page" }
+        session.sendText("[\"CLOSED\",\"${ApprovalIngress.PAGE_SUBSCRIPTION_PREFIX}1\",\"restricted: no\"]")
+        session.sendText("[\"EVENT\",\"$id\"," + live.serialize() + "]")
+        session.nextClientText(10_000)
+      }
+      val sink = RecordingSink { ApprovalAccept.RECORDED }
+      val ingress = ingress(Connections(relay.url), sink, approvalsAwaited = { true })
+      ingress.runUntil { sink.seen.size == 1 }
+      assertEquals(1L, ingress.counts().stalledWalks)
+      assertEquals(0L, ingress.counts().interruptions)
+      relay.assertScriptClean()
+      ingress.close()
+    }
+
+  @Test
+  fun aLowStampedWrapArrivingBetweenPagesDoesNotMoveTheWalk() {
+    for (order in StoredEventRelay.UntilOrder.entries) {
+      StoredEventRelay(order, clamp = 2).use { relay ->
+        val older = approvalWrap("g-older", "n".repeat(64), "d".repeat(64), at = 100)
+        relay.store(older, filler(1, 200), filler(2, 300), filler(3, 400), filler(4, 500))
+        relay.serveOneConnection()
+        val sink = RecordingSink { ApprovalAccept.RECORDED }
+        val asked = AtomicInteger()
+        val ingress =
+          ingress(
+            Connections(relay.url),
+            sink,
+            approvalsAwaited = {
+              // Asked at a page's EOSE, before its CLOSE, so this reaches the page and the subscription.
+              if (asked.incrementAndGet() == 2) relay.publish(filler(5, 1))
+              true
+            },
+          )
+        ingress.runUntil { sink.seen.any { it.gateId == "g-older" } }
+        assertEquals("under $order", 0L, ingress.counts().stalledWalks)
+        ingress.close()
+      }
+    }
+  }
+
+  @Test
+  fun aMailboxPastTheConnectionsQueueIsWalkedWithoutBreakingTheConnection() =
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE, clamp = 5_000).use { relay ->
+      assertTrue(ApprovalIngress.PAGE_LIMIT < RelayConnection.MAX_QUEUED_MESSAGES)
+      val wraps = RelayConnection.MAX_QUEUED_MESSAGES * 2
+      relay.store(approvalWrap("g-older", "n".repeat(64), "d".repeat(64), at = 100))
+      relay.store(*Array(wraps) { filler(it + 1, 1_000L + it) })
+      relay.serveOneConnection()
+      val sink = RecordingSink { ApprovalAccept.RECORDED }
+      val ingress = ingress(Connections(relay.url), sink, approvalsAwaited = { true })
+      ingress.runUntil { sink.seen.isNotEmpty() }
+      assertEquals(0L, ingress.counts().interruptions)
+      assertTrue(
+        "every REQ carries the limit: ${relay.requests.filterNot { "\"limit\":${ApprovalIngress.PAGE_LIMIT}" in it }}",
+        relay.requests.all { "\"limit\":${ApprovalIngress.PAGE_LIMIT}" in it },
+      )
+      val lead = Bip340.xonlyPubkeyHex(LEAD_SECRET)
+      assertTrue(
+        "every REQ asks for wraps to the lead alone: ${relay.requests}",
+        relay.requests.all { "\"kinds\":[${Nip59.GIFT_WRAP_KIND}]" in it && "\"#p\":[\"$lead\"]" in it },
+      )
+      ingress.close()
+    }
+
+  @Test
+  fun anEoseRepeatedAfterAWalkHasEndedChangesNothing() =
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        session.nextClientText(5_000) ?: error("no REQ")
+        val id = ApprovalIngress.SUBSCRIPTION_ID
+        val page = "${ApprovalIngress.PAGE_SUBSCRIPTION_PREFIX}1"
+        session.sendText("[\"EVENT\",\"$id\"," + filler(1, 100).serialize() + "]")
+        session.sendText("[\"EOSE\",\"$id\"]")
+        session.nextClientText(5_000) ?: error("no page")
+        session.sendText("[\"EVENT\",\"$page\"," + filler(1, 100).serialize() + "]")
+        session.sendText("[\"EOSE\",\"$page\"]")
+        session.sendText("[\"EOSE\",\"$page\"]")
+        session.nextClientText(10_000)
+      }
+      val ingress = ingress(Connections(relay.url), RecordingSink { ApprovalAccept.RECORDED }, approvalsAwaited = { true })
+      ingress.runUntil { ingress.counts().malformed == 2L }
+      repeat(6) { ingress.step(Duration.ofMillis(50)) }
+      assertEquals(0L, ingress.counts().stalledWalks)
+      assertEquals(1L, ingress.counts().pages)
+      relay.assertScriptClean()
+      ingress.close()
+    }
+
+  @Test
+  fun aRepeatedEoseForTheSubscriptionDoesNotEndThePageInProgress() =
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        session.nextClientText(5_000) ?: error("no REQ")
+        val id = ApprovalIngress.SUBSCRIPTION_ID
+        session.sendText("[\"EVENT\",\"$id\"," + filler(1, 100).serialize() + "]")
+        session.sendText("[\"EOSE\",\"$id\"]")
+        session.nextClientText(5_000) ?: error("no page")
+        session.sendText("[\"EOSE\",\"$id\"]")
+        session.nextClientText(10_000)
+      }
+      val ingress = ingress(Connections(relay.url), RecordingSink { ApprovalAccept.RECORDED }, approvalsAwaited = { true })
+      ingress.runUntil { ingress.counts().pages == 1L }
+      repeat(6) { ingress.step(Duration.ofMillis(50)) }
+      assertEquals(1L, ingress.counts().pages)
+      assertEquals(0L, ingress.counts().stalledWalks)
+      relay.assertScriptClean()
+      ingress.close()
+    }
+
+  @Test
+  fun anEoseOrClosedForAPageNobodyAskedForChangesNothing() =
+    FakeRelay().use { relay ->
+      relay.serve { session ->
+        session.nextClientText(5_000) ?: error("no REQ")
+        val page = "${ApprovalIngress.PAGE_SUBSCRIPTION_PREFIX}1"
+        // A relay's EOSE and CLOSED for the page before any page was asked for.
+        session.sendText("[\"EOSE\",\"$page\"]")
+        session.sendText("[\"CLOSED\",\"$page\",\"restricted: no\"]")
+        session.sendText("[\"EOSE\",\"${ApprovalIngress.SUBSCRIPTION_ID}\"]")
+        session.nextClientText(10_000)
+      }
+      val asked = AtomicInteger()
+      val ingress =
+        ingress(
+          Connections(relay.url),
+          RecordingSink { ApprovalAccept.RECORDED },
+          approvalsAwaited = {
+            asked.incrementAndGet()
+            true
+          },
+        )
+      repeat(6) { ingress.step(Duration.ofMillis(50)) }
+      assertEquals(0L, ingress.counts().stalledWalks)
+      assertEquals("an empty replay has nothing to walk back from", 0, asked.get())
+      ingress.close()
+    }
+
   @Test
   fun closeZeroesTheLeadKeyAndEndsTheSteps() {
     val key = SecretKeyHex.ofHexString(LEAD_SECRET)
@@ -329,6 +651,7 @@ class ApprovalIngressTest {
         ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(10)),
         ReconnectingSubscription.Backoff(Duration.ofMillis(10), Duration.ofMillis(10)),
         key,
+        { false },
       ) {
         ApprovalAccept.RECORDED
       }
@@ -341,34 +664,9 @@ class ApprovalIngressTest {
   @Test
   fun anApprovalOverTheRelayReleasesARealHostsGateAndItsReplayAddsNothing() =
     FakeRelay().use { relay ->
-      val dir = tmp.newFolder()
-      File(dir, "ticket.txt").writeText("t1\n")
-      val store = SqliteStore(dir.absolutePath, componentId = "lead")
-      val auth =
-        LeadAuth(
-          AllowList(listOf(Principal("operator", "authorizer", listOf(SchemeKey("bip340", APPROVER_PUB))))),
-          Bip340ApprovalVerifier,
-          oneOfOne("operator"),
-        )
-      val host =
-        ticketLead(
-          store = store,
-          cognition = ScriptedCognition(),
-          podRunner = FakePodRunner(),
-          podSpec = PodSpec.fixture(),
-          ticketSource = FileTicketSource(File(dir, "ticket.txt")),
-          workdir = dir,
-          effects = EffectReceiver(dir.absolutePath),
-          leadAuth = auth,
-          timers = TimerService { _, _ -> },
-        )
-      val gateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
-      host.driveUntilQuiescent()
-      // The nonce the gate-open minted, as the journal holds it: what a notice would carry.
-      val issued =
-        store.readAll().single { it.kind == LeadKinds.NONCE_ISSUED }.let { Json.parseToJsonElement(it.payloadJson).jsonObject }
-      assertEquals(gateId, issued.getValue("gateId").jsonPrimitive.content)
-      val wrap = approvalWrap(gateId, issued.getValue("nonce").jsonPrimitive.content, issued.getValue("payloadDigest").jsonPrimitive.content)
+      val store = SqliteStore(tmp.newFolder().absolutePath, componentId = "lead")
+      val host = leadWithAnOpenGate(store)
+      val wrap = approvalOfTheOpenGate(store)
       relay.replays(wrap, wrap)
       val ingress = ingress(Connections(relay.url), host::injectApproval)
       ingress.runUntil { ingress.counts().accepted.values.sum() == 2L }
@@ -380,18 +678,94 @@ class ApprovalIngressTest {
       store.close()
     }
 
+  @Test
+  fun anApprovalCrowdedOutOfTheReplayReleasesARealHostsGateAndTheWalkThenEnds() =
+    StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE, clamp = 2).use { relay ->
+      val store = SqliteStore(tmp.newFolder().absolutePath, componentId = "lead")
+      val host = leadWithAnOpenGate(store)
+      relay.store(approvalOfTheOpenGate(store, at = 100), filler(1, 200), filler(2, 300), filler(3, 400), filler(4, 500))
+      relay.store(filler(5, 50), filler(6, 40))
+      relay.serveOneConnection()
+      val ingress = ingress(Connections(relay.url), host::injectApproval, approvalsAwaited = host::approvalsAwaited)
+      ingress.runUntil { ingress.counts().accepted[ApprovalAccept.RELEASED] == 1L }
+      repeat(20) { ingress.step(Duration.ofMillis(50)) }
+      assertEquals("one release", 1, store.readAll().count { it.kind == KIND_GATE_RELEASED })
+      assertEquals(
+        "nothing is awaited after the release, so no page goes below the approval: ${relay.requests}",
+        4,
+        relay.requests.size,
+      )
+      ingress.close()
+      store.close()
+    }
+
+  /** A ticket lead with [store] as its journal, whose gate is open and whose one approver is the
+   * test's, driven until it waits on that approval. */
+  private fun leadWithAnOpenGate(store: SqliteStore): AgentHost<*> {
+    val dir = tmp.newFolder()
+    File(dir, "ticket.txt").writeText("t1\n")
+    val auth =
+      LeadAuth(
+        AllowList(listOf(Principal("operator", "authorizer", listOf(SchemeKey("bip340", APPROVER_PUB))))),
+        Bip340ApprovalVerifier,
+        oneOfOne("operator"),
+      )
+    val host =
+      ticketLead(
+        store = store,
+        cognition = ScriptedCognition(),
+        podRunner = FakePodRunner(),
+        podSpec = PodSpec.fixture(),
+        ticketSource = FileTicketSource(File(dir, "ticket.txt")),
+        workdir = dir,
+        effects = EffectReceiver(dir.absolutePath),
+        leadAuth = auth,
+        timers = TimerService { _, _ -> },
+      )
+    host.driveUntilQuiescent()
+    return host
+  }
+
+  /** A wrap carrying the approval of the gate [leadWithAnOpenGate] opened. */
+  private fun approvalOfTheOpenGate(store: SqliteStore, at: Long = 1_700_000_000): NostrEvent {
+    val gateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
+    // The nonce the gate-open minted, as the journal holds it: what a notice would carry.
+    val issued =
+      store.readAll().single { it.kind == LeadKinds.NONCE_ISSUED }.let { Json.parseToJsonElement(it.payloadJson).jsonObject }
+    assertEquals(gateId, issued.getValue("gateId").jsonPrimitive.content)
+    return approvalWrap(
+      gateId,
+      issued.getValue("nonce").jsonPrimitive.content,
+      issued.getValue("payloadDigest").jsonPrimitive.content,
+      at = at,
+    )
+  }
+
   private fun approvalWrap(
     gateId: String,
     nonce: String,
     digest: String,
     lead: RecipientKey = RecipientKey.of(Bip340.xonlyPubkeyHex(LEAD_SECRET)),
+    at: Long = 1_700_000_000,
   ): NostrEvent {
     // Signed the way an approver's client signs, so the end-to-end cell runs that output through the
     // lead's classifier.
     val carrier = ApprovalSigning.sign(GateOpenNotice(gateId, digest, nonce, "the artifact"), bytes(APPROVER_SECRET), AUX)
-    val encoding = encodeApproval(bytes(APPROVER_SECRET), lead, carrier, 1_700_000_000, 1_699_999_000, AUX, AUX)
+    val encoding = encodeApproval(bytes(APPROVER_SECRET), lead, carrier, at, 1_699_999_000, AUX, AUX)
     return (encoding as GiftWrapEncoding.Wrapped).event
   }
+
+  /** A wrap to the lead by its kind and tag alone, which does not open: it takes up a relay's window. */
+  private fun filler(n: Int, at: Long) =
+    NostrEvent(
+      id = "%064x".format(n),
+      pubkey = "00".repeat(32),
+      createdAt = at,
+      kind = Nip59.GIFT_WRAP_KIND,
+      tags = listOf(listOf("p", Bip340.xonlyPubkeyHex(LEAD_SECRET))),
+      content = "",
+      sig = "00".repeat(64),
+    )
 
   private fun rumorWrap(rumor: Rumor): NostrEvent {
     val encoding =

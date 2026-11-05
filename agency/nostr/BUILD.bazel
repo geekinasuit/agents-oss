@@ -36,6 +36,8 @@ kt_jvm_library(
         "Nip59.kt",
         "NostrEvent.kt",
         "NostrWire.kt",
+        # Walking back through a relay's stored events with `until`.
+        "UntilPager.kt",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -235,6 +237,18 @@ kt_jvm_library(
     srcs = ["FakeRelay.kt"],
     # The approval ingress's cells in //agency/wiring drive a subscription over it too.
     visibility = ["//agency/wiring:__pkg__"],
+)
+
+# The until walk's decisions, page by page. Hermetic: no relay, no native.
+kt_jvm_test(
+    name = "until_pager_test",
+    size = "small",
+    srcs = ["UntilPagerTest.kt"],
+    test_class = "com.geekinasuit.agency.nostr.UntilPagerTest",
+    deps = [
+        ":nostr",
+        "@maven//:junit_junit",
+    ],
 )
 
 # A relay double with a store, over fake_relay: it answers a REQ from what it holds, so a cell can ask

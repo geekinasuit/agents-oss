@@ -178,6 +178,7 @@ object ScriptedLeadRunner {
             backoff = BACKOFF,
             resubscribeBackoff = RESUBSCRIBE_BACKOFF,
             leadKey = key,
+            approvalsAwaited = host::approvalsAwaited,
             sink = host::injectApproval,
           )
         }

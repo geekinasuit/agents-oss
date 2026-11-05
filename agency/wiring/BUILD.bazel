@@ -204,6 +204,7 @@ kt_jvm_test(
         "//agency/nostr",
         "//agency/nostr:fake_relay",
         "//agency/nostr:relay",
+        "//agency/nostr:stored_event_relay",
         "//agency/pod",
         "//agency/shared/auth",
         "//agency/shared/journal",
