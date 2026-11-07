@@ -50,8 +50,8 @@ internal data class HostState(
   override val issuedNonces: Map<String, IssuedNonce> = emptyMap(),
   val consumedNonces: Set<String> = emptySet(),
   /** Nonces whose gate-open announce is final ([HostKinds.GATE_OPEN_NOTIFIED] without `retry`):
-   * announced, not announced because no sink is wired or the artifact could not be inlined, or
-   * failed on its last attempt. Keyed by the NONCE, not the gate: a nonce is single-use and bound
+   * announced, or not announced because no sink is wired, the artifact could not be inlined, or the
+   * sink can never send it. Keyed by the NONCE, not the gate: a nonce is single-use and bound
    * to one (gate, digest), so a gate re-opened on a new digest mints a NEW nonce and is announced
    * afresh, while a final one is never announced again. The notify arm reads this to stop; a
    * marker that says the announce will be sent again counts in [failedAnnounces] instead.
@@ -65,7 +65,7 @@ internal data class HostState(
   override val failedAnnounces: Map<String, Int> = emptyMap(),
   /** Nonce → how many of the attempts in [failedAnnounces] were not attempts at all: the bound copy
    * was not read, for a cause outside it (a marker with `notRead`). The daemon counts only the
-   * rest toward the bound on a failing sink's attempts. Scoped: the workflow's scope end clears
+   * rest toward the attempt that escalates a failing sink. Scoped: the workflow's scope end clears
    * it. */
   override val notReadAnnounces: Map<String, Int> = emptyMap(),
   /** gateId → approvals that RE-VERIFIED at fold time (signature over preimage, key in the
