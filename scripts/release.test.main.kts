@@ -95,7 +95,7 @@ eq("blank descriptions drop, subjects survive verbatim", listOf("subj one (#12)"
 // ---- writeReproducibleTarGz ----
 
 val fixtureRoot = createTempDirectory("release-test-fixture").toFile()
-Runtime.getRuntime().addShutdownHook(Thread { fixtureRoot.deleteRecursively() })
+Runtime.getRuntime().addShutdownHook(Thread { ReleaseCore.deleteTreeWithoutFollowingLinks(fixtureRoot) })
 File(fixtureRoot, "a").mkdirs()
 File(fixtureRoot, "b").mkdirs()
 File(fixtureRoot, "zed.txt").writeText("last alphabetically, first in the list\n")
@@ -208,6 +208,25 @@ GZIPOutputStream(evil.outputStream()).use { gz ->
 refuses("a path-traversal entry is refused") {
     ReleaseCore.extractTarGz(evil, File(fixtureRoot, "evil-out"))
 }
+
+// ---- deleteTreeWithoutFollowingLinks ----
+
+// A tree shaped like a Bazel output base: a link to a directory outside it, a link to a file
+// outside it, and a read-only directory with a file in it.
+val outsideDir = File(fixtureRoot, "outside-dir").apply { mkdirs() }
+val outsideInDir = File(outsideDir, "precious.txt").apply { writeText("keep\n") }
+val outsideFile = File(fixtureRoot, "outside-file.txt").apply { writeText("keep\n") }
+val doomed = File(fixtureRoot, "doomed").apply { mkdirs() }
+Files.createSymbolicLink(File(doomed, "dir-link").toPath(), outsideDir.toPath())
+Files.createSymbolicLink(File(doomed, "file-link").toPath(), outsideFile.toPath())
+val readOnlyDir = File(doomed, "read-only").apply { mkdirs() }
+File(readOnlyDir, "held.txt").writeText("gone\n")
+readOnlyDir.setWritable(false, false)
+
+ReleaseCore.deleteTreeWithoutFollowingLinks(doomed)
+ok("the tree is gone, read-only directory included", !doomed.exists())
+ok("a file behind a directory link survives", outsideInDir.isFile)
+ok("a file a link points at survives", outsideFile.isFile)
 
 // ---- verdict ----
 

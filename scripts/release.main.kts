@@ -123,7 +123,7 @@ fun runStreaming(dir: File, vararg cmd: String): Int =
  */
 fun consumerSmoke(asset: File, moduleName: String, version: String) {
     val probeRoot = createTempDirectory("release-consumer-$moduleName").toFile()
-    Runtime.getRuntime().addShutdownHook(Thread { probeRoot.deleteRecursively() })
+    Runtime.getRuntime().addShutdownHook(Thread { ReleaseCore.deleteTreeWithoutFollowingLinks(probeRoot) })
 
     val moduleDir = File(probeRoot, "module")
     ReleaseCore.extractTarGz(asset, moduleDir)
@@ -329,7 +329,7 @@ class Release : CliktCommand(name = "release") {
         // shutdown hook is the one place that sees every exit. Nothing below hands out
         // workDir paths that outlive the run except the uploaded asset, which gh has
         // already read by then.
-        Runtime.getRuntime().addShutdownHook(Thread { workDir.deleteRecursively() })
+        Runtime.getRuntime().addShutdownHook(Thread { ReleaseCore.deleteTreeWithoutFollowingLinks(workDir) })
         val asset = File(workDir, assetName)
         val trackedPaths = facts.files.lines().map { it.trim() }.filter { it.isNotEmpty() }
         ReleaseCore.writeReproducibleTarGz(File("."), trackedPaths, asset)
