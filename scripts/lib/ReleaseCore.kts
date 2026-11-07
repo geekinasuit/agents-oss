@@ -17,7 +17,12 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import java.io.File
+import java.io.IOException
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
@@ -184,6 +189,40 @@ object ReleaseCore {
             }
         }
         return names
+    }
+
+    /**
+     * Remove [root] and everything beneath it, unlinking a symbolic link rather than walking
+     * through it, so whatever a link points at is left alone.
+     *
+     * `File.deleteRecursively` must not be used on a tree a build has touched: it decides whether
+     * to descend with `File.isDirectory`, which resolves links, so it deletes the CONTENTS of
+     * every directory a link reaches. A Bazel output base holds links into the machine: its
+     * `install` link, an Android SDK's folders, a local JDK. `Files.walkFileTree` follows no link
+     * unless told to.
+     *
+     * Bazel leaves read-only directories in an output base, so each real directory is made
+     * owner-writable before its entries are removed. Throws [java.io.IOException] when an entry
+     * cannot be removed.
+     */
+    fun deleteTreeWithoutFollowingLinks(root: File) {
+        Files.walkFileTree(root.toPath(), object : SimpleFileVisitor<Path>() {
+            override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                dir.toFile().setWritable(true, true)
+                return FileVisitResult.CONTINUE
+            }
+
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                Files.delete(file)
+                return FileVisitResult.CONTINUE
+            }
+
+            override fun postVisitDirectory(dir: Path, exc: IOException?): FileVisitResult {
+                if (exc != null) throw exc
+                Files.delete(dir)
+                return FileVisitResult.CONTINUE
+            }
+        })
     }
 
     /**
