@@ -1,0 +1,54 @@
+[
+  {
+    "description": "A plan gate, as a lead opens one.",
+    "secretKey": "0000000000000000000000000000000000000000000000000000000000000003",
+    "auxRand": "0000000000000000000000000000000000000000000000000000000000000000",
+    "gateId": "plan-approval:t1",
+    "payloadDigest": "ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428",
+    "nonce": "c2939415473f256ce7c9f81340aa9ce175391b19c7601a76901cecace23a14a4",
+    "publicKey": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+    "preimage": "[\"agency/gate-approval/v1\",\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\",\"plan-approval:t1\",\"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428\",\"c2939415473f256ce7c9f81340aa9ce175391b19c7601a76901cecace23a14a4\"]",
+    "preimageSha256": "a62cad6104b278abfaaa71c8cbc81ecd0466549dadd9476d828a66c8cc877db3",
+    "signature": "1ded7a9c6e5ef4a47af73c18127552991c6d4fad001918926c66d5bf8123cb4621f25f12d8fe565ac7271bf894e756cd59ba98842e4cf1ccbae4f8a1b67b8eaa",
+    "rumorContent": "{\"gateId\":\"plan-approval:t1\",\"nonce\":\"c2939415473f256ce7c9f81340aa9ce175391b19c7601a76901cecace23a14a4\",\"payloadDigest\":\"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428\",\"evidence\":{\"schemeId\":\"bip340\",\"publicKey\":\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\",\"signature\":\"1ded7a9c6e5ef4a47af73c18127552991c6d4fad001918926c66d5bf8123cb4621f25f12d8fe565ac7271bf894e756cd59ba98842e4cf1ccbae4f8a1b67b8eaa\",\"gateId\":\"plan-approval:t1\",\"payloadDigest\":\"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428\",\"nonce\":\"c2939415473f256ce7c9f81340aa9ce175391b19c7601a76901cecace23a14a4\",\"signedPreimage\":\"[\\\"agency/gate-approval/v1\\\",\\\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\\\",\\\"plan-approval:t1\\\",\\\"ade2b1b3729172dccb97d57fcd23c1e7a79634cfda71b0d6eaed4f54e5298428\\\",\\\"c2939415473f256ce7c9f81340aa9ce175391b19c7601a76901cecace23a14a4\\\"]\"}}"
+  },
+  {
+    "description": "A gate id that needs every kind of escaping.",
+    "secretKey": "b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d9045190cfef",
+    "auxRand": "0000000000000000000000000000000000000000000000000000000000000001",
+    "gateId": "plan \"\u00e9\"\n/\\\u0001\u007f\ud83d\ude00",
+    "payloadDigest": "95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48",
+    "nonce": "7db2f2146db20f55ef71b3f32faf816eeef1cee8bc7a474d83b14e3a025725c4",
+    "publicKey": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+    "preimage": "[\"agency/gate-approval/v1\",\"dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659\",\"plan \\\"\u00e9\\\"\\n/\\\\\\u0001\u007f\ud83d\ude00\",\"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48\",\"7db2f2146db20f55ef71b3f32faf816eeef1cee8bc7a474d83b14e3a025725c4\"]",
+    "preimageSha256": "6fd0a0ae73f1e0760c2abe2dad1e229cb6c59301f7bee1a8fe352140b89d2633",
+    "signature": "3c76ab0f3276f957df123658e52f16e9c3f83a9c6bec2d1753d3cb199c6e8d510727eac3870ff8f27739e58d0d6a29b15a92a02eb508dfbaf136d6af20811e8b",
+    "rumorContent": "{\"gateId\":\"plan \\\"\u00e9\\\"\\n/\\\\\\u0001\u007f\ud83d\ude00\",\"nonce\":\"7db2f2146db20f55ef71b3f32faf816eeef1cee8bc7a474d83b14e3a025725c4\",\"payloadDigest\":\"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48\",\"evidence\":{\"schemeId\":\"bip340\",\"publicKey\":\"dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659\",\"signature\":\"3c76ab0f3276f957df123658e52f16e9c3f83a9c6bec2d1753d3cb199c6e8d510727eac3870ff8f27739e58d0d6a29b15a92a02eb508dfbaf136d6af20811e8b\",\"gateId\":\"plan \\\"\u00e9\\\"\\n/\\\\\\u0001\u007f\ud83d\ude00\",\"payloadDigest\":\"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48\",\"nonce\":\"7db2f2146db20f55ef71b3f32faf816eeef1cee8bc7a474d83b14e3a025725c4\",\"signedPreimage\":\"[\\\"agency/gate-approval/v1\\\",\\\"dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659\\\",\\\"plan \\\\\\\"\u00e9\\\\\\\"\\\\n/\\\\\\\\\\\\u0001\u007f\ud83d\ude00\\\",\\\"95d1184859ccb42539b7390cd98379fdaf1248de07c01d7554d9df7aa73f2f48\\\",\\\"7db2f2146db20f55ef71b3f32faf816eeef1cee8bc7a474d83b14e3a025725c4\\\"]\"}}"
+  },
+  {
+    "description": "A gate id that needs the remaining short escapes and hex letters.",
+    "secretKey": "c90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b14e5c9",
+    "auxRand": "c87aa53824b4d7ae2eb035a2b5bbbccc080e76cdc6d1692c4b0b62d798e6d906",
+    "gateId": "commit-approval:\b\f\r\t\u000b\u001f",
+    "payloadDigest": "6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
+    "nonce": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+    "publicKey": "dd308afec5777e13121fa72b9cc1b7cc0139715309b086c960e18fd969774eb8",
+    "preimage": "[\"agency/gate-approval/v1\",\"dd308afec5777e13121fa72b9cc1b7cc0139715309b086c960e18fd969774eb8\",\"commit-approval:\\b\\f\\r\\t\\u000b\\u001f\",\"6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b\",\"1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f\"]",
+    "preimageSha256": "29743eea11476b2273ab7ad3705a74f36aac8de8b6901a4e88101167120f5c8c",
+    "signature": "d78257df3f5ff55e7d992645a1ae5804a1f6fb5e7399e2ebae00d57860c2073b770e44b055ae7779dbfc370f1177c6a7bede5d0ceb1efd1e58db4e8d0910efe6",
+    "rumorContent": "{\"gateId\":\"commit-approval:\\b\\f\\r\\t\\u000b\\u001f\",\"nonce\":\"1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f\",\"payloadDigest\":\"6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b\",\"evidence\":{\"schemeId\":\"bip340\",\"publicKey\":\"dd308afec5777e13121fa72b9cc1b7cc0139715309b086c960e18fd969774eb8\",\"signature\":\"d78257df3f5ff55e7d992645a1ae5804a1f6fb5e7399e2ebae00d57860c2073b770e44b055ae7779dbfc370f1177c6a7bede5d0ceb1efd1e58db4e8d0910efe6\",\"gateId\":\"commit-approval:\\b\\f\\r\\t\\u000b\\u001f\",\"payloadDigest\":\"6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b\",\"nonce\":\"1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f\",\"signedPreimage\":\"[\\\"agency/gate-approval/v1\\\",\\\"dd308afec5777e13121fa72b9cc1b7cc0139715309b086c960e18fd969774eb8\\\",\\\"commit-approval:\\\\b\\\\f\\\\r\\\\t\\\\u000b\\\\u001f\\\",\\\"6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b\\\",\\\"1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f\\\"]\"}}"
+  },
+  {
+    "description": "A gate id with what many encoders escape and this contract does not.",
+    "secretKey": "1111111111111111111111111111111111111111111111111111111111111111",
+    "auxRand": "2222222222222222222222222222222222222222222222222222222222222222",
+    "gateId": "plan-approval:a<b>&c\u2028\u2029",
+    "payloadDigest": "3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a",
+    "nonce": "4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c",
+    "publicKey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+    "preimage": "[\"agency/gate-approval/v1\",\"4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa\",\"plan-approval:a<b>&c\u2028\u2029\",\"3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a\",\"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\"]",
+    "preimageSha256": "a57416dd264827deb7fcb9422ac23893f8e9c5b39782e53f871af519fd048c35",
+    "signature": "012e649c6b86682bb49b0ed012f3f88a01d6d9377d6b7ad178febb52917fd0b9b69361b032f60cb8d437634de4d64c337a24278389fd978be91b1a89be31492c",
+    "rumorContent": "{\"gateId\":\"plan-approval:a<b>&c\u2028\u2029\",\"nonce\":\"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\",\"payloadDigest\":\"3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a\",\"evidence\":{\"schemeId\":\"bip340\",\"publicKey\":\"4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa\",\"signature\":\"012e649c6b86682bb49b0ed012f3f88a01d6d9377d6b7ad178febb52917fd0b9b69361b032f60cb8d437634de4d64c337a24278389fd978be91b1a89be31492c\",\"gateId\":\"plan-approval:a<b>&c\u2028\u2029\",\"payloadDigest\":\"3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a\",\"nonce\":\"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\",\"signedPreimage\":\"[\\\"agency/gate-approval/v1\\\",\\\"4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa\\\",\\\"plan-approval:a<b>&c\u2028\u2029\\\",\\\"3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a\\\",\\\"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\\\"]\"}}"
+  }
+]

@@ -186,6 +186,42 @@ kt_jvm_test(
     ],
 )
 
+# An approver built from agency/APPROVING.md alone, sharing no code with the real signer.
+kt_jvm_library(
+    name = "spec_approver",
+    testonly = True,
+    srcs = ["SpecApprover.kt"],
+)
+
+# The written contract for approvers against the code: the published vectors, the approver above, and
+# the real signer and verifier (native at runtime). It needs its vector file at runtime, so it is a
+# java_test wrapping a library, as //agency/nostr:nip44_test is, for $(rlocationpath) in `env`.
+kt_jvm_library(
+    name = "approval_contract_test_lib",
+    testonly = True,
+    srcs = ["ApprovalContractTest.kt"],
+    deps = [
+        ":spec_approver",
+        "//agency/nostr",
+        "//agency/shared/auth",
+        "@maven//:junit_junit",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+        "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    ],
+)
+
+java_test(
+    name = "approval_contract_test",
+    size = "small",
+    data = ["testdata/approval-vectors.json"],
+    env = {"APPROVAL_VECTORS": "$(rlocationpath testdata/approval-vectors.json)"},
+    test_class = "com.geekinasuit.agency.wiring.ApprovalContractTest",
+    runtime_deps = [
+        ":approval_contract_test_lib",
+        "@maven//:fr_acinq_secp256k1_secp256k1_kmp_jni_jvm",
+    ],
+)
+
 # The ingress over a scripted socket relay, and once into a real ticket lead with the bip340
 # verifier, so it signs and opens gift wraps (native at runtime) and journals (sqlite at runtime).
 kt_jvm_test(
@@ -198,6 +234,7 @@ kt_jvm_test(
         "@maven//:org_xerial_sqlite_jdbc",
     ],
     deps = [
+        ":spec_approver",
         ":wiring",
         "//agency/lead",
         "//agency/lead:host",

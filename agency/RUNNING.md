@@ -140,6 +140,8 @@ java -jar approval_deploy.jar approve --relay wss://RELAY --key-file approver.ke
 
 It prints the notice again and asks you to type the first 8 characters of the digest. Only then does it sign, wrap the approval to the lead and publish it. `the relay accepted it` means only that: the lead may still refuse the approval, so check `lead_status`.
 
+To approve from another language, see [APPROVING.md](APPROVING.md).
+
 `lead_status` then shows the gate `released`, with your approval under `verified approvals`. A rejected approval on the gate's open nonce appears under `approvals rejected on arrival`, with the reason. An approval naming a spent or unknown nonce leaves no such line: the gate just stays `not released`. Check that you used the open nonce.
 
 A ticket has two gates. Releasing `plan-approval:t1` sends it to execution, and `commit-approval:t1` opens within seconds. Run `inbox` and `approve` again for that one.
