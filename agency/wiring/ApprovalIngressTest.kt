@@ -1192,6 +1192,31 @@ class ApprovalIngressTest {
     }
 
   @Test
+  fun anApprovalBuiltFromTheWrittenContractReleasesARealHostsGate() =
+    FakeRelay().use { relay ->
+      val store = SqliteStore(tmp.newFolder().absolutePath, componentId = "lead")
+      val host = leadWithAnOpenGate(store)
+      val issued = openGateNonce(store)
+      val content =
+        SpecApprover.rumorContent(
+          APPROVER_SECRET,
+          issued.getValue("gateId").jsonPrimitive.content,
+          issued.getValue("payloadDigest").jsonPrimitive.content,
+          issued.getValue("nonce").jsonPrimitive.content,
+          AUX,
+        )
+      val tags = listOf(listOf("p", Bip340.xonlyPubkeyHex(LEAD_SECRET)))
+      // The kind as the document writes it.
+      relay.replays(rumorWrap(Rumor(APPROVER_PUB, 1_700_000_000, 4901, tags, content)))
+      val ingress = ingress(Connections(relay.url), host::injectApproval)
+      ingress.runUntil { ingress.counts().accepted.values.sum() == 1L }
+      assertEquals(1L, ingress.counts().accepted[ApprovalAccept.RELEASED])
+      assertEquals("one release", 1, store.readAll().count { it.kind == KIND_GATE_RELEASED })
+      ingress.close()
+      store.close()
+    }
+
+  @Test
   fun anApprovalCrowdedOutOfTheReplayReleasesARealHostsGateAndTheWalkThenEnds() =
     StoredEventRelay(StoredEventRelay.UntilOrder.AT_OR_BEFORE, clamp = 2).use { relay ->
       val store = SqliteStore(tmp.newFolder().absolutePath, componentId = "lead")
@@ -1242,9 +1267,7 @@ class ApprovalIngressTest {
   /** A wrap carrying the approval of the gate [leadWithAnOpenGate] opened. */
   private fun approvalOfTheOpenGate(store: SqliteStore, at: Long = 1_700_000_000): NostrEvent {
     val gateId = gateIdFor(GateKinds.PLAN_APPROVAL, "t1")
-    // The nonce the gate-open minted, as the journal holds it: what a notice would carry.
-    val issued =
-      store.readAll().single { it.kind == LeadKinds.NONCE_ISSUED }.let { Json.parseToJsonElement(it.payloadJson).jsonObject }
+    val issued = openGateNonce(store)
     assertEquals(gateId, issued.getValue("gateId").jsonPrimitive.content)
     return approvalWrap(
       gateId,
@@ -1253,6 +1276,10 @@ class ApprovalIngressTest {
       at = at,
     )
   }
+
+  /** The nonce the gate-open minted, as the journal holds it: what a notice would carry. */
+  private fun openGateNonce(store: SqliteStore) =
+    store.readAll().single { it.kind == LeadKinds.NONCE_ISSUED }.let { Json.parseToJsonElement(it.payloadJson).jsonObject }
 
   private fun approvalWrap(
     gateId: String,

@@ -147,9 +147,10 @@ class AllowList(principals: List<Principal>) {
  * THAT nonce (the committing fields are exactly what such a flattening omits). The
  * mechanical layer recomputes the identity from [signedPreimage], verifies the signature
  * over it, and reads the committed key/digest/nonce out of the verified serialization; the
- * flat columns are for lookup only. [signedPreimage] is opaque here — how it serializes and
- * how an identity recomputes from it is the verifying layer's business, kept out of this
- * substrate-neutral vocabulary.
+ * flat columns are for lookup, and never authority, but an approval whose flat copies disagree
+ * with the preimage is rejected. [signedPreimage] is opaque here — how it serializes and how an
+ * identity recomputes from it is the verifying layer's business, kept out of this
+ * substrate-neutral vocabulary. `agency/APPROVING.md` is the contract for an approver.
  */
 data class ApprovalEvidence(
   val schemeId: String,
@@ -159,7 +160,8 @@ data class ApprovalEvidence(
    * the CARRIER abstraction, not any carrier's own noun, so the one field that points
    * outward still reads substrate-neutral. A convenience for locating the artifact in its
    * carrier, never a verification input: the mechanical layer recomputes identity from
-   * [signedPreimage] and never trusts this id. */
+   * [signedPreimage] and never trusts this id. Required here, and unsigned: the receiving
+   * carrier supplies it, so an approver has nothing to fill in. */
   val carrierArtifactId: String,
   val gateId: String,
   val payloadDigest: String,
