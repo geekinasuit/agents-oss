@@ -1155,14 +1155,15 @@ class AgentHost<S> internal constructor(
    * retry timer is armed at once, since the gate-open blocks the pipeline and no later wake may
    * come to arm it. The arm calls the sink again only when that timer fires, so a failing sink is
    * called once per attempt, never once per pass, with [ANNOUNCE_RETRY_DELAYS_MS] between
-   * attempts. When the last of [MAX_ANNOUNCE_ATTEMPTS] attempts fails, the announce is escalated
-   * once and its marker is final. An artifact not read is the exception: only whatever blocks the
-   * reads can end that, so it is escalated once at that attempt and sent again past it, at the
-   * last delay, until the copy is read. Such attempts are counted apart
-   * ([HostView.notReadAnnounces]), so once the copy is read the sink still gets all of its
-   * attempts. An announce no sink made ([AnnounceOutcome.NoSink]) is escalated
-   * at once, and its marker is final: no operator was asked for the approval the gate waits on.
-   * These bounds count attempts whose marker landed: a crash between an attempt and its marker
+   * attempts. Neither failure is final, because the gate waits for an approval nothing else can
+   * prompt, and a final marker would leave it unannounced for good, even across a restart. So each
+   * is escalated once, at its [ESCALATED_ANNOUNCE_ATTEMPT]th attempt, and sent again past it at the
+   * last delay until it goes through. Attempts that did not read the copy are counted apart
+   * ([HostView.notReadAnnounces]), so once the copy is read the sink still gets its attempts before
+   * it is escalated. An announce no sink made ([AnnounceOutcome.NoSink]) is escalated
+   * at once, and its marker is final: no operator was asked for the approval the gate waits on. So
+   * is one the sink can never send ([AnnounceOutcome.Unsendable]), which no retry can change.
+   * These counts are of attempts whose marker landed: a crash between an attempt and its marker
    * sends that attempt again on restart, so an escalation that landed before the crash can land a
    * second time. Each escalation comes before its marker because the other order loses it in that
    * crash.
@@ -1201,44 +1202,46 @@ class AgentHost<S> internal constructor(
             gateOpenSink.announce(GateOpenSignal(gateId, payloadDigest, nonce, resolved.content))
           } catch (e: Exception) {
             // A sink that throws has failed to deliver, as one that returns Failed has: it is sent
-            // again, and escalated only when its last attempt fails, so a flapping relay costs one
-            // escalation per nonce, not a storm. A crash between that escalation and its marker
-            // escalates once more on restart.
+            // again and escalated once, so a flapping relay costs one escalation per nonce, not a
+            // storm. A crash between that escalation and its marker escalates once more on restart.
             AnnounceOutcome.Failed("sink threw: ${e.message}")
           }
       }
     // A failure the sink reported is sent again, and so is a copy not read at all. An unresolved
-    // artifact was escalated above, and a delivery, or no sink wired, has nothing to send again.
-    // A copy not read is sent again past the attempt bound too: only the one blocking the reads can
-    // end the block, so a final marker would drop an intact announce for good, even across a restart.
-    val retryableFailure =
-      if (resolved is ArtifactResolution.Unresolved) null else outcome as? AnnounceOutcome.Failed
+    // artifact was escalated above, and a delivery, no sink wired, or an announce the sink can never
+    // send has nothing to send again.
+    val retry = resolved !is ArtifactResolution.Unresolved && outcome is AnnounceOutcome.Failed
     // Attempts that did not read the copy are counted apart, so they spend none of the attempts the
     // sink gets once the copy is read.
     val notRead = resolved is ArtifactResolution.NotRead
     val notReadBefore = host.notReadAnnounces[nonce] ?: 0
     val sinkAttempt = attempt - notReadBefore
-    val retry = retryableFailure != null && (notRead || sinkAttempt < MAX_ANNOUNCE_ATTEMPTS)
-    // An outcome that leaves the gate unannounced for good is escalated: here, or above for an
-    // unresolved artifact. The `when` is exhaustive, so an outcome added later must say whether it
-    // is escalated.
+    // An outcome that leaves the gate unannounced for a long time is escalated: here, or above for
+    // an unresolved artifact. The `when` is exhaustive, so an outcome added later must say whether
+    // it is escalated.
     val escalation =
       when (outcome) {
         is AnnounceOutcome.Announced -> null
         AnnounceOutcome.NoSink ->
           "gate-open notify had no sink for $gateId ($gateKind) — gate is open and blocking, " +
             "operator not notified"
+        is AnnounceOutcome.Unsendable ->
+          "gate-open notify cannot be sent for $gateId ($gateKind): ${outcome.detail.take(200)} — " +
+            "nonce $nonce, payload digest $payloadDigest; it is not sent again; the gate is open " +
+            "and blocking, operator not notified"
         // The detail is the sink's text, so it is cut short: the full text would push the rest of
         // the reason past the escalation's own bound. The marker keeps the detail up to that bound.
         is AnnounceOutcome.Failed ->
-          if (retryableFailure != null && !retry) {
+          if (retry && !notRead && sinkAttempt == ESCALATED_ANNOUNCE_ATTEMPT) {
             "gate-open notify failed for $gateId ($gateKind) after $sinkAttempt attempts: " +
-              "${retryableFailure.detail.take(200)} — gate is open and blocking, operator not notified"
-          } else if (notRead && notReadBefore + 1 == MAX_ANNOUNCE_ATTEMPTS) {
+              "${outcome.detail.take(200)} — nonce $nonce, payload digest $payloadDigest; " +
+              "the announce is sent again every ${ANNOUNCE_RETRY_DELAYS_MS.last() / 60_000} minutes " +
+              "until it is delivered; the gate is open and blocking, operator not notified"
+          } else if (notRead && notReadBefore + 1 == ESCALATED_ANNOUNCE_ATTEMPT) {
             "gate-open notify not sent for $gateId ($gateKind) after ${notReadBefore + 1} attempts: " +
-              "${retryableFailure?.detail?.take(200)} — the copy may be intact; the announce is " +
-              "sent again every ${ANNOUNCE_RETRY_DELAYS_MS.last() / 60_000} minutes until it is read, " +
-              "then gets the attempts any announce gets; the gate is open and blocking, operator not notified"
+              "${outcome.detail.take(200)} — the copy may be intact; the announce is " +
+              "sent again every ${ANNOUNCE_RETRY_DELAYS_MS.last() / 60_000} minutes until it is read " +
+              "and delivered; the gate is open and blocking, operator not notified"
           } else {
             null
           }
@@ -1298,6 +1301,7 @@ class AgentHost<S> internal constructor(
       is AnnounceOutcome.Announced -> "announced:${outcome.summary}"
       AnnounceOutcome.NoSink -> "no-sink"
       is AnnounceOutcome.Failed -> "failed:${outcome.detail}"
+      is AnnounceOutcome.Unsendable -> "unsendable:${outcome.detail}"
     }
 
   /** The outcome of reading a gate's inlined artifact: the verified [Resolved.content] to announce,
@@ -2014,13 +2018,14 @@ private val TASK_REF_RE = Regex("[A-Za-z0-9:._-]+")
 private const val MAX_PROPOSALS_PER_WAKE = 16
 private const val MAX_JOURNALED_STRING = 4000
 
-/** The waits before each retry of a gate-open announce the sink reported failed: the first retry
- * comes 30 s after the first failure, the last 30 min after the fourth. With the first attempt that
- * is [MAX_ANNOUNCE_ATTEMPTS] attempts over about 42 minutes; a sink down for longer is a fault the
- * operator must see, so its last failure escalates. */
+/** The waits before each retry of a gate-open announce that failed: the first retry comes 30 s
+ * after the first failure, the fourth 30 min after the fourth failure, and every later retry waits
+ * the same 30 min, until the announce goes through. */
 private val ANNOUNCE_RETRY_DELAYS_MS = listOf(30_000L, 120_000L, 600_000L, 1_800_000L)
 
-private val MAX_ANNOUNCE_ATTEMPTS = ANNOUNCE_RETRY_DELAYS_MS.size + 1
+/** The attempt whose failure is escalated, about 42 minutes after the first: a sink down for longer
+ * is a fault the operator must see, while the retries go on. */
+private val ESCALATED_ANNOUNCE_ATTEMPT = ANNOUNCE_RETRY_DELAYS_MS.size + 1
 
 /** The action a gate-open retry timer's `timer-armed` entry records. */
 private const val ANNOUNCE_RETRY_ACTION = "gate-open-announce-retry"

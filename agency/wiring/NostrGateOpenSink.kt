@@ -22,12 +22,15 @@ import java.time.Duration
  *  - no recipients: [AnnounceOutcome.NoSink], without calling [notifier], so the host escalates at
  *    once rather than retrying a sink that can never deliver;
  *  - every recipient delivered: [AnnounceOutcome.Announced];
- *  - any recipient missed, or the notice could not be built or sent at all: [AnnounceOutcome.Failed],
+ *  - a notice that cannot be built, or that is too large to wrap for a recipient:
+ *    [AnnounceOutcome.Unsendable], since sending the same signal again gets the same answer;
+ *  - any other recipient missed, or the notice could not be sent at all: [AnnounceOutcome.Failed],
  *    with a summary naming each recipient missed. The host sends the whole signal again on its backoff
- *    and escalates after its last attempt. A quorum may need more than one of the recipients, so a
- *    partial delivery is not treated as enough; a recipient told twice is harmless, since the nonce is
- *    single-use. The cost: while one recipient cannot be reached, every gate not released before the
- *    host's last retry is escalated, and each reachable recipient may get the notice once per attempt.
+ *    until every recipient has it, and escalates once along the way. A quorum may need more than one
+ *    of the recipients, so a partial delivery is not treated as enough; a recipient told twice is
+ *    harmless, since the nonce is single-use. The cost: while one recipient cannot be reached, every
+ *    gate it delays long enough is escalated, and each reachable recipient gets the notice once per
+ *    attempt, for as long as the gate stays open.
  *
  * Never throws: [announce] runs on the host's loop thread. The summary and detail are journaled, so
  * each relay message in them is cut to [MAX_MESSAGE_CHARS], and a recipient is named by the first
@@ -46,13 +49,15 @@ class NostrGateOpenSink(
 
   override fun announce(signal: GateOpenSignal): AnnounceOutcome {
     if (recipients.isEmpty()) return AnnounceOutcome.NoSink
+    val notice =
+      try {
+        GateOpenNotice(signal.gateId, signal.payloadDigest, signal.nonce, signal.artifact)
+      } catch (x: IllegalArgumentException) {
+        return AnnounceOutcome.Unsendable("notice not built: ${cut(x.message)}")
+      }
     val report =
       try {
-        notifier.notifyGateOpen(
-          GateOpenNotice(signal.gateId, signal.payloadDigest, signal.nonce, signal.artifact),
-          recipients,
-          timeout,
-        )
+        notifier.notifyGateOpen(notice, recipients, timeout)
       } catch (x: Exception) {
         return AnnounceOutcome.Failed("notice not sent: ${x.javaClass.simpleName}: ${cut(x.message)}")
       }
@@ -63,7 +68,11 @@ class NostrGateOpenSink(
         .map { (key, outcome) -> "${key.hex.take(KEY_PREFIX_CHARS)}: ${describe(outcome)}" }
     val summary =
       (listOf("delivered $delivered of ${report.outcomes.size}") + misses).joinToString("; ")
-    return if (misses.isEmpty()) AnnounceOutcome.Announced(summary) else AnnounceOutcome.Failed(summary)
+    return when {
+      misses.isEmpty() -> AnnounceOutcome.Announced(summary)
+      report.outcomes.values.any { it is NotifyOutcome.NotEncodable } -> AnnounceOutcome.Unsendable(summary)
+      else -> AnnounceOutcome.Failed(summary)
+    }
   }
 
   private fun describe(outcome: NotifyOutcome): String =

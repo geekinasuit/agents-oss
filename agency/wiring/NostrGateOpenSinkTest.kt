@@ -72,11 +72,33 @@ class NostrGateOpenSinkTest {
 
   @Test
   fun aNoticeDeliveredToNobodyFailsSoTheHostRetriesIt() {
-    for (miss in
-      listOf(NotifyOutcome.Rejected("no"), NotifyOutcome.Failed("socket closed"), NotifyOutcome.NotEncodable(50_000, 40_960))) {
+    for (miss in listOf(NotifyOutcome.Rejected("no"), NotifyOutcome.Failed("socket closed"))) {
       val outcome = NostrGateOpenSink(ScriptedNotifier { miss }, setOf(ALICE), TIMEOUT).announce(SIGNAL)
       assertTrue("$miss: $outcome", outcome is AnnounceOutcome.Failed)
     }
+  }
+
+  @Test
+  fun aNoticeTooLargeToEncodeIsUnsendableSoTheHostDoesNotRetryIt() {
+    val notifier = ScriptedNotifier { NotifyOutcome.NotEncodable(50_000, 40_960) }
+    assertEquals(
+      AnnounceOutcome.Unsendable("delivered 0 of 1; ${ALICE.hex.take(8)}: too large: 50000 > 40960 bytes"),
+      NostrGateOpenSink(notifier, setOf(ALICE), TIMEOUT).announce(SIGNAL),
+    )
+  }
+
+  @Test
+  fun anArtifactWithinTheSinksCapacityCanStillBeUnsendableThroughTheRelayNotifier() {
+    // The capacity the host checks is the artifact's bytes, and the notice adds tags and JSON
+    // escapes the artifact, so a copy the host accepts can still fail to encode.
+    val publisher = EventPublisher { _, _ -> PublishResult.Accepted }
+    val notifier = RelayNotifier(SecretKeyHex.ofHexString(LEAD_SECRET), publisher)
+    val sink = NostrGateOpenSink(notifier, setOf(ALICE), TIMEOUT)
+    val artifact = "\"".repeat(36_000)
+    assertTrue("the host would accept it", artifact.toByteArray().size <= sink.maxArtifactBytes)
+
+    val outcome = sink.announce(SIGNAL.copy(artifact = artifact))
+    assertTrue("$outcome", outcome is AnnounceOutcome.Unsendable)
   }
 
   @Test
@@ -93,11 +115,11 @@ class NostrGateOpenSinkTest {
   }
 
   @Test
-  fun aSignalNoNoticeCanCarryIsAFailureNotAThrow() {
+  fun aSignalNoNoticeCanCarryIsUnsendableNotAThrow() {
     // A lone surrogate has no UTF-8 encoding, which a notice refuses at construction.
     val signal = SIGNAL.copy(gateId = "plan-approval:" + Char(0xD800))
     val outcome = NostrGateOpenSink(ScriptedNotifier { NotifyOutcome.Delivered }, setOf(ALICE), TIMEOUT).announce(signal)
-    assertTrue(outcome is AnnounceOutcome.Failed)
+    assertTrue("$outcome", outcome is AnnounceOutcome.Unsendable)
   }
 
   @Test

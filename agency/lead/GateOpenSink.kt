@@ -19,13 +19,14 @@ import com.geekinasuit.agency.shared.text.hasReadableText
  *
  * RETURNS PROMPTLY: [announce] holds the loop thread for as long as it runs, so a sink does not
  * retry or wait inside the call. It returns [AnnounceOutcome.Failed] when it cannot deliver, and
- * the daemon sends the whole signal again on a later wake, after a backoff, for a bounded number of
- * attempts; when the last fails, the daemon escalates. So a recipient reached on an earlier attempt
- * may receive the same signal again; the nonce is single-use, so a repeat cannot authorize twice. A
- * sink that reached some recipients and not others chooses: [AnnounceOutcome.Announced] if what it
- * delivered lets the operator act, or [AnnounceOutcome.Failed] to have the whole signal sent again.
- * A sink with nowhere to announce to, such as one wired with no recipient, returns
- * [AnnounceOutcome.NoSink] instead: sending again cannot change that, so the daemon escalates at
+ * the daemon sends the whole signal again on a later wake, after a backoff, until it is delivered,
+ * and escalates once along the way. So a recipient reached on an earlier attempt may receive the
+ * same signal again; the nonce is single-use, so a repeat cannot authorize twice. A sink that
+ * reached some recipients and not others chooses: [AnnounceOutcome.Announced] if what it delivered
+ * lets the operator act, or [AnnounceOutcome.Failed] to have the whole signal sent again. A sink
+ * with nowhere to announce to, such as one wired with no recipient, returns
+ * [AnnounceOutcome.NoSink] instead, and one that can never deliver this signal returns
+ * [AnnounceOutcome.Unsendable]: sending again cannot change either, so the daemon escalates at
  * once. The retry and the escalation need the daemon's timer service to fire. A daemon under a
  * ceremony auth therefore refuses [TimerService.NOOP], which fires nothing. One under a non-ceremony
  * auth still takes it, and there a failed announce of a nonce the journal already holds is neither
@@ -85,7 +86,7 @@ data class GateOpenSignal(
  * outcome. Never thrown — a fault is [Failed], so a sink that could not deliver leaves a legible
  * record. Only a [Failed] the sink reports, or a throw from it, is sent again, when a retry timer
  * fires, never on every pass of the loop. The daemon's own [Failed] for an artifact it could not
- * resolve is final.
+ * resolve is final, and so is [Unsendable].
  */
 sealed interface AnnounceOutcome {
   /** The sink took responsibility for the announcement; [summary] is opaque to the substrate — a
@@ -99,9 +100,14 @@ sealed interface AnnounceOutcome {
   object NoSink : AnnounceOutcome
 
   /** The sink could not deliver; [detail] is journaled. The daemon sends the signal again later,
-   * when its timer service fires (see [GateOpenSink]), for a bounded number of attempts, and
-   * escalates when the last fails. A value, not a throw — the loop survives. */
+   * when its timer service fires (see [GateOpenSink]), until it is delivered, and escalates once
+   * along the way. A value, not a throw — the loop survives. */
   data class Failed(val detail: String) : AnnounceOutcome
+
+  /** The sink can never deliver this signal, however often it is sent, such as one too large for
+   * its transport to encode; [detail] is journaled. The daemon escalates at once and does not send
+   * it again. */
+  data class Unsendable(val detail: String) : AnnounceOutcome
 }
 
 /**
