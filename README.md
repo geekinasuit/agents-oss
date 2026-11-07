@@ -8,6 +8,7 @@ more generally useful.
 ## Layout
 
 - `agency/` — the agency framework (this repository's Bazel module is named `agency`).
+  [agency/RUNNING.md](agency/RUNNING.md) takes one ticket through a lead to approved gates.
 - `commons/` — shared ingredient libraries, usable independently of the framework.
 
 Status: early; APIs are unstable.
